@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Author: hakxcore
+# Gathm - A modular tool framework
+
+currentVersion="3.0.0"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+source "$SCRIPT_DIR/lib/utils.bash"
+
+# Ensure dependencies
+check_dependencies() {
+    local deps=("dialog" "pv")
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            echo "${RED}Error: $dep is required but not installed.${RESETBG}"
+            echo "Please install it using your package manager (e.g., pkg install $dep or apt install $dep)."
+            exit 1
+        fi
+    done
+    getConfiguredClient
+}
+
+# Dynamic Tool Discovery
+scan_tools() {
+    tools=()
+    tool_descs=()
+    
+    # Built-in tools
+    for dir in "$SCRIPT_DIR"/tools/*/; do
+        tool_name=$(basename "$dir")
+        # Check if a file with the same name as the directory exists, and it's an executable
+        if [[ -f "$dir/$tool_name" && -x "$dir/$tool_name" ]]; then
+            tools+=("$tool_name")
+            # Try to extract description from the tool script (looking for "Description:")
+            desc=$(grep -m 1 "Description:" "$dir/$tool_name" | sed 's/Description: //')
+            if [[ -z "$desc" ]]; then desc="No description available"; fi
+            tool_descs+=("$desc")
+        fi
+    done
+}
+
+# Main Menu
+main_menu() {
+    while true; do
+        scan_tools
+        
+        # Construct dialog menu items
+        menu_items=()
+        for i in "${!tools[@]}"; do
+            menu_items+=("${tools[$i]}" "${tool_descs[$i]}")
+        done
+        
+        exec 3>&1
+        selection=$(dialog \
+            --backtitle "Gathm Framework v$currentVersion" \
+            --title "Main Menu" \
+            --clear \
+            --cancel-label "Exit" \
+            --menu "Select a tool to run:" 20 70 15 \
+            "${menu_items[@]}" \
+            2>&1 1>&3)
+        exit_status=$?
+        exec 3>&-
+        
+        if [ $exit_status -ne 0 ]; then
+            clear
+            echo "Goodbye!"
+            exit 0
+        fi
+        
+        run_tool "$selection"
+    done
+}
+
+run_tool() {
+    local tool=$1
+    local tool_path="$SCRIPT_DIR/$tool/$tool"
+    
+    # Ask for arguments
+    exec 3>&1
+    args=$(dialog \
+        --title "$tool" \
+        --inputbox "Enter arguments for $tool (leave empty if none):" 10 60 \
+        2>&1 1>&3)
+    exec 3>&-
+    
+    clear
+    print_header
+    echo "Running $tool..."
+    echo "------------------------------------------------"
+    
+    # Run the tool
+    # We export the common functions so tools can use them if they source utils again or if we modify them to use the env
+    (source "$SCRIPT_DIR/lib/utils.bash"; "$tool_path" $args)
+    
+    echo "------------------------------------------------"
+    pause
+}
+
+# Initialization
+check_dependencies
+main_menu

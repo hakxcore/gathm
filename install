@@ -1,0 +1,133 @@
+#!/bin/bash
+## Author: hakxcore
+## Gathm Installer (formerly Termux-Snippets)
+
+currentVersion="3.0.0"
+
+#colors
+RED="$(printf '\033[31m')" GREEN="$(printf '\033[32m')" ORANGE="$(printf '\033[33m')" BLUE="$(printf '\033[34m')"
+MAGENTA="$(printf '\033[35m')" CYAN="$(printf '\033[36m')" WHITE="$(printf '\033[37m')" BLACK="$(printf '\033[30m')" 
+REDBG="$(printf '\033[41m')" GREENBG="$(printf '\033[42m')" ORANGEBG="$(printf '\033[43m')" BLUEBG="$(printf '\033[44m')", 
+MAGENTABG="$(printf '\033[45m')" CYANBG="$(printf '\033[46m')" WHITEBG="$(printf '\033[47m')" BLACKBG="$(printf '\033[40m')"
+RESETBG="$(printf '\e[0m')" BLINK="$(printf '\033[5;31m')"
+
+##Platform Check
+if [[ "$OSTYPE" == linux-android* ]]; then
+  distro="termux"
+  platform="Termux"
+  prefix="/data/data/com.termux/files/"
+  SUDO=""
+fi
+
+if [ -z "$distro" ]; then
+  distro=$(ls /etc | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
+  platform="Debian"
+  prefix=""
+  SUDO="sudo"
+fi
+
+if [ -z "$distro" ]; then
+  if [ -f "/etc/os-release" ]; then
+    distro="$(source /etc/os-release && echo $ID)"
+  elif [ "$OSTYPE" == "darwin" ]; then
+    distro="darwin"
+    platform="Darwin"
+    prefix=""
+    SUDO="sudo"
+  else 
+    distro="invalid"
+  fi
+fi
+
+checkDialog()
+{
+  if  command -v dialog &>/dev/null; then
+    echo ""
+  else
+    echo $BLUE"Error: Dialog should be installed"$RESETBG
+    echo $BLUE"use $RED'apt install dialog'$BLUE firstly"$RESETBG
+    exit 1
+  fi 
+}
+
+checkPv()
+{
+  if  command -v pv &>/dev/null; then
+    echo ""
+  else
+    echo $BLUE"Error: pv should be installed"$RESETBG
+    echo $BLUE"use $RED'apt install pv'$BLUE firstly"$RESETBG
+    exit 1
+  fi 
+}
+
+# while-menu-dialog: a menu driven Operating system chooseing Installation  program
+
+DIALOG_CANCEL=1
+DIALOG_ESC=255
+HEIGHT=0
+WIDTH=0
+
+display_termux() {
+  dialog --prgbox $1 ./installation 50 80
+}
+
+display_debian() {
+  dialog --prgbox $1 ./installation 50 80
+}
+
+checkDialog
+checkPv
+while true; do
+  exec 3>&1
+  selection=$(dialog \
+    --backtitle "Gathm Installer" \
+    --title "Gathm Installation" \
+    --clear \
+    --cancel-label "Exit" \
+    --menu "Choose OS:" $HEIGHT $WIDTH 4 \
+    "1" "Termux" \
+    "2" "Debian OS" \
+    2>&1 1>&3)
+  exit_status=$?
+  exec 3>&-
+  case $exit_status in
+    $DIALOG_CANCEL)
+      clear
+      if command -v gathm &>/dev/null
+      then
+        echo -e ""$GREEN"\t\t\tInstallation Sucessfull." | pv -qL 15
+        echo -e "\n\t\t\t\U1F449 gathm \U1F448\n"
+        else
+        echo -e "\t\t\tInstallation Unsucessfull\n"
+      fi
+      exit
+      ;;
+    $DIALOG_ESC)
+      clear
+      echo "Program aborted." >&2
+      exit 1
+      ;;
+  esac
+  case $selection in
+    1 )
+    if [[ "$SUDO" == "" ]] 
+    then
+      display_termux "TERMUX"
+      else
+        echo "Wrong Choice"
+    fi
+    ;;
+    2 )
+    if [[ "$SUDO" == "sudo" ]] 
+    then
+      result=$(echo "Debian";)
+      display_debian "DEBIAN"
+      else
+        echo "Wrong Choice"
+    fi
+      
+      ;;
+  esac
+done
+

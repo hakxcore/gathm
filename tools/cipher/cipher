@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Encodes and decodes text using base32 and base64.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Cipher (v$currentVersion)
+
+Description: Encodes and decodes text using base32 and base64.
+
+Usage: cipher [flag] "text to process"
+  -e  <text>  Encode the given text.
+  -d  <text>  Decode the given text.
+  -h          Show this help message.
+  -v          Get the tool version.
+
+Examples:
+  cipher -e "hello world"
+  cipher -d "NBSWY3DPEB3W64TMMQ======"
+EOF
+}
+
+# --- Encryption Function ---
+encryptText()
+{
+    local text_to_encode="$1"
+    
+    print_divider
+    echo -e "$GREEN---------(Base32 Cipher)--------$RESETBG"
+    echo "$text_to_encode" | base32
+    echo -e "$GREEN-----------------------------$RESETBG"
+    
+    echo ""
+    print_divider
+    
+    echo ""
+    echo -e "$GREEN---------(Base64 Cipher)--------$RESETBG"
+    echo "$text_to_encode" | base64
+    echo -e "$GREEN-----------------------------$RESETBG"
+    print_divider
+}
+
+# --- Decryption Function ---
+decryptText()
+{
+    local text_to_decode="$1"
+
+    print_divider
+    echo -e "$GREEN----(Decrypted with Base32)----$RESETBG"
+    echo "$text_to_decode" | base32 -d
+    echo -e "$GREEN-----------------------------$RESETBG"
+
+    echo ""
+    print_divider
+
+    echo ""
+    echo -e "$GREEN----(Decrypted with Base64)----$RESETBG"
+    echo "$text_to_decode" | base64 -d
+    echo -e "$GREEN-----------------------------$RESETBG"
+    print_divider
+}
+
+# --- Option Parsing ---
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+# Check for required command-line tools
+check_dependencies base32 base64
+
+while getopts "e:d:vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+    e)  encryptText "$OPTARG"; exit 0 ;;
+    d)  decryptText "$OPTARG"; exit 0 ;;
+    :)  echo "Option -$OPTARG requires an argument." >&2; exit 1 ;;
+  esac
+done
+
+# Fallback for invalid usage
+usage
+exit 1

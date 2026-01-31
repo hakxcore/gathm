@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+## Author: Hakxcore https://github.com/hakxcore
+## Gathm Uninstaller
+
+#colors
+RED="$(printf '\033[31m')"
+GREEN="$(printf '\033[32m')"
+ORANGE="$(printf '\033[33m')"
+BLUE="$(printf '\033[34m')"
+MAGENTA="$(printf '\033[35m')"
+CYAN="$(printf '\033[36m')"
+WHITE="$(printf '\033[37m')"
+BLACK="$(printf '\033[30m')"
+RESETBG="$(printf '\e[0m')"
+
+# Platform/Prefix detection
+if [[ "$OSTYPE" == linux-android* ]]; then
+    distro="termux"
+    prefix="/data/data/com.termux/files"
+    privilage=""
+    showError="Try executing the uninstall script again."
+elif [ -f "/etc/os-release" ]; then
+    distro="$(source /etc/os-release && echo $ID)"
+    prefix=""
+    privilage="sudo"
+    showError="Try running the uninstall script again with root privileges."
+elif [ "$OSTYPE" == "darwin" ]; then
+    distro="darwin"
+    prefix=""
+    privilage="sudo"
+    showError="Try running the uninstall script again with root privileges."
+else
+    distro="invalid"
+fi
+
+if [ "$distro" == "invalid" ]; then
+    echo "$RED> Unsupported platform.$RESETBG"
+    exit 1
+fi
+
+INSTALL_DIR="$prefix/usr/share/gathm"
+BIN_DIR="$prefix/usr/bin"
+GATHM_SYMLINK="$BIN_DIR/gathm"
+
+echo "$BLUE> This script will remove the Gathm Framework.$RESETBG"
+echo "It will delete the following:"
+echo "  - Symlink: $GATHM_SYMLINK"
+echo "  - Installation Directory: $INSTALL_DIR"
+echo ""
+
+read -p "$ORANGE> Do you wish to proceed with uninstallation? [y/N]: $RESETBG" answer
+
+if [[ "$answer" != [Yy] ]]; then
+    echo "$GREEN> Uninstallation cancelled by user.$RESETBG"
+    exit 0
+fi
+
+# Remove symlink
+if [ -L "$GATHM_SYMLINK" ]; then
+    echo -n "> Removing symlink $GATHM_SYMLINK: "
+    $privilage rm "$GATHM_SYMLINK" || { echo "$RED"Failed"$RESETBG"; echo "$showError"; exit 1; }
+    echo "$GREEN"Success"$RESETBG"
+else
+    echo "> Symlink $GATHM_SYMLINK not found. Skipping."
+fi
+
+# Remove installation directory
+if [ -d "$INSTALL_DIR" ]; then
+    echo -n "> Removing directory $INSTALL_DIR: "
+    $privilage rm -rf "$INSTALL_DIR" || { echo "$RED"Failed"$RESETBG"; echo "$showError"; exit 1; }
+    echo "$GREEN"Success"$RESETBG"
+else
+    echo "> Directory $INSTALL_DIR not found. Skipping."
+fi
+
+echo -e "\n$GREEN================= UNINSTALLED ===================$RESETBG"
+echo "Gathm has been removed from your system."

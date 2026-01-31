@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: A terminal-based cryptocurrency exchange rate viewer.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="rate.sx"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Cryptocurrency (v$currentVersion)
+
+Description: A terminal-based cryptocurrency exchange rate viewer, powered by rate.sx.
+
+Usage: cryptocurrency [coin]
+  [coin]  (Optional) The symbol of the cryptocurrency to view (e.g., btc, eth).
+          If omitted, shows the main dashboard.
+
+  -h      Show this help message.
+  -v      Get the tool version.
+
+Examples:
+  cryptocurrency
+  cryptocurrency eth
+EOF
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Ensure an HTTP client is configured and internet is available
+getConfiguredClient || exit 1
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+# The API endpoint is the base URL + the first positional argument (if any)
+TARGET_URL="$API_URL"
+if [[ -n "$1" ]]; then
+    TARGET_URL="$API_URL/$1"
+fi
+
+# Use httpGet to fetch and display the data
+httpGet "$TARGET_URL"
+
+exit 0

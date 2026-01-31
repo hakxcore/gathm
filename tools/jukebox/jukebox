@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Connects to telehack.com, a simulated retro internet.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Jukebox (v$currentVersion)
+
+Description: Connects to telehack.com, a simulation of a stylized 1980s-era internet
+             full of text-based games and curiosities.
+
+Usage: jukebox [flags]
+  -h      Show this help message.
+  -v      Get the tool version.
+
+Examples:
+  jukebox
+EOF
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+
+# --- Main Driver ---
+
+# Check for required dependencies
+check_dependencies telnet
+
+echo "Connecting to telehack.com..."
+echo "This is an interactive session. Type 'help' in the session for a list of commands."
+echo "To quit, type 'exit'."
+
+# Launch the interactive telnet session
+telnet telehack.com
+
+exit 0

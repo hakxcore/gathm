@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Fetches information about an IP address using ipinfo.io.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="https://ipinfo.io"
+# This is a free-tier token that was in the original script.
+# It removes the "readme" field from the output.
+TOKEN="6f191297a455af"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+IP Info (v$currentVersion)
+
+Description: Fetches information about an IP address using ipinfo.io.
+
+Usage: ipinfo [ip_address]
+  [ip_address]  (Optional) The IP address to look up.
+                If omitted, shows information for your own IP.
+
+  -h            Show this help message.
+  -v            Get the tool version.
+
+Examples:
+  ipinfo
+  ipinfo 8.8.8.8
+EOF
+}
+
+# --- Main Logic ---
+get_ip_info()
+{
+    local target_ip="$1" # Will be empty if no arg is passed
+    local full_url="$API_URL/$target_ip?token=$TOKEN"
+    
+    # Fetch the data and pipe it directly to jq
+    httpGet "$full_url" | jq
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Check for required dependencies
+check_dependencies jq
+
+# Check for internet connection
+getConfiguredClient || exit 1
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+# The script should accept 0 or 1 arguments (the IP address)
+if [[ $# -gt 1 ]]; then
+    echo "${RED}Error: Too many arguments.${RESETBG}"
+    usage
+    exit 1
+fi
+
+# Run the main function with the first positional argument (if it exists)
+get_ip_info "$1"
+exit 0

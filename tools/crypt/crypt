@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: A wrapper around openssl to encrypt and decrypt files.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Crypt (v$currentVersion)
+
+Description: A wrapper around openssl that facilitates encrypting and decrypting files using AES-256.
+
+Usage: crypt [flag] <inputFile> <outputFile>
+  -e  Encrypt the inputFile.
+  -d  Decrypt the inputFile.
+  -h  Show this help message.
+  -v  Get the tool version.
+
+Examples:
+  crypt -e mySecrets.txt myEncryptedData.dat
+  crypt -d myEncryptedData.dat myDecryptedSecrets.txt
+EOF
+}
+
+# --- Main Logic ---
+
+# Initialize mode variable
+MODE=""
+
+# --- Option Parsing ---
+while getopts "edvh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+    e)  MODE="encrypt" ;;
+    d)  MODE="decrypt" ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Check for required dependencies
+check_dependencies openssl
+
+# Check that a mode was selected
+if [[ -z "$MODE" ]]; then
+    echo "${RED}Error: You must specify a mode, either -e (encrypt) or -d (decrypt).${RESETBG}"
+    usage
+    exit 1
+fi
+
+# Check for the correct number of arguments (inputFile and outputFile)
+if [[ $# -ne 2 ]]; then
+    echo "${RED}Error: You must provide an input file and an output file.${RESETBG}"
+    usage
+    exit 1
+fi
+
+inputFile="$1"
+outputFile="$2"
+
+if [[ "$MODE" == "encrypt" ]]; then
+    echo "Encrypting '$inputFile' to '$outputFile'..."
+    # The -pbkdf2 and -iter flags increase the number of iterations, making brute-force attacks harder.
+    openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt -a -in "$inputFile" -out "$outputFile"
+    if [[ $? -eq 0 ]]; then
+        echo "${GREEN}Successfully encrypted.${RESETBG}"
+    else
+        echo "${RED}Encryption failed. Check if '$inputFile' exists.${RESETBG}"
+        exit 1
+    fi
+elif [[ "$MODE" == "decrypt" ]]; then
+    echo "Decrypting '$inputFile' to '$outputFile'..."
+    openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -d -a -in "$inputFile" -out "$outputFile"
+    if [[ $? -eq 0 ]]; then
+        echo "${GREEN}Successfully decrypted.${RESETBG}"
+    else
+        echo "${RED}Decryption failed. Check the file and password.${RESETBG}"
+        exit 1
+    fi
+fi
+
+exit 0

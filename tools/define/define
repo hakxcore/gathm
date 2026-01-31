@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Gets the definition of a word from an online dictionary.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="https://api.dictionaryapi.dev/api/v2/entries/en/"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Define (v$currentVersion)
+
+Description: Gets the definition of a word, powered by dictionaryapi.dev.
+
+Usage: define <word>
+  <word>  The word to define.
+
+  -h      Show this help message.
+  -v      Get the tool version.
+
+Examples:
+  define hello
+  define meticulous
+EOF
+}
+
+# --- Main Logic ---
+get_definition()
+{
+    local word="$1"
+    
+    # Fetch the data using the shared httpGet function
+    local data
+    data=$(httpGet "$API_URL$word")
+    
+    # Check if data was retrieved or if the API returned a "No Definitions" error
+    if [[ -z "$data" || $(echo "$data" | jq 'if type == "array" then false elif .title == "No Definitions Found" then true else false end') == "true" ]]; then
+        echo "${RED}Error: Could not find a definition for '$word'.${RESETBG}"
+        exit 1
+    fi
+
+    # The jq filter to parse and format the output
+    local filter
+    filter='
+        .[] | .word as $word |
+        "[\($word)]",
+        (.meanings[] |
+          "(\(.partOfSpeech))",
+          (.definitions[] |
+            "  - \(.definition)",
+            (if .example then "    Example: \(.example)" else empty end)
+          )
+        )
+    '
+
+    # Process and print the data
+    echo "$data" | jq -r "$filter"
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Check for required dependencies
+check_dependencies jq
+
+# Check that a word was provided
+if [[ $# -ne 1 ]]; then
+    usage
+    exit 1
+fi
+
+# Configure the HTTP client and check for an internet connection
+getConfiguredClient || exit 1
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+# Run the main function
+get_definition "$1"
+exit 0

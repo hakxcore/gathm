@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: A simple RSS feed reader for the terminal.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+# Using BBC News as the default feed
+DEFAULT_FEED_URL="http://feeds.bbci.co.uk/news/rss.xml"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+News (v$currentVersion)
+
+Description: A simple RSS feed reader for your terminal.
+
+Usage: news [rss_feed_url]
+  [rss_feed_url]  (Optional) The URL of the RSS feed to read.
+                  Defaults to BBC News.
+
+  -h              Show this help message.
+  -v              Get the tool version.
+
+Examples:
+  news
+  news "https://www.nasa.gov/rss/dyn/breaking_news.rss"
+EOF
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Check for dependencies
+check_dependencies xmllint
+
+# Determine the feed URL
+FEED_URL="${1:-$DEFAULT_FEED_URL}"
+
+# Check for internet connection
+getConfiguredClient || exit 1
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+echo "Fetching news from: $FEED_URL"
+print_divider
+
+# Fetch the feed and parse it with xmllint
+# The XPath expression gets the text content of <title> and <link> inside each <item>
+# The output is then processed line by line.
+httpGet "$FEED_URL" | \
+xmllint --xpath "//item/title/text() | //item/link/text()" - 2>/dev/null | \
+# The sed command below cleans up the CDATA tags that wrap the title
+sed 's/<!\[CDATA\[//g; s/\]\]>//g' |
+while IFS= read -r title; do
+    # In each loop, read the title, then immediately read the next line which is the link
+    read -r link
+    echo -e "${ORANGE}${title}${RESETBG}"
+    echo -e "${CYAN}${link}${RESETBG}\n"
+done
+
+exit 0

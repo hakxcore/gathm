@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Cheatsheets for quick information about multiple programming languages and commands.
+
+# Source the shared utility library from the new path
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# --- Search Flags ---
+search="0"
+insensitive=""
+recursive=""
+boundry=""
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Cheat (v$currentVersion)
+
+Description: Cheatsheets for quick information about programming languages and commands.
+
+Usage: cheat [flags] [topic] [sub-topic...]
+  -s  Search for topics instead of an exact match.
+  -i  Case-insensitive search (implies -s).
+  -b  Search with word boundaries (implies -s).
+  -r  Recursive search (implies -s).
+  -h  Show this help message.
+  -v  Get the tool version.
+
+Special Pages (use as topic):
+  :list      Lists all cheatsheets for a language (e.g., 'cheat go :list')
+  :learn     Shows a "learn-x-in-minutes" cheatsheet.
+  :1line     Shows a collection of one-liners.
+
+Examples:
+  cheat c function
+  cheat rust :learn
+  cheat -i go operators
+EOF
+}
+
+# --- Fetch Cheatsheet Data ---
+getCheatSheet()
+{
+  # Construct the query path from all positional arguments
+  local query_path
+  query_path=$(IFS=/; echo "$*")
+
+  local link="cheat.sh/$query_path"
+
+  # Append search flags as query parameters if any search flag is active
+  if [[ "$search" == "1" ]]; then
+    local query_params=""
+    # Combine all flags into a single string, e.g., "bir"
+    if [[ -n "$boundry" ]]; then query_params+="b"; fi
+    if [[ -n "$insensitive" ]]; then query_params+="i"; fi
+    if [[ -n "$recursive" ]]; then query_params+="r"; fi
+
+    if [[ -n "$query_params" ]]; then
+      link+="?$query_params"
+    fi
+  fi
+  
+  # Make the web request using the shared httpGet function
+  httpGet "$link"
+}
+
+
+# --- Option Parsing ---
+while getopts "ribvhs" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+    i)  insensitive="i"; search="1" ;;
+    b)  boundry="b"; search="1" ;;
+    r)  recursive="r"; search="1" ;;
+    s)  search="1" ;;
+    :)  echo "Option -$OPTARG requires an argument." >&2; exit 1 ;;
+  esac
+done
+# Remove options from the argument list, so only positional args remain
+shift $((OPTIND - 1))
+
+
+# --- Main Driver ---
+
+# Show usage if no arguments are provided
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+# Ensure an HTTP client is configured and internet is available
+getConfiguredClient || exit 1
+checkInternet || exit 1
+
+# Fetch the cheatsheet using all remaining arguments
+getCheatSheet "$@"
+
+exit 0

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Shows global COVID-19 statistics.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="https://pomber.github.io/covid19/timeseries.json"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+covidinfo (v$currentVersion)
+
+Description: Provides up-to-date global statistics for COVID-19 (sourced from JHU CSSE).
+
+Usage: covidinfo [flags]
+  -h  Show this help message.
+  -v  Get the tool version.
+EOF
+}
+
+# --- Main Logic ---
+fetch_and_display_stats()
+{
+    print_header
+    echo -e "${ORANGE}Fetching latest global COVID-19 data...${RESETBG}"
+    
+    # Fetch the data using the shared httpGet function
+    local data
+    data=$(httpGet "$API_URL")
+    
+    # Check if data was retrieved
+    if [[ -z "$data" ]]; then
+        echo "${RED}Error: Could not retrieve data from API.${RESETBG}"
+        echo "Please check your internet connection or try again later."
+        exit 1
+    fi
+
+    echo "Calculating totals..." | pv -qL 15
+    
+    # Use jq to calculate the global totals
+    # 1. [.[] | .[-1]]  -> Create an array of the last (most recent) data object for each country.
+    # 2. | add          -> Sum the values for 'confirmed', 'deaths', and 'recovered' across all objects.
+    local totals
+    totals=$(echo "$data" | jq '[.[] | .[-1]] | add')
+    
+    # Extract each value using jq
+    local confirmed
+    local deaths
+    local recovered
+    confirmed=$(echo "$totals" | jq '.confirmed')
+    deaths=$(echo "$totals" | jq '.deaths')
+    recovered=$(echo "$totals" | jq '.recovered')
+    
+    # Get the last updated date from the first country's last entry
+    local last_updated
+    last_updated=$(echo "$data" | jq -r '.[(keys | .[0])] | .[-1].date')
+
+    # Display the results
+    clear
+    print_header
+    echo -e "${GREEN}Global COVID-19 Statistics${RESETBG} (Updated: ${CYAN}$last_updated${RESETBG})"
+    print_divider
+
+    # Format numbers with commas
+    confirmed_f=$(printf "%'d" "$confirmed")
+    deaths_f=$(printf "%'d" "$deaths")
+    recovered_f=$(printf "%'d" "$recovered")
+
+    echo -e "${WHITE}Confirmed:${RESETBG} ${ORANGE}$confirmed_f${RESETBG}"
+    echo -e "${WHITE}Deaths:${RESETBG}    ${RED}$deaths_f${RESETBG}"
+    echo -e "${WHITE}Recovered:${RESETBG} ${GREEN}$recovered_f${RESETBG}"
+    
+    print_divider
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+    h)  usage; exit 0 ;;
+    v)  echo "Version $currentVersion"; exit 0 ;;
+  esac
+done
+
+# --- Main Driver ---
+
+# Check for required dependencies
+check_dependencies jq pv
+
+# Check for internet connection
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+# Run the main function
+fetch_and_display_stats
+exit 0

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: A lightning-fast meme generator for your terminal.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="https://api.memegen.link/images"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Meme (v$currentVersion)
+
+Description: A lightning-fast meme generator for your terminal, powered by memegen.link.
+
+Usage: meme [flags] <background> <"top text"> <"bottom text">
+  <background>      The meme background template. Use -l to see options.
+  <"top text">      Text for the top of the meme. Use "_" for spaces.
+  <"bottom text">   Text for the bottom of the meme. Use "_" for spaces.
+
+Flags:
+  -l              List all available meme backgrounds.
+  -o <file>       (Optional) Output the meme to a file instead of displaying it.
+  -h              Show this help message.
+  -v              Get the tool version.
+
+Examples:
+  meme buzz "hello" "world"
+  meme -o my_meme.jpg doge "such meme" "very terminal"
+  meme -l
+EOF
+}
+
+# --- List Backgrounds ---
+list_backgrounds() {
+    echo "Fetching available backgrounds..."
+    httpGet "https://api.memegen.link/examples" |
+        grep -o 'src="https://api.memegen.link/images/[^/]*' |
+        cut -d'"' -f2 |
+        cut -d'/' -f5 |
+        sort -u |
+        column
+}
+
+# --- Helper Functions ---
+urlencode() {
+    # Replace special characters for URL. memegen.link uses _ for space, - for dash.
+    # ? is for query params, & for multiple lines (not used here).
+    # We also escape / to _ to prevent breaking the URL structure.
+    echo -n "$1" | sed -e 's/ /_/g' -e 's/?/%3F/g' -e 's/\//_/g' -e 's/-/%2D/g'
+}
+
+# --- Initialize Variables ---
+OUTPUT_FILE=""
+ACTION_LIST=0
+
+# --- Option Parsing ---
+while getopts "lo:vh" opt; do
+  case "$opt" in
+    l) ACTION_LIST=1 ;;
+    o) OUTPUT_FILE="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    \?) usage; exit 1 ;;
+  esac
+done
+# Remove options from the argument list
+shift $((OPTIND - 1))
+
+
+# If -l is passed, list backgrounds and exit
+if [[ $ACTION_LIST -eq 1 ]]; then
+    list_backgrounds
+    exit 0
+fi
+
+# Check for dependencies needed for all generation paths
+check_dependencies curl python3
+
+# After handling flags, we need exactly 3 arguments
+if [[ $# -ne 3 ]]; then
+    echo "${RED}Error: You must provide a background, top text, and bottom text.${RESETBG}"
+    usage
+    exit 1
+fi
+
+# Configure the HTTP client before use
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No active internet connection."; exit 1; }
+
+BACKGROUND="$1"
+TOP_TEXT="$2"
+BOTTOM_TEXT="$3"
+
+# URL-encode the text
+encoded_top=$(urlencode "$TOP_TEXT")
+encoded_bottom=$(urlencode "$BOTTOM_TEXT")
+
+# Construct the final API URL
+full_url="${API_URL}/${BACKGROUND}/${encoded_top}/${encoded_bottom}.jpeg"
+
+echo "Generating meme..."
+
+# Determine output destination
+if [[ -n "$OUTPUT_FILE" ]]; then
+    # Download directly to the specified file
+    httpGet "$full_url" > "$OUTPUT_FILE"
+    echo "${GREEN}Meme saved to '$OUTPUT_FILE'${RESETBG}"
+    # Ask if user wants to open the file
+    read -p "Do you want to open the file now? [y/N]: " answer
+    if [[ "$answer" == [Yy] ]]; then
+        open_file "$OUTPUT_FILE"
+    fi
+else
+    # Download to a temporary file for display
+    TMP_FILE=$(mktemp /tmp/meme.XXXXXX.jpeg)
+    # Ensure the temp file is deleted on exit
+    trap 'rm -f "$TMP_FILE"' EXIT
+
+    httpGet "$full_url" > "$TMP_FILE"
+
+    # Check if download was successful (file is not empty)
+    if [[ ! -s "$TMP_FILE" ]]; then
+        echo "${RED}Error: Failed to generate meme. Check if the background '$BACKGROUND' is valid.${RESETBG}"
+        exit 1
+    fi
+
+    # Display in terminal using jp2a
+    check_dependencies jp2a pv
+    jp2a --color --fill "$TMP_FILE" | pv -qL 1200
+fi
+
+exit 0

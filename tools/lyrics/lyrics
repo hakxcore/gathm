@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Fetches song lyrics from lrclib.net.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_URL="https://lrclib.net/api/search"
+
+# --- Usage and Help ---
+usage()
+{
+cat <<EOF
+Lyrics (v$currentVersion)
+
+Description: Fetches song lyrics from lrclib.net.
+
+Usage: lyrics -a <artist> -s <song> [-f <file>]
+  -a <artist>   The artist of the song.
+  -s <song>     The title of the song.
+  -f <file>     (Optional) Save the lyrics to a file instead of printing.
+  
+  -h            Show this help message.
+  -v            Get the tool version.
+
+Examples:
+  lyrics -a "Queen" -s "Bohemian Rhapsody"
+  lyrics -a "Led Zeppelin" -s "Stairway to Heaven" -f lyrics.txt
+EOF
+}
+
+# --- Helper Functions ---
+urlencode() {
+    python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.stdin.read()))'
+}
+
+# --- Initialize Variables ---
+ARTIST=""
+SONG=""
+FILE_PATH=""
+
+# --- Option Parsing ---
+while getopts "a:s:f:vh" opt; do
+  case "$opt" in
+    a) ARTIST="$OPTARG" ;;
+    s) SONG="$OPTARG" ;;
+    f) FILE_PATH="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    \?) usage; exit 1 ;;
+  esac
+done
+
+# --- Main Driver ---
+
+# Check that artist and song were provided
+if [[ -z "$ARTIST" || -z "$SONG" ]]; then
+    echo "${RED}Error: You must provide both an artist (-a) and a song (-s).${RESETBG}"
+    usage
+    exit 1
+fi
+
+# Check for required dependencies
+check_dependencies jq python3
+
+# Check for internet connection
+getConfiguredClient || exit 1
+checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+
+# URL-encode inputs
+encoded_artist=$(echo "$ARTIST" | urlencode)
+encoded_song=$(echo "$SONG" | urlencode)
+
+# Construct the final API URL
+full_url="${API_URL}?artist_name=${encoded_artist}&track_name=${encoded_song}"
+
+# Fetch and process the data
+echo "Fetching lyrics for '$SONG' by '$ARTIST'..."
+lyrics=$(httpGet "$full_url" | jq -r '.[0].plainLyrics // "not found"')
+
+# Check if lyrics were found
+if [[ -z "$lyrics" || "$lyrics" == "not found" ]]; then
+    echo "${RED}Error: Lyrics not found for this song.${RESETBG}"
+    exit 1
+fi
+
+# Output the lyrics
+if [[ -n "$FILE_PATH" ]]; then
+    echo "$lyrics" > "$FILE_PATH"
+    echo "${GREEN}Lyrics saved to '$FILE_PATH'${RESETBG}"
+else
+    print_divider
+    echo -e "${GREEN}$lyrics${RESETBG}"
+    print_divider
+fi
+
+exit 0

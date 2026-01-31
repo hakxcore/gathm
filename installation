@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+## Author: hakxcore
+## Gathm Installer
+
+currentVersion="3.0.0"
+
+# Platform/Prefix detection
+if [[ "$OSTYPE" == linux-android* ]]; then
+    distro="termux"
+    prefix="/data/data/com.termux/files"
+    showError="Try executing install script again."
+    privilage=""
+elif [ -f "/etc/os-release" ]; then
+    distro="$(source /etc/os-release && echo $ID)"
+    prefix=""
+    showError="Try running install script again with root privileges."
+    privilage="sudo "
+elif [ "$OSTYPE" == "darwin" ]; then
+    distro="darwin"
+    prefix=""
+    showError="Try running install script again with root privileges."
+    privilage="sudo "
+else
+    distro="invalid"
+    prefix=""
+fi
+
+INSTALL_DIR="$prefix/usr/share/gathm"
+BIN_DIR="$prefix/usr/bin"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+install_dependencies() {
+    echo "> Checking and installing dependencies..."
+    
+    # List of dependencies required by the tools
+    local base_dependencies=("coreutils" "jq" "pv" "telnet" "python3" "jp2a")
+    
+    case "$distro" in
+        termux)
+            pkg install -y "${base_dependencies[@]}" libxml2
+            ;;
+        debian|ubuntu|kali)
+            $privilage apt-get update
+            $privilage apt-get install -y "${base_dependencies[@]}" libxml2-utils
+            ;;
+        darwin)
+            # Check for Homebrew
+            if ! command -v brew &>/dev/null; then
+                echo "Warning: Homebrew not found. Cannot install dependencies."
+            else
+                brew install "${base_dependencies[@]}" libxml2
+            fi
+            ;;
+        *)
+            echo "Warning: Unsupported distribution '$distro'. Cannot automatically install dependencies."
+            ;;
+    esac
+
+    echo "> Dependencies check complete."
+    echo "Please ensure you have installed: ${base_dependencies[*]} and libxml2/libxml2-utils."
+}
+
+echo "Installing Gathm to $INSTALL_DIR..."
+
+# Install dependencies first
+install_dependencies
+
+# Create directories
+$privilage mkdir -p "$INSTALL_DIR" || { echo "Error creating directory $INSTALL_DIR"; exit 1; }
+$privilage mkdir -p "$BIN_DIR" || { echo "Error creating directory $BIN_DIR"; exit 1; }
+
+# Copy files
+echo "> Copying files..."
+$privilage cp -r "$SCRIPT_DIR/"* "$INSTALL_DIR/" || { echo "Error copying files"; exit 1; }
+
+# Create symlink
+echo "> Creating symlink..."
+$privilage ln -sf "$INSTALL_DIR/gathm" "$BIN_DIR/gathm" || { echo "Error creating symlink"; exit 1; }
+$privilage chmod +x "$BIN_DIR/gathm"
+
+# Install individual tool links?
+# Optional: If users want to run 'weather' directly without expanding the menu
+# For now, let's keep it strictly through 'gathm' or manual alias to keep global namespace clean,
+# unless the previous behavior was to put EVERYTHING in path.
+# generated links for backward compatibility if needed, but let's stick to 'gathm' as the main entry point for now
+# or we can iterate and link.
+
+installationEnd()
+{
+  echo -n "( •_•)"
+  sleep .75
+  echo -n -e "\r( •_•)>⌐■-■"
+  sleep .75
+  echo -n -e "\r               "
+  echo  -e "\r(⌐■_■)"
+  sleep .5
+  echo "Gathm version $currentVersion"
+  echo -e "\n================= INSTALLED ==================="
+  echo "Run 'gathm' to start."
+}
+
+installationEnd
