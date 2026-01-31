@@ -150,6 +150,21 @@ auto_install_deps() {
     done
 }
 
+# Map package names to Termux equivalents
+# Some packages have different names on Termux
+_termux_pkg_name() {
+    case "$1" in
+        python3)        echo "python" ;;
+        python3-pip)    echo "python" ;;
+        libxml2-utils)  echo "libxml2" ;;
+        telnet)         echo "inetutils" ;;
+        dnsutils)       echo "dnsutils" ;;
+        bind-utils)     echo "dnsutils" ;;
+        iproute2)       echo "iproute2" ;;
+        *)              echo "$1" ;;
+    esac
+}
+
 # Try to install a dependency using available package manager
 # Supports: apt-get (Debian/Ubuntu), pkg (Termux), brew (macOS),
 #           yum/dnf (RHEL/CentOS/Fedora), pacman (Arch), zypper (openSUSE),
@@ -163,8 +178,10 @@ _try_install_dep() {
 
     case "$platform" in
         termux)
-            pkg install -y "$dep" 2>/dev/null && {
-                log_info "recovery" "Installed dependency: $dep (via pkg/Termux)"
+            local termux_dep
+            termux_dep=$(_termux_pkg_name "$dep")
+            pkg install -y "$termux_dep" 2>/dev/null && {
+                log_info "recovery" "Installed dependency: $dep -> $termux_dep (via pkg/Termux)"
                 return 0
             }
             ;;
