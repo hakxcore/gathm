@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Gathm Enterprise - AI Agent Orchestrator
 # The central brain that manages tool discovery, execution, recovery, and chaining
+# Cross-platform: Linux (all distros), macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 #
 # Usage:
 #   ./agent/orchestrator.sh run <tool> [args...]     # Execute a tool with full recovery
@@ -30,9 +31,22 @@ AGENT_NAME="gathm-agent"
 AGENT_STATE_DIR="${HOME}/.gathm/agent"
 AGENT_MEMORY_FILE="${AGENT_STATE_DIR}/memory.json"
 
+# --- Cross-Platform Python Detection ---
+_find_python() {
+    local cmd
+    for cmd in python3 python; do
+        if command -v "$cmd" &>/dev/null; then
+            echo "$cmd"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
 # --- Agent Initialization ---
 init_agent() {
-    mkdir -p "$AGENT_STATE_DIR"
+    mkdir -p "$AGENT_STATE_DIR" 2>/dev/null || true
 
     # Initialize memory file
     if [[ ! -f "$AGENT_MEMORY_FILE" ]]; then
@@ -91,11 +105,15 @@ cmd_run() {
         log_error "$AGENT_NAME" "Tool not found: $tool_name"
         echo "Error: Tool '$tool_name' not found." >&2
 
-        # Suggest similar tools
-        local suggestions
-        suggestions=$(find "$GATHM_ROOT/tools" -maxdepth 1 -type d -name "*${tool_name}*" -exec basename {} \; 2>/dev/null)
+        # Suggest similar tools (portable find without -exec basename)
+        local suggestions=""
+        for d in "$GATHM_ROOT"/tools/*"${tool_name}"*/; do
+            if [[ -d "$d" ]]; then
+                suggestions="$suggestions $(basename "$d")"
+            fi
+        done
         if [[ -n "$suggestions" ]]; then
-            echo "Did you mean: $suggestions" >&2
+            echo "Did you mean:$suggestions" >&2
         fi
         return 1
     fi
@@ -113,6 +131,61 @@ cmd_run() {
 }
 
 # --- Natural Language Interface ---
+# Intent matching using Bash 3 compatible approach (no associative arrays)
+# Returns: tool name on stdout, or empty
+_match_intent() {
+    local query_lower="$1"
+    local best_match=""
+    local best_score=0
+
+    # Each line: "patterns|tool_name"
+    # Patterns within a group separated by spaces
+    local intents="
+weather forecast temperature rain snow climate|weather
+ip address wan lan geolocation where_am_i my_ip|geo
+search google find_online look_up_online|googler
+movie film cinema imdb rating|movie
+define meaning definition dictionary|define
+encrypt decrypt cipher encode decode base64|cipher
+file_encrypt file_decrypt aes openssl|crypt
+breach pwned compromised leaked data_breach password_leak|pwned
+scan shodan port device vulnerability iot|shodan
+qr qrcode qr_code|qrify
+shorten expand short_url tiny_url bitly|shorturl
+upload download transfer share_file send_file|transfer
+bitcoin ethereum crypto btc eth coin exchange_rate|cryptocurrency
+news headline current_event latest|news
+lyrics song_text song_words|lyrics
+cheat cheatsheet reference how_to syntax|cheat
+todo task remind checklist to_do|todo
+meme funny joke_image meme_gen|meme
+gif animated giphy|gif
+covid corona pandemic virus|covidinfo
+music play jukebox listen|jukebox
+ip_info ip_detail ip_lookup|ipinfo
+"
+
+    echo "$intents" | while IFS='|' read -r patterns tool; do
+        # Skip empty lines
+        [[ -z "$tool" ]] && continue
+        tool=$(echo "$tool" | tr -d ' ')
+
+        local score=0
+        for p in $patterns; do
+            # Convert underscores to spaces for matching
+            local match_pattern
+            match_pattern=$(echo "$p" | tr '_' ' ')
+            if echo "$query_lower" | grep -qi "$match_pattern" 2>/dev/null; then
+                score=$((score + 1))
+            fi
+        done
+
+        if [ "$score" -gt 0 ]; then
+            echo "$score $tool"
+        fi
+    done | sort -rn | head -1
+}
+
 cmd_ask() {
     local query="$*"
 
@@ -124,66 +197,18 @@ cmd_ask() {
     log_info "$AGENT_NAME" "Processing query: $query"
     audit_log "agent_query" "agent" "orchestrator" "query=$query"
 
-    # Load intent patterns from config
-    local config_file="$GATHM_ROOT/config/tools.yaml"
-    if [[ ! -f "$config_file" ]]; then
-        echo "Error: Tools config not found." >&2
-        return 1
-    fi
-
-    # Match query against intent patterns
-    local matched_capability=""
     local query_lower
     query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
 
-    # Intent matching using patterns from config
-    local -A INTENT_MAP=(
-        ["weather|forecast|temperature|rain|snow|climate"]="weather"
-        ["ip|address|wan|lan|geolocation|where am i|my ip"]="geo"
-        ["search|google|find online|look up online"]="googler"
-        ["movie|film|cinema|imdb|rating"]="movie"
-        ["define|meaning|definition|dictionary|what does .* mean"]="define"
-        ["encrypt|decrypt|cipher|encode|decode|base64"]="cipher"
-        ["file encrypt|file decrypt|aes|openssl"]="crypt"
-        ["breach|pwned|compromised|leaked|data breach|password leak"]="pwned"
-        ["scan|shodan|port|device|vulnerability|iot"]="shodan"
-        ["qr|qrcode|qr code"]="qrify"
-        ["shorten|expand|short url|tiny url|bitly"]="shorturl"
-        ["upload|download|transfer|share file|send file"]="transfer"
-        ["bitcoin|ethereum|crypto|btc|eth|coin|exchange rate"]="cryptocurrency"
-        ["news|headline|current event|latest"]="news"
-        ["lyrics|song text|song words"]="lyrics"
-        ["cheat|cheatsheet|reference|how to|syntax"]="cheat"
-        ["todo|task|remind|checklist|to do"]="todo"
-        ["meme|funny|joke image|meme gen"]="meme"
-        ["gif|animated|giphy"]="gif"
-        ["covid|corona|pandemic|virus"]="covidinfo"
-        ["music|play|jukebox|listen"]="jukebox"
-        ["ip info|ip detail|ip lookup"]="ipinfo"
-    )
+    # Match query against intent patterns (Bash 3 compatible)
+    local match_result
+    match_result=$(_match_intent "$query_lower")
 
-    local best_match=""
-    local best_score=0
+    local best_score best_match
+    best_score=$(echo "$match_result" | awk '{print $1}')
+    best_match=$(echo "$match_result" | awk '{print $2}')
 
-    for pattern in "${!INTENT_MAP[@]}"; do
-        local tool="${INTENT_MAP[$pattern]}"
-        local score=0
-
-        # Count how many pattern words match the query
-        IFS='|' read -ra PATTERNS <<< "$pattern"
-        for p in "${PATTERNS[@]}"; do
-            if echo "$query_lower" | grep -qi "$p" 2>/dev/null; then
-                score=$((score + 1))
-            fi
-        done
-
-        if (( score > best_score )); then
-            best_score=$score
-            best_match="$tool"
-        fi
-    done
-
-    if [[ -n "$best_match" && $best_score -gt 0 ]]; then
+    if [[ -n "$best_match" && "${best_score:-0}" -gt 0 ]]; then
         local tool_desc
         tool_desc=$(get_tool_description "$best_match" 2>/dev/null || echo "")
 
@@ -227,7 +252,6 @@ _suggest_args() {
 
     case "$tool" in
         weather)
-            # Extract location from query
             local location
             location=$(echo "$query" | sed -E 's/.*(weather|forecast|temperature) (in |for |at )?//i' | sed 's/[?.!]$//')
             if [[ -n "$location" && "$location" != "$query" ]]; then
@@ -310,7 +334,16 @@ cmd_health() {
             echo "$result"
         else
             echo -e "${BOLD}Health: $tool${RESETBG}"
-            echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+            # Cross-platform JSON pretty-print
+            local py
+            py=$(_find_python)
+            if [[ -n "$py" ]]; then
+                echo "$result" | "$py" -m json.tool 2>/dev/null || echo "$result"
+            elif command -v jq &>/dev/null; then
+                echo "$result" | jq . 2>/dev/null || echo "$result"
+            else
+                echo "$result"
+            fi
         fi
     fi
 }
@@ -354,13 +387,19 @@ cmd_chain() {
     echo -e "${BOLD}${GREEN}Executing Pipeline ($total_steps steps)${RESETBG}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
 
-    # Split pipeline by |
-    IFS='|' read -ra STEPS <<< "$pipeline"
+    # Split pipeline by | (portable, no read -ra needed)
+    local IFS_OLD="$IFS"
+    IFS='|'
+    set -f  # Disable globbing
+    # shellcheck disable=SC2086
+    set -- $pipeline
+    set +f
+    IFS="$IFS_OLD"
 
-    for step_cmd in "${STEPS[@]}"; do
+    for step_cmd in "$@"; do
         step=$((step + 1))
 
-        # Trim whitespace
+        # Trim whitespace (portable)
         step_cmd=$(echo "$step_cmd" | sed 's/^ *//;s/ *$//')
 
         # Extract tool name and args
@@ -414,13 +453,15 @@ cmd_status() {
             "agent" "$AGENT_NAME" \
             "version" "$AGENT_VERSION" \
             "tools_available" "$tools_count" \
+            "platform" "$(uname -s 2>/dev/null || echo unknown)" \
             "state_dir" "$AGENT_STATE_DIR" \
             "log_dir" "$GATHM_LOG_DIR"
     else
         echo -e "${BOLD}${GREEN}Gathm Agent Status${RESETBG}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
         echo -e "  Agent:     ${CYAN}$AGENT_NAME v$AGENT_VERSION${RESETBG}"
-        echo -e "  Platform:  $(detect_platform)"
+        echo -e "  Platform:  $(detect_platform) ($(uname -s 2>/dev/null || echo unknown))"
+        echo -e "  Shell:     ${BASH_VERSION:-unknown}"
         echo -e "  Tools:     $(ls -d "$GATHM_ROOT"/tools/*/ 2>/dev/null | wc -l) available"
         echo -e "  State Dir: $AGENT_STATE_DIR"
         echo -e "  Log Dir:   $GATHM_LOG_DIR"
@@ -439,7 +480,7 @@ cmd_status() {
             echo -e "    Total Invocations: $total_invocations"
             echo -e "    Successes: ${GREEN}$successes${RESETBG}"
             echo -e "    Failures:  ${RED}$failures${RESETBG}"
-            if (( total_invocations > 0 )); then
+            if [ "$total_invocations" -gt 0 ] 2>/dev/null; then
                 local success_rate=$((successes * 100 / total_invocations))
                 echo -e "    Success Rate: ${success_rate}%"
             fi
@@ -461,7 +502,7 @@ cmd_status() {
                 fi
             fi
         done
-        if (( open_circuits == 0 )); then
+        if [ "$open_circuits" -eq 0 ]; then
             echo -e "  ${GREEN}All circuits closed (healthy)${RESETBG}"
         fi
     fi
@@ -506,14 +547,10 @@ _update_memory() {
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Simple memory tracking - append to log-style memory
     local memory_entry
     memory_entry=$(printf '{"tool":"%s","exit_code":%d,"timestamp":"%s"}' "$tool" "$exit_code" "$timestamp")
 
-    if [[ -f "$AGENT_MEMORY_FILE" ]]; then
-        # Append to sessions array (simplified - just append line)
-        echo "$memory_entry" >> "${AGENT_STATE_DIR}/history.jsonl"
-    fi
+    echo "$memory_entry" >> "${AGENT_STATE_DIR}/history.jsonl" 2>/dev/null || true
 }
 
 # --- Help ---
@@ -538,6 +575,9 @@ ${BOLD}Options:${RESETBG}
   --json                  Output in JSON format (for programmatic access)
   -h, --help              Show this help message
   -v, --version           Show agent version
+
+${BOLD}Platforms:${RESETBG}
+  Linux (all distros), macOS, Termux (Android), Windows (WSL/Git Bash/MSYS2)
 
 ${BOLD}Examples:${RESETBG}
   gathm-agent run weather Paris
@@ -572,7 +612,7 @@ for arg in "$@"; do
         args+=("$arg")
     fi
 done
-set -- "${args[@]}"
+set -- "${args[@]+"${args[@]}"}"
 
 command="${1:-help}"
 shift 2>/dev/null || true

@@ -80,16 +80,33 @@ jobs:
           print(f'All manifests valid!')
           "
 
+  # Cross-platform agent smoke tests
   test-agent:
-    name: Agent Smoke Tests
-    runs-on: ubuntu-latest
+    name: Agent Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y curl jq
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq || true
+
+      - name: Show platform info
+        run: |
+          echo "OS: $(uname -s)"
+          echo "Bash: ${BASH_VERSION}"
+          echo "Shell: $SHELL"
 
       - name: Test agent initialization
         run: bash agent/orchestrator.sh status --json

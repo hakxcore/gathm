@@ -21,31 +21,42 @@ RESETBG="$(printf '\e[0m')"
 BOLD="$(printf '\033[1m')"
 
 # Platform Check
+# Detects: darwin, termux, ubuntu, debian, arch, fedora, centos, alpine,
+#          opensuse, linux (generic), windows (WSL/Git Bash/MSYS2/Cygwin)
 detect_platform() {
     local kernel_name
-    kernel_name=$(uname -s)
+    kernel_name=$(uname -s 2>/dev/null || echo "unknown")
 
-    if [[ "$kernel_name" == "Darwin" ]]; then
-        echo "darwin"
-    elif [[ "$kernel_name" == "Linux" ]]; then
-        # Differentiate between Termux and other Linux environments
-        if command -v termux-setup-storage &>/dev/null; then
-            echo "termux"
-        elif [ -f "/etc/os-release" ]; then
-            # Source os-release to get the ID, fallback to generic 'linux'
-            local id
-            id=$(source /etc/os-release && echo "$ID")
-            if [[ -n "$id" ]]; then
-                echo "$id"
+    case "$kernel_name" in
+        Darwin)
+            echo "darwin"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            echo "windows"
+            ;;
+        Linux)
+            # Differentiate between Termux, WSL, and other Linux environments
+            if command -v termux-setup-storage &>/dev/null; then
+                echo "termux"
+            elif grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "wsl"
+            elif [ -f "/etc/os-release" ]; then
+                # Source os-release to get the ID, fallback to generic 'linux'
+                local id
+                id=$(grep '^ID=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+                if [[ -n "$id" ]]; then
+                    echo "$id"
+                else
+                    echo "linux"
+                fi
             else
-                echo "linux"
+                echo "linux" # Generic Linux
             fi
-        else
-            echo "linux" # Generic Linux
-        fi
-    else
-        echo "unknown"
-    fi
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
 }
 
 # Network Client Configuration
@@ -99,7 +110,9 @@ pause() {
 }
 
 print_divider() {
-    printf "${ORANGE}%*s\n${RESETBG}" "$(tput cols)" | tr ' ' '⬢'
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+    printf "${ORANGE}%*s\n${RESETBG}" "$cols" | tr ' ' '-'
 }
 
 check_dependencies() {
@@ -119,10 +132,17 @@ check_dependencies() {
 
 open_file() {
     local file_path="$1"
-    case "$(detect_platform)" in
-        darwin) open "$file_path" &>/dev/null ;;
-        termux) termux-open "$file_path" &>/dev/null ;;
-        *)      xdg-open "$file_path" &>/dev/null ;; # Default to xdg-open for Linux
+    local platform
+    platform=$(detect_platform)
+    case "$platform" in
+        darwin)  open "$file_path" &>/dev/null ;;
+        termux)  termux-open "$file_path" &>/dev/null ;;
+        windows) cmd.exe /c start "" "$file_path" &>/dev/null 2>&1 \
+                     || explorer.exe "$file_path" &>/dev/null 2>&1 ;;
+        wsl)     wslview "$file_path" &>/dev/null 2>&1 \
+                     || explorer.exe "$file_path" &>/dev/null 2>&1 \
+                     || xdg-open "$file_path" &>/dev/null ;;
+        *)       xdg-open "$file_path" &>/dev/null ;;
     esac
 }
 

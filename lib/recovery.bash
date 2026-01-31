@@ -1,6 +1,7 @@
 #!/bin/bash
 # Gathm Enterprise - Auto-Recovery Engine
 # Handles automatic failure recovery, retries, and fallback chains
+# Cross-platform: Linux, macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
 SCRIPT_DIR_RECOVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 source "$SCRIPT_DIR_RECOVERY/lib/logging.bash" 2>/dev/null
@@ -21,7 +22,7 @@ retry_with_backoff() {
     local attempt=0
     local exit_code=0
 
-    while (( attempt < max_retries )); do
+    while [ "$attempt" -lt "$max_retries" ]; do
         attempt=$((attempt + 1))
         log_debug "recovery" "Attempt $attempt/$max_retries: $*"
 
@@ -29,17 +30,17 @@ retry_with_backoff() {
         exit_code=$?
 
         if [[ $exit_code -eq 0 ]]; then
-            if (( attempt > 1 )); then
+            if [ "$attempt" -gt 1 ]; then
                 log_info "recovery" "Command succeeded on attempt $attempt: $*"
             fi
             return 0
         fi
 
-        if (( attempt < max_retries )); then
+        if [ "$attempt" -lt "$max_retries" ]; then
             log_warn "recovery" "Attempt $attempt failed (exit: $exit_code), retrying in ${delay}s: $*"
             sleep "$delay"
             delay=$((delay * GATHM_RETRY_BACKOFF))
-            if (( delay > GATHM_RETRY_MAX_DELAY )); then
+            if [ "$delay" -gt "$GATHM_RETRY_MAX_DELAY" ]; then
                 delay=$GATHM_RETRY_MAX_DELAY
             fi
         fi
@@ -51,7 +52,6 @@ retry_with_backoff() {
 
 # Execute a tool with full recovery pipeline
 # Usage: execute_with_recovery TOOL_NAME [args...]
-# This is the main entry point for resilient tool execution
 execute_with_recovery() {
     local tool_name="$1"
     shift
@@ -78,16 +78,16 @@ execute_with_recovery() {
     # Step 2: Auto-install missing dependencies
     auto_install_deps "$tool_name"
 
-    # Step 3: Execute with retries
+    # Step 3: Execute with retries (cross-platform timing)
     local start_ms
-    start_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    start_ms=$(_epoch_ms)
 
     local output exit_code
     output=$(retry_with_backoff "$GATHM_MAX_RETRIES" "$tool_path" "${tool_args[@]}" 2>&1)
     exit_code=$?
 
     local end_ms
-    end_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    end_ms=$(_epoch_ms)
     local duration=$((end_ms - start_ms))
 
     # Step 4: Update circuit breaker and metrics
@@ -151,39 +151,126 @@ auto_install_deps() {
 }
 
 # Try to install a dependency using available package manager
+# Supports: apt-get (Debian/Ubuntu), pkg (Termux), brew (macOS),
+#           yum/dnf (RHEL/CentOS/Fedora), pacman (Arch), zypper (openSUSE),
+#           apk (Alpine), choco/scoop (Windows)
 _try_install_dep() {
     local dep="$1"
 
-    # Detect package manager
-    if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y "$dep" 2>/dev/null && {
-            log_info "recovery" "Installed dependency: $dep (via apt-get)"
-            return 0
-        }
-    elif command -v pkg &>/dev/null; then
-        pkg install -y "$dep" 2>/dev/null && {
-            log_info "recovery" "Installed dependency: $dep (via pkg)"
-            return 0
-        }
-    elif command -v brew &>/dev/null; then
-        brew install "$dep" 2>/dev/null && {
-            log_info "recovery" "Installed dependency: $dep (via brew)"
-            return 0
-        }
-    elif command -v yum &>/dev/null; then
-        sudo yum install -y "$dep" 2>/dev/null && {
-            log_info "recovery" "Installed dependency: $dep (via yum)"
-            return 0
-        }
-    elif command -v pacman &>/dev/null; then
-        sudo pacman -S --noconfirm "$dep" 2>/dev/null && {
-            log_info "recovery" "Installed dependency: $dep (via pacman)"
-            return 0
-        }
-    fi
+    # Detect platform for smarter package manager selection
+    local platform
+    platform=$(_detect_platform_for_install)
+
+    case "$platform" in
+        termux)
+            pkg install -y "$dep" 2>/dev/null && {
+                log_info "recovery" "Installed dependency: $dep (via pkg/Termux)"
+                return 0
+            }
+            ;;
+        darwin)
+            if command -v brew &>/dev/null; then
+                brew install "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via brew)"
+                    return 0
+                }
+            elif command -v port &>/dev/null; then
+                sudo port install "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via MacPorts)"
+                    return 0
+                }
+            fi
+            ;;
+        windows)
+            # Windows: try scoop first (no admin), then choco
+            if command -v scoop &>/dev/null; then
+                scoop install "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via scoop)"
+                    return 0
+                }
+            elif command -v choco &>/dev/null; then
+                choco install -y "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via choco)"
+                    return 0
+                }
+            elif command -v pacman &>/dev/null; then
+                # MSYS2 uses pacman
+                pacman -S --noconfirm "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via pacman/MSYS2)"
+                    return 0
+                }
+            fi
+            ;;
+        *)
+            # Linux: try all known package managers
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get install -y "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via apt-get)"
+                    return 0
+                }
+            elif command -v dnf &>/dev/null; then
+                sudo dnf install -y "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via dnf)"
+                    return 0
+                }
+            elif command -v yum &>/dev/null; then
+                sudo yum install -y "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via yum)"
+                    return 0
+                }
+            elif command -v pacman &>/dev/null; then
+                sudo pacman -S --noconfirm "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via pacman)"
+                    return 0
+                }
+            elif command -v zypper &>/dev/null; then
+                sudo zypper install -y "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via zypper)"
+                    return 0
+                }
+            elif command -v apk &>/dev/null; then
+                apk add "$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via apk)"
+                    return 0
+                }
+            elif command -v nix-env &>/dev/null; then
+                nix-env -iA "nixpkgs.$dep" 2>/dev/null && {
+                    log_info "recovery" "Installed dependency: $dep (via nix)"
+                    return 0
+                }
+            fi
+            ;;
+    esac
 
     log_error "recovery" "Failed to auto-install dependency: $dep"
     return 1
+}
+
+# Detect platform for package manager selection
+_detect_platform_for_install() {
+    case "$(uname -s 2>/dev/null)" in
+        Darwin)
+            echo "darwin"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            echo "windows"
+            ;;
+        Linux)
+            if command -v termux-setup-storage &>/dev/null; then
+                echo "termux"
+            else
+                echo "linux"
+            fi
+            ;;
+        *)
+            # Check for WSL
+            if grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "linux"  # WSL acts like Linux for packages
+            else
+                echo "unknown"
+            fi
+            ;;
+    esac
 }
 
 # Validate tool output (basic sanity check)

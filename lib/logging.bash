@@ -1,6 +1,7 @@
 #!/bin/bash
 # Gathm Enterprise - Structured Logging Library
 # Provides JSON-structured logging for all tools and agent operations
+# Cross-platform: Linux, macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
 GATHM_LOG_DIR="${GATHM_LOG_DIR:-${HOME}/.gathm/logs}"
 GATHM_LOG_LEVEL="${GATHM_LOG_LEVEL:-INFO}"
@@ -8,23 +9,68 @@ GATHM_LOG_FILE="${GATHM_LOG_DIR}/gathm.log"
 GATHM_AUDIT_FILE="${GATHM_LOG_DIR}/audit.log"
 GATHM_METRICS_FILE="${GATHM_LOG_DIR}/metrics.log"
 
-# Log levels (numeric for comparison)
-declare -A LOG_LEVELS=( [DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3 [FATAL]=4 )
+# Log levels (using indexed arrays for Bash 3 compatibility)
+_log_level_value() {
+    case "$1" in
+        DEBUG) echo 0 ;;
+        INFO)  echo 1 ;;
+        WARN)  echo 2 ;;
+        ERROR) echo 3 ;;
+        FATAL) echo 4 ;;
+        *)     echo 1 ;;
+    esac
+}
 
 # Initialize logging
 init_logging() {
-    mkdir -p "$GATHM_LOG_DIR"
-    touch "$GATHM_LOG_FILE" "$GATHM_AUDIT_FILE" "$GATHM_METRICS_FILE"
+    mkdir -p "$GATHM_LOG_DIR" 2>/dev/null || true
+    touch "$GATHM_LOG_FILE" "$GATHM_AUDIT_FILE" "$GATHM_METRICS_FILE" 2>/dev/null || true
 }
 
-# Get current timestamp in ISO 8601
+# Cross-platform millisecond timestamp
+# Works on: GNU date, BSD date (macOS), BusyBox date (Termux), Windows (WSL/MSYS2)
 _timestamp() {
-    date -u +"%Y-%m-%dT%H:%M:%S.%3NZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ"
+    # Try GNU date with nanoseconds first
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ" 2>/dev/null)
+    # If %3N was not expanded (BSD date returns literal "%3NZ"), fall back
+    if [[ "$ts" == *"%3N"* ]] || [[ -z "$ts" ]]; then
+        ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
+    fi
+    echo "$ts"
 }
 
-# Generate a unique request/trace ID
+# Generate a unique request/trace ID (cross-platform)
 _trace_id() {
-    echo "$(date +%s%N | sha256sum | head -c 16 2>/dev/null || echo $$-$(date +%s))"
+    # Try multiple methods in order of preference
+    if command -v sha256sum &>/dev/null; then
+        echo "$(date +%s)$$" | sha256sum | head -c 16
+    elif command -v shasum &>/dev/null; then
+        # macOS uses shasum
+        echo "$(date +%s)$$" | shasum -a 256 | head -c 16
+    elif command -v md5sum &>/dev/null; then
+        echo "$(date +%s)$$" | md5sum | head -c 16
+    elif command -v md5 &>/dev/null; then
+        # macOS fallback
+        echo "$(date +%s)$$" | md5 | head -c 16
+    else
+        # Ultimate fallback: PID + epoch
+        printf '%08x%08x' $$ "$(date +%s)"
+    fi
+}
+
+# Cross-platform epoch milliseconds
+_epoch_ms() {
+    # Try GNU date with nanosecond support
+    local ms
+    ms=$(date +%s%3N 2>/dev/null)
+    # If %3N was not expanded (literal "s%3N" or letters in output), fall back
+    if [[ "$ms" =~ [^0-9] ]] || [[ ${#ms} -lt 4 ]]; then
+        # Fall back to seconds * 1000
+        echo $(( $(date +%s) * 1000 ))
+    else
+        echo "$ms"
+    fi
 }
 
 # Core structured log function - outputs JSON
@@ -36,31 +82,36 @@ _log() {
     local extra="${4:-}"
 
     # Check log level threshold
-    local level_num="${LOG_LEVELS[$level]:-1}"
-    local threshold="${LOG_LEVELS[$GATHM_LOG_LEVEL]:-1}"
-    if (( level_num < threshold )); then
+    local level_num
+    level_num=$(_log_level_value "$level")
+    local threshold
+    threshold=$(_log_level_value "$GATHM_LOG_LEVEL")
+    if [ "$level_num" -lt "$threshold" ]; then
         return 0
     fi
 
     local timestamp
     timestamp=$(_timestamp)
-    local hostname
-    hostname=$(hostname 2>/dev/null || echo "unknown")
+    local hostname_val
+    hostname_val=$(hostname 2>/dev/null || echo "unknown")
     local pid=$$
+
+    # Escape message for JSON safety
+    message=$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
 
     local log_entry
     if [[ -n "$extra" ]]; then
         log_entry=$(printf '{"timestamp":"%s","level":"%s","component":"%s","message":"%s","hostname":"%s","pid":%d,%s}' \
-            "$timestamp" "$level" "$component" "$message" "$hostname" "$pid" "$extra")
+            "$timestamp" "$level" "$component" "$message" "$hostname_val" "$pid" "$extra")
     else
         log_entry=$(printf '{"timestamp":"%s","level":"%s","component":"%s","message":"%s","hostname":"%s","pid":%d}' \
-            "$timestamp" "$level" "$component" "$message" "$hostname" "$pid")
+            "$timestamp" "$level" "$component" "$message" "$hostname_val" "$pid")
     fi
 
-    echo "$log_entry" >> "$GATHM_LOG_FILE"
+    echo "$log_entry" >> "$GATHM_LOG_FILE" 2>/dev/null
 
     # Also print errors/fatals to stderr
-    if (( level_num >= 3 )); then
+    if [ "$level_num" -ge 3 ]; then
         echo "[$level] $component: $message" >&2
     fi
 }
@@ -85,7 +136,7 @@ audit_log() {
     local entry
     entry=$(printf '{"timestamp":"%s","action":"%s","actor":"%s","tool":"%s","details":"%s"}' \
         "$timestamp" "$action" "$actor" "$tool" "$details")
-    echo "$entry" >> "$GATHM_AUDIT_FILE"
+    echo "$entry" >> "$GATHM_AUDIT_FILE" 2>/dev/null
 }
 
 # Metrics log - track tool invocations, latency, success rates
@@ -110,7 +161,7 @@ log_metric() {
         entry=$(printf '{"timestamp":"%s","tool":"%s","duration_ms":%s,"exit_code":%d,"status":"%s"}' \
             "$timestamp" "$tool" "$duration_ms" "$exit_code" "$status")
     fi
-    echo "$entry" >> "$GATHM_METRICS_FILE"
+    echo "$entry" >> "$GATHM_METRICS_FILE" 2>/dev/null
 }
 
 # Timed execution wrapper - runs a command and logs metrics
@@ -119,13 +170,13 @@ timed_exec() {
     local tool_name="$1"
     shift
     local start_ms
-    start_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    start_ms=$(_epoch_ms)
 
     "$@"
     local exit_code=$?
 
     local end_ms
-    end_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    end_ms=$(_epoch_ms)
     local duration=$((end_ms - start_ms))
 
     log_metric "$tool_name" "$duration" "$exit_code"
@@ -133,6 +184,7 @@ timed_exec() {
 }
 
 # Get recent metrics summary for a tool
+# Uses only POSIX awk features (no gawk-specific match with capture groups)
 # Usage: get_tool_metrics TOOL_NAME [last_n]
 get_tool_metrics() {
     local tool="$1"
@@ -144,15 +196,18 @@ get_tool_metrics() {
     fi
 
     grep "\"tool\":\"$tool\"" "$GATHM_METRICS_FILE" | tail -n "$last_n" | \
-    awk -F'"' '
+    awk '
     BEGIN { total=0; success=0; fail=0; dur=0 }
     {
         total++
         if (index($0, "\"status\":\"success\"")) success++
         else fail++
-        # Extract duration
-        match($0, /"duration_ms":([0-9]+)/, arr)
-        if (arr[1]) dur += arr[1]
+        # Extract duration_ms using portable split
+        n = split($0, parts, "\"duration_ms\":")
+        if (n >= 2) {
+            sub(/[^0-9].*/, "", parts[2])
+            dur += parts[2] + 0
+        }
     }
     END {
         avg = (total > 0) ? dur/total : 0

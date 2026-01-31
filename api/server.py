@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Gathm Enterprise - REST API Server
 Exposes all Gathm tools via HTTP endpoints for programmatic access.
+Cross-platform: Linux (all distros), macOS, Termux, Windows (WSL/Git Bash/MSYS2/native)
 
 Usage:
     python3 api/server.py [--port 8080] [--host 0.0.0.0]
@@ -22,12 +24,20 @@ Endpoints:
 import http.server
 import json
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import urllib.parse
-import yaml
 import time
 from pathlib import Path
+
+# PyYAML is optional - fall back to basic parsing if not available
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
 
 # Configuration
 GATHM_ROOT = Path(__file__).resolve().parent.parent
@@ -37,13 +47,46 @@ DEFAULT_PORT = 8080
 DEFAULT_HOST = "0.0.0.0"
 
 
+def _find_bash() -> str:
+    """Find bash executable cross-platform (Linux/macOS/Termux/Windows)."""
+    # Direct lookup
+    bash = shutil.which("bash")
+    if bash:
+        return bash
+    # Windows-specific paths
+    if platform.system() == "Windows":
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\msys64\usr\bin\bash.exe",
+            r"C:\Windows\System32\bash.exe",  # WSL
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+    return "bash"  # Last resort - hope it's on PATH
+
+
+BASH_CMD = _find_bash()
+
+
 def load_tool_manifest(tool_name: str) -> dict:
-    """Load a tool's YAML manifest."""
+    """Load a tool's YAML manifest (works with or without PyYAML)."""
     manifest_path = TOOLS_DIR / tool_name / "tool.yaml"
     if not manifest_path.exists():
         return {}
     with open(manifest_path) as f:
-        return yaml.safe_load(f) or {}
+        if HAS_YAML:
+            return yaml.safe_load(f) or {}
+        # Basic YAML fallback parser for simple key: value manifests
+        result = {}
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and ":" in line:
+                key, _, value = line.partition(":")
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    result[key.strip()] = value
+        return result
 
 
 def list_tools() -> list:
@@ -68,7 +111,7 @@ def list_tools() -> list:
 def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
     """Execute a tool via the agent orchestrator."""
     args = args or []
-    cmd = ["bash", str(AGENT_SCRIPT), "run", tool_name] + args
+    cmd = [BASH_CMD, str(AGENT_SCRIPT), "run", tool_name] + args
 
     start_time = time.time()
     try:
@@ -111,7 +154,7 @@ def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
 
 def run_agent_command(command: str, args: str = "") -> dict:
     """Run an agent orchestrator command."""
-    cmd = ["bash", str(AGENT_SCRIPT), command]
+    cmd = [BASH_CMD, str(AGENT_SCRIPT), command]
     if args:
         cmd.extend(args.split())
     cmd.append("--json")
