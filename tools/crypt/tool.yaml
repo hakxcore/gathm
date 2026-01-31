@@ -1,0 +1,38 @@
+name: crypt
+version: "3.0.0"
+description: "AES-256 file encryption and decryption using OpenSSL"
+category: security
+
+dependencies:
+  system: [openssl]
+
+apis: []
+
+input_schema:
+  arguments:
+    - name: file
+      type: string
+      required: true
+      description: "File to encrypt or decrypt"
+  flags:
+    - flag: "-e"
+      description: "Encrypt file"
+    - flag: "-d"
+      description: "Decrypt file"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Encryption/decryption result"
+  json_fields:
+    - name: file
+      type: string
+    - name: operation
+      type: string
+    - name: status
+      type: string
+
+fallback_tool: null
+tags: [security, encryption, aes, openssl, files]

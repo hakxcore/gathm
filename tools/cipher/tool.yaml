@@ -1,0 +1,38 @@
+name: cipher
+version: "3.0.0"
+description: "Base32 and Base64 text encoding and decoding"
+category: security
+
+dependencies:
+  system: [base64]
+
+apis: []
+
+input_schema:
+  arguments:
+    - name: text
+      type: string
+      required: true
+      description: "Text to encode or decode"
+  flags:
+    - flag: "-e"
+      description: "Encode text"
+    - flag: "-d"
+      description: "Decode text"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Encoded or decoded text"
+  json_fields:
+    - name: input
+      type: string
+    - name: output
+      type: string
+    - name: operation
+      type: string
+
+fallback_tool: null
+tags: [security, encoding, base64, base32, encryption]

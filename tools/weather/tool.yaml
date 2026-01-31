@@ -1,0 +1,52 @@
+name: weather
+version: "3.0.0"
+description: "Provides a 3 day forecast on your current location or a specified location"
+category: data
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: wttr.in
+    base_url: https://wttr.in
+    health_endpoint: https://wttr.in/?format=3
+    auth_required: false
+  - name: ipinfo
+    base_url: https://ipinfo.io
+    health_endpoint: https://ipinfo.io
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: location
+      type: string
+      required: false
+      description: "City, country, or location to check weather for"
+  flags:
+    - flag: "m"
+      description: "Metric units"
+    - flag: "i"
+      description: "Imperial units"
+    - flag: "M"
+      description: "Wind speed in m/s"
+    - flag: "Moon"
+      description: "Show moon phase"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "3-day weather forecast with ASCII art"
+  json_fields:
+    - name: location
+      type: string
+    - name: temperature
+      type: string
+    - name: condition
+      type: string
+    - name: forecast
+      type: array
+
+fallback_tool: null
+tags: [data, weather, forecast, temperature, climate]

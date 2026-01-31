@@ -1,0 +1,40 @@
+name: shorturl
+version: "3.0.0"
+description: "URL shortening and expansion service"
+category: networking
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: ki.tc
+    base_url: https://ki.tc
+    health_endpoint: https://ki.tc
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: url
+      type: string
+      required: true
+      description: "URL to shorten or expand"
+  flags:
+    - flag: "-s"
+      description: "Shorten URL"
+    - flag: "-e"
+      description: "Expand URL"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Shortened or expanded URL"
+  json_fields:
+    - name: original_url
+      type: string
+    - name: short_url
+      type: string
+
+fallback_tool: null
+tags: [networking, url, shortener, utility]

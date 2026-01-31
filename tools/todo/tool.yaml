@@ -1,0 +1,45 @@
+name: todo
+version: "3.0.0"
+description: "A simplistic commandline todo list manager"
+category: productivity
+
+dependencies:
+  system: []
+
+apis: []
+
+input_schema:
+  arguments:
+    - name: task
+      type: string
+      required: false
+      description: "Task text to add"
+  flags:
+    - flag: "-a"
+      description: "Add a task"
+    - flag: "-r"
+      description: "Remove tasks by number"
+    - flag: "-g"
+      description: "Get/list all tasks"
+    - flag: "-c"
+      description: "Clear all tasks"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Todo list output"
+  json_fields:
+    - name: tasks
+      type: array
+      items:
+        - name: id
+          type: number
+        - name: text
+          type: string
+        - name: created_at
+          type: string
+
+fallback_tool: null
+tags: [productivity, todo, tasks, organization]

@@ -1,0 +1,61 @@
+# Gathm Enterprise - Security & Access Policies
+# RBAC, rate limiting, and security configurations
+
+roles:
+  admin:
+    description: "Full access to all tools and configurations"
+    permissions:
+      - "*"
+    rate_limit: 0  # Unlimited
+
+  agent:
+    description: "AI agent with managed access"
+    permissions:
+      - "tool:execute"
+      - "tool:discover"
+      - "tool:healthcheck"
+      - "config:read"
+    blocked_tools: []
+    requires_approval: [shodan, crypt]
+    rate_limit: 120  # Per minute
+
+  user:
+    description: "Standard user access"
+    permissions:
+      - "tool:execute"
+      - "tool:discover"
+    rate_limit: 60  # Per minute
+
+  readonly:
+    description: "Read-only access"
+    permissions:
+      - "tool:discover"
+      - "tool:healthcheck"
+      - "config:read"
+    rate_limit: 30  # Per minute
+
+# Rate limiting configuration
+rate_limiting:
+  enabled: true
+  window_seconds: 60
+  default_limit: 60
+  per_tool_limits:
+    googler: 10      # Google may rate-limit
+    shodan: 5        # Shodan has strict limits
+    movie: 30        # OMDb has limits on free tier
+  burst_allowance: 10  # Extra requests allowed in bursts
+
+# Input validation rules
+validation:
+  max_argument_length: 1024
+  blocked_patterns:
+    - ";&|`$("         # Command injection patterns
+    - "../"            # Path traversal
+  sanitize_input: true
+
+# Audit requirements
+audit:
+  log_all_executions: true
+  log_failures: true
+  log_agent_decisions: true
+  retention_days: 90

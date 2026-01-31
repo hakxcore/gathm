@@ -1,0 +1,142 @@
+# Gathm Enterprise - Global Tool Registry
+# Auto-generated from individual tool.yaml manifests
+# This file provides a centralized view of all tools
+
+registry:
+  version: "1.0.0"
+  auto_discover: true        # Scan tools/ directory at runtime
+  manifest_file: "tool.yaml" # Expected manifest filename in each tool dir
+
+# Tool capability mapping (what the agent uses to select tools)
+capabilities:
+  ip_lookup:
+    description: "Look up IP address information"
+    tools: [geo, ipinfo]
+    primary: geo
+
+  geolocation:
+    description: "Get geolocation data for an IP or current location"
+    tools: [geo, ipinfo]
+    primary: geo
+
+  weather_forecast:
+    description: "Get weather forecast for a location"
+    tools: [weather]
+    primary: weather
+
+  web_search:
+    description: "Search the web"
+    tools: [googler]
+    primary: googler
+
+  movie_lookup:
+    description: "Look up movie information"
+    tools: [movie]
+    primary: movie
+
+  word_definition:
+    description: "Define a word"
+    tools: [define]
+    primary: define
+
+  encryption:
+    description: "Encrypt or decrypt files"
+    tools: [crypt, cipher]
+    primary: crypt
+
+  encoding:
+    description: "Encode or decode text (base64, base32)"
+    tools: [cipher]
+    primary: cipher
+
+  breach_check:
+    description: "Check if an account has been compromised"
+    tools: [pwned]
+    primary: pwned
+
+  network_scan:
+    description: "Scan network devices and services"
+    tools: [shodan]
+    primary: shodan
+
+  qr_code:
+    description: "Generate or read QR codes"
+    tools: [qrify]
+    primary: qrify
+
+  url_shortening:
+    description: "Shorten or expand URLs"
+    tools: [shorturl]
+    primary: shorturl
+
+  file_transfer:
+    description: "Upload or download files"
+    tools: [transfer]
+    primary: transfer
+
+  crypto_price:
+    description: "Get cryptocurrency prices and charts"
+    tools: [cryptocurrency]
+    primary: cryptocurrency
+
+  news_headlines:
+    description: "Get latest news headlines"
+    tools: [news]
+    primary: news
+
+  song_lyrics:
+    description: "Find song lyrics"
+    tools: [lyrics]
+    primary: lyrics
+
+  cheatsheet:
+    description: "Programming cheatsheets and references"
+    tools: [cheat]
+    primary: cheat
+
+  task_management:
+    description: "Manage todo lists and tasks"
+    tools: [todo]
+    primary: todo
+
+  meme_generation:
+    description: "Generate memes"
+    tools: [meme]
+    primary: meme
+
+# Natural language intent mapping (for AI agent)
+intent_patterns:
+  - pattern: "weather|forecast|temperature|rain|snow"
+    capability: weather_forecast
+  - pattern: "ip|address|location|where am i|geolocation"
+    capability: ip_lookup
+  - pattern: "search|google|find|look up"
+    capability: web_search
+  - pattern: "movie|film|cinema|imdb"
+    capability: movie_lookup
+  - pattern: "define|meaning|definition|dictionary"
+    capability: word_definition
+  - pattern: "encrypt|decrypt|cipher|encode|decode|base64"
+    capability: encryption
+  - pattern: "breach|pwned|compromised|hack|password leak"
+    capability: breach_check
+  - pattern: "scan|shodan|port|device|vulnerability"
+    capability: network_scan
+  - pattern: "qr|qrcode"
+    capability: qr_code
+  - pattern: "shorten|expand|short url|tiny url"
+    capability: url_shortening
+  - pattern: "upload|download|transfer|share file"
+    capability: file_transfer
+  - pattern: "bitcoin|ethereum|crypto|btc|eth|coin"
+    capability: crypto_price
+  - pattern: "news|headline|current event"
+    capability: news_headlines
+  - pattern: "lyrics|song|music"
+    capability: song_lyrics
+  - pattern: "cheat|reference|how to|syntax"
+    capability: cheatsheet
+  - pattern: "todo|task|remind|checklist"
+    capability: task_management
+  - pattern: "meme|funny|joke image"
+    capability: meme_generation

@@ -125,3 +125,13 @@ open_file() {
         *)      xdg-open "$file_path" &>/dev/null ;; # Default to xdg-open for Linux
     esac
 }
+
+# --- Enterprise Extensions ---
+# Source enterprise libraries if available
+GATHM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+if [[ -f "$GATHM_ROOT/lib/logging.bash" ]]; then
+    source "$GATHM_ROOT/lib/logging.bash"
+fi
+if [[ -f "$GATHM_ROOT/lib/schema.bash" ]]; then
+    source "$GATHM_ROOT/lib/schema.bash"
+fi

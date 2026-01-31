@@ -1,0 +1,85 @@
+# Gathm Enterprise - Agent Configuration
+# This file controls the AI agent's behavior and capabilities
+
+agent:
+  name: "gathm-agent"
+  version: "1.0.0"
+  description: "Gathm AI Agent - Autonomous tool management and execution"
+
+  # Agent capabilities
+  capabilities:
+    - tool_discovery        # Can discover and list available tools
+    - tool_execution        # Can execute tools
+    - tool_chaining         # Can chain multiple tools together
+    - health_monitoring     # Can monitor tool health
+    - auto_recovery         # Can automatically recover from failures
+    - self_healing          # Can fix broken tools and dependencies
+    - task_planning         # Can decompose complex tasks into tool chains
+
+  # Execution policies
+  execution:
+    max_retries: 3
+    retry_delay_seconds: 2
+    retry_backoff_multiplier: 2
+    max_retry_delay_seconds: 30
+    timeout_seconds: 120
+    max_concurrent_tools: 5
+    allow_auto_install_deps: true
+
+  # Circuit breaker settings
+  circuit_breaker:
+    failure_threshold: 3
+    recovery_timeout_seconds: 60
+    half_open_max_requests: 1
+
+  # Logging configuration
+  logging:
+    level: "INFO"           # DEBUG, INFO, WARN, ERROR, FATAL
+    log_dir: "~/.gathm/logs"
+    enable_audit: true
+    enable_metrics: true
+    max_log_size_mb: 100
+    rotate_count: 5
+
+  # Security policies
+  security:
+    require_approval_for:
+      - crypt               # File encryption needs approval
+      - shodan              # Network scanning needs approval
+    blocked_tools: []       # Tools the agent cannot use
+    max_api_calls_per_minute: 60
+    sandbox_mode: false     # Run tools in isolated environment
+
+# Tool categories and their priority
+categories:
+  security:
+    description: "Security and hacking tools"
+    tools: [cipher, crypt, pwned, qrify, shodan]
+    requires_approval: true
+  networking:
+    description: "Networking and connectivity tools"
+    tools: [geo, ipinfo, shorturl, transfer]
+    requires_approval: false
+  data:
+    description: "Data and information retrieval"
+    tools: [cheat, covidinfo, cryptocurrency, define, googler, lyrics, movie, news, weather]
+    requires_approval: false
+  media:
+    description: "Media and entertainment"
+    tools: [gif, jukebox, meme]
+    requires_approval: false
+  productivity:
+    description: "Productivity tools"
+    tools: [todo]
+    requires_approval: false
+
+# API keys and secrets (use environment variables in production)
+secrets:
+  omdb_api_key: "${OMDB_API_KEY:-946f500a}"
+  shodan_api_key: "${SHODAN_API_KEY:-}"
+  # Add more API keys as needed
+
+# Fallback chain definitions
+fallbacks:
+  geo: ipinfo
+  ipinfo: geo

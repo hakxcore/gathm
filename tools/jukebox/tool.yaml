@@ -1,0 +1,27 @@
+name: jukebox
+version: "3.0.0"
+description: "Music player interface for the terminal"
+category: media
+
+dependencies:
+  system: [telnet]
+
+apis:
+  - name: telehack
+    base_url: telehack.com
+    health_endpoint: null
+    auth_required: false
+
+input_schema:
+  arguments: []
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Interactive music player"
+
+fallback_tool: null
+tags: [media, music, entertainment, terminal]
