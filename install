@@ -12,52 +12,81 @@ MAGENTABG="$(printf '\033[45m')" CYANBG="$(printf '\033[46m')" WHITEBG="$(printf
 RESETBG="$(printf '\e[0m')" BLINK="$(printf '\033[5;31m')"
 
 ##Platform Check
-if [[ "$OSTYPE" == linux-android* ]]; then
-  distro="termux"
-  platform="Termux"
-  prefix="/data/data/com.termux/files/"
-  SUDO=""
-fi
-
-if [ -z "$distro" ]; then
-  distro=$(ls /etc | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
-  platform="Debian"
-  prefix=""
-  SUDO="sudo"
-fi
-
-if [ -z "$distro" ]; then
-  if [ -f "/etc/os-release" ]; then
-    distro="$(source /etc/os-release && echo $ID)"
-  elif [ "$OSTYPE" == "darwin" ]; then
+if [[ "$OSTYPE" == "darwin" ]]; then
     distro="darwin"
     platform="Darwin"
     prefix=""
     SUDO="sudo"
-  else 
-    distro="invalid"
-  fi
+elif [[ "$OSTYPE" == linux-android* ]]; then
+    distro="termux"
+    platform="Termux"
+    prefix="/data/data/com.termux/files/"
+    SUDO=""
+elif [ -f "/etc/os-release" ]; then
+    distro="$(source /etc/os-release && echo $ID)"
+    platform="Linux"
+    prefix=""
+    SUDO="sudo"
+else # Fallback for other Linux or unknown systems
+    # Try the gawk-dependent command but redirect stderr to /dev/null
+    # to avoid errors on systems where 'match' with 'groups' is not supported.
+    # This might still lead to an empty distro if gawk is not available.
+    distro=$(ls /etc 2>/dev/null | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
+    if [ -z "$distro" ]; then
+        distro="invalid"
+    fi
+    platform="Unknown Linux/Other"
+    prefix=""
+    SUDO="sudo"
 fi
 
 checkDialog()
 {
-  if  command -v dialog &>/dev/null; then
-    echo ""
-  else
-    echo $BLUE"Error: Dialog should be installed"$RESETBG
-    echo $BLUE"use $RED'apt install dialog'$BLUE firstly"$RESETBG
-    exit 1
+  if ! command -v dialog &>/dev/null; then
+    echo "${BLUE}Installing dialog...${RESETBG}"
+    case "$distro" in
+      termux)
+        pkg install -y dialog || { echo "${RED}Error: Failed to install dialog. Please install it manually.${RESETBG}"; exit 1; }
+        ;;
+      debian|ubuntu|kali)
+        $SUDO apt-get update && $SUDO apt-get install -y dialog || { echo "${RED}Error: Failed to install dialog. Please install it manually.${RESETBG}"; exit 1; }
+        ;;
+      darwin)
+        if command -v brew &>/dev/null; then
+          brew install dialog || { echo "${RED}Error: Failed to install dialog. Please install it manually using Homebrew.${RESETBG}"; exit 1; }
+        else
+          echo "${RED}Error: Homebrew not found. Please install dialog manually.${RESETBG}"; exit 1;
+        fi
+        ;;
+      *)
+        echo "${RED}Error: dialog not found and automatic installation is not supported for your distribution ('$distro'). Please install it manually.${RESETBG}"; exit 1;
+        ;;
+    esac
   fi 
 }
 
 checkPv()
 {
-  if  command -v pv &>/dev/null; then
-    echo ""
-  else
-    echo $BLUE"Error: pv should be installed"$RESETBG
-    echo $BLUE"use $RED'apt install pv'$BLUE firstly"$RESETBG
-    exit 1
+  if ! command -v pv &>/dev/null; then
+    echo "${BLUE}Installing pv...${RESETBG}"
+    case "$distro" in
+      termux)
+        pkg install -y pv || { echo "${RED}Error: Failed to install pv. Please install it manually.${RESETBG}"; exit 1; }
+        ;;
+      debian|ubuntu|kali)
+        $SUDO apt-get update && $SUDO apt-get install -y pv || { echo "${RED}Error: Failed to install pv. Please install it manually.${RESETBG}"; exit 1; }
+        ;;
+      darwin)
+        if command -v brew &>/dev/null; then
+          brew install pv || { echo "${RED}Error: Failed to install pv. Please install it manually using Homebrew.${RESETBG}"; exit 1; }
+        else
+          echo "${RED}Error: Homebrew not found. Please install pv manually.${RESETBG}"; exit 1;
+        fi
+        ;;
+      *)
+        echo "${RED}Error: pv not found and automatic installation is not supported for your distribution ('$distro'). Please install it manually.${RESETBG}"; exit 1;
+        ;;
+    esac
   fi 
 }
 
