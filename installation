@@ -33,7 +33,7 @@ install_dependencies() {
     echo "> Checking and installing dependencies..."
     
     # List of dependencies required by the tools
-    local base_dependencies=("coreutils" "jq" "pv" "telnet" "python3" "jp2a")
+    local base_dependencies=("coreutils" "jq" "pv" "telnet" "python3" "jp2a" "curl" "wget")
     
     case "$distro" in
         termux)
@@ -57,7 +57,7 @@ install_dependencies() {
     esac
 
     echo "> Dependencies check complete."
-    echo "Please ensure you have installed: ${base_dependencies[*]} and libxml2/libxml2-utils."
+            echo "Note: If any dependencies failed to install, please review the output above."
 }
 
 echo "Installing Gathm to $INSTALL_DIR..."

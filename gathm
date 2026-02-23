@@ -3,8 +3,8 @@
 # Gathm - A modular tool framework
 
 currentVersion="3.0.0"
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-source "$SCRIPT_DIR/lib/utils.bash"
+INSTALL_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+source "$INSTALL_DIR/lib/utils.bash"
 
 # Ensure dependencies
 check_dependencies() {
@@ -25,7 +25,7 @@ scan_tools() {
     tool_descs=()
     
     # Built-in tools
-    for dir in "$SCRIPT_DIR"/tools/*/; do
+    for dir in "$INSTALL_DIR"/tools/*/; do
         tool_name=$(basename "$dir")
         # Check if a file with the same name as the directory exists, and it's an executable
         if [[ -f "$dir/$tool_name" && -x "$dir/$tool_name" ]]; then
@@ -73,7 +73,7 @@ main_menu() {
 
 run_tool() {
     local tool=$1
-    local tool_path="$SCRIPT_DIR/$tool/$tool"
+    local tool_path="$INSTALL_DIR/tools/$tool/$tool"
     
     # Ask for arguments
     exec 3>&1
@@ -90,7 +90,7 @@ run_tool() {
     
     # Run the tool
     # We export the common functions so tools can use them if they source utils again or if we modify them to use the env
-    (source "$SCRIPT_DIR/lib/utils.bash"; "$tool_path" $args)
+    (source "$INSTALL_DIR/lib/utils.bash"; "$tool_path" $args)
     
     echo "------------------------------------------------"
     pause
