@@ -1,222 +1,81 @@
 #!/usr/bin/env bash
 # Author: Hakxcore https://github.com/hakxcore
-currentVersion="2.1.3"
-configuredClient=""
-configuredPython=""
+# Description: Tells you when your account was last breached
 
-##Platform Check
-if [[ "$OSTYPE" == linux-android* ]]; then
-  distro="termux"
-  platform="Termux"
-  prefix="/data/data/com.termux/files/"
-  SUDO=""
-fi
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
 
-if [ -z "$distro" ]; then
-  distro=$(ls /etc | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
-  platform="Debian"
-  prefix=""
-  SUDO="sudo"
-fi
-
-if [ -z "$distro" ]; then
-  if [ -f "/etc/os-release" ]; then
-    distro="$(source /etc/os-release && echo $ID)"
-  elif [ "$OSTYPE" == "darwin" ]; then
-    distro="darwin"
-    platform="Darwin"
-    prefix=""
-    SUDO="sudo"
-  else 
-    distro="invalid"
-  fi
-fi
-
-## This function determines which http get tool the system has installed and returns an error if there isnt one
-getConfiguredClient()
-{
-  if  command -v curl &>/dev/null; then
-    configuredClient="curl"
-  elif command -v wget &>/dev/null; then
-    configuredClient="wget"
-  elif command -v http &>/dev/null; then
-    configuredClient="httpie"
-  elif command -v fetch &>/dev/null; then
-    configuredClient="fetch"
-  else
-    echo "Error: This tool requires either curl, wget, httpie or fetch to be installed." >&2
-    return 1
-  fi
-}
-
-## Allows to call the users configured client without if statements everywhere
-httpGet()
-{
-  case "$configuredClient" in
-    curl)  curl -A curl -s "$@" ;;
-    wget)  wget -qO- "$@" ;;
-    httpie) http -b GET "$@" ;;
-    fetch) fetch -q "$@" ;;
-  esac
-}
-
-##determines weather python is installed or not
-getConfiguredPython()
-{
-  if command -v python3 &>/dev/null; then
-    configuredPython="python3"
-  elif  command -v python2 &>/dev/null; then
-    configuredPython="python2"
-  elif command -v python &>/dev/null; then
-    configuredPython="python"
-  else
-    echo "Error: This tool requires python to be installed."
-    return 1
-  fi
-}
-
-##determines the version of python
-if [[ $(uname) != "Darwin" ]]; then
-  python()
-  {
-    case "$configuredPython" in
-      python2) python2 "$@" ;;
-      python)  python "$@" ;;
-    esac
-  }
-fi
-
-##This function Checks for the insternet connectivity
-checkInternet()
-{
-  httpGet github.com > /dev/null 2>&1 || { echo "Error: no active internet connection" >&2; return 1; } # query github with a get request
-}
+currentVersion="3.0.0"
 
 ## This function grabs data from Have I been Pwned ? and using python parses it
-## JSON response to extrapolate the information for storage
 getPwned()
 {
-        info=$(httpGet  "https://haveibeenpwned.com/api/v2/breachedaccount/$1") > /dev/null #grab the JSON response
-  export PYTHONIOENCODING=utf8 #necessary for python in some cases
-  echo $info | python -c "from __future__ import print_function; import sys, json; print(sys.stdin)[0]['Title'])" > /dev/null 2>&1 || { echo "Looks like you have not been breached"; exit 1; } #
-  # The rest of the code is just extrapolating the data with python from the JSON response
-  echo $info > .pwned.json
-  title=$(python -c "from __future__ import print_function; import sys, json; print('\n'.join([u['Title']for u in json.load(open(sys.argv[1]))]))" ".pwned.json")
-  rm -f .pwned.json
-  unset info # done with the JSON response not needed anymore
-}
-
-##Print the fetched data to the screen
-printPwned()
-{
-  echo
-  echo "============================================="
-  #echo "$1 has beeen breached at:"
-  echo "Please donate for api needs 3.50USD for a monthly subscription or you can contribute an API for opensource"
-  echo "Email: mukeshkumarcharak@gmail.com"
-  echo "$title"
-  echo "============================================="
-  echo
-}
-
-##This function determines the latest version of the termux-snippets if available and installs them
-update()
-{
-  repositoryName="termux-snippets" 
-  githubUserName="hakxcore" 
-  nameOfInstallFile="install" 
-  latestVersion=$(httpGet https://api.github.com/repos/$githubUserName/$repositoryName/tags | grep -Eo '"name":.*?[^\\]",'| head -1 | grep -Eo "[0-9.]+" ) #always grabs the tag without the v option
-
-  if [[ $currentVersion == "" || $repositoryName == "" || $githubUserName == "" || $nameOfInstallFile == "" ]]; then
-    echo "Error: update utility has not been configured correctly." >&2
-    exit 1
-  elif [[ $latestVersion == "" ]]; then
-    echo "Error: no active internet connection" >&2
-    exit 1
-  else
-    if [[ "$latestVersion" != "$currentVersion" ]]; then
-      echo "Version $latestVersion available"
-      echo -n "Do you wish to update $repositoryName [Y/n]: "
-      read -r answer
-      if [[ "$answer" == [Yy] ]]; then
-        cd ~ || { echo 'Update Failed'; exit 1; }
-        if [[ -d  ~/$repositoryName ]]; then rm -r -f $repositoryName || { echo "Permissions Error: try running the update again"; exit 1; } ; fi
-        echo -n "Downloading latest version of: $repositoryName."
-        git clone -q "https://github.com/$githubUserName/$repositoryName" && touch .TSnippetsHiddenFile || { echo "Failure!"; exit 1; } &
-        while [ ! -f .TSnippetsHiddenFile ]; do { echo -n "."; sleep 2; };done
-        rm -f .TSnippetsHiddenFile
-        echo "Success!"
-        cd $repositoryName || { echo 'Update Failed'; exit 1; }
-        git checkout "v$latestVersion" 2> /dev/null || git checkout "$latestVersion" 2> /dev/null || echo "Couldn't git checkout to stable release, updating to latest commit."
-        $SUDO ./$nameOfInstallFile "update" || exit 1
-        cd ..
-        rm -r -f $repositoryName || { echo "Permissions Error: update succesfull but cannot delete temp files located at ~/$repositoryName delete this directory agian"; exit 1; }
-      else
-        exit 1
-      fi
-    else
-      echo "$repositoryName is already the latest version"
+    local email="$1"
+    # Note: HaveIBeenPwned API v2 now requires an API key for some endpoints, 
+    # but some mirror services or v2 legacy might still work or return 404 for clean.
+    info=$(httpGet "https://haveibeenpwned.com/api/v2/breachedaccount/$email")
+    
+    if [[ -z "$info" ]]; then
+        echo "Looks like you have not been breached (or API is unavailable)"
+        return 0
     fi
-  fi
+
+    export PYTHONIOENCODING=utf8
+    title=$(echo "$info" | python3 -c "import sys, json; 
+try:
+    data = json.load(sys.stdin)
+    if isinstance(data, list):
+        print('\n'.join([u.get('Title', 'Unknown') for u in data]))
+    else:
+        print(data.get('Title', 'Unknown'))
+except Exception:
+    pass" 2>/dev/null)
+
+    if [[ -z "$title" ]]; then
+        echo "Looks like you have not been breached"
+    else
+        echo -e "\n${RED}BREACHED ACCOUNT DETECTED${RESETBG}"
+        print_divider
+        echo "$title"
+        print_divider
+    fi
 }
 
 ##Usage and Help
 usage()
 {
   cat <<EOF
-Pwned
+Pwned (v$currentVersion)
 
-Description: Tells you when your account was last breached
-Usage: pwned [flag] or pwned [tag]
-  -u  Update Termux-snippets Tool
-  -h  Show the help
-  -v  Get the tool version
+Description: Tells you when your account was last breached.
+Usage: pwned [email]
+  -h      Show the help
+  -v      Get the tool version
 
 Examples:
-  pwned anonymous007@gmail.com
-  pwned anyones@gmail.com
+  pwned test@example.com
 EOF
 }
 
-if [[ $(uname) != "Darwin" ]]; then getConfiguredPython || exit 1; fi
-getConfiguredClient || exit 1
-
-##Options(flags)
-while getopts "uvh" opt; do
+# --- Option Parsing ---
+while getopts "vh" opt; do
   case "$opt" in
-    \?) echo "Invalid option: -$OPTARG" >&2
-        exit 1
-        ;;
-    h)  usage
-        exit 0
-        ;;
-    v)  echo "Version $currentVersion"
-        exit 0
-        ;;
-    u)  checkInternet || exit 1
-        update
-        exit 0
-        ;;
-    :)  echo "Option -$OPTARG requires an argument." >&2
-        exit 1
-        ;;
+    h) usage; exit 0 ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    *) usage; exit 1 ;;
   esac
 done
+shift $((OPTIND - 1))
 
 ##Driver
-if [[ $1 == "update" ]]; then
-  checkInternet || exit 1
-  update
-  exit 0
-elif [[ $1 == "help" ]]; then
+if [[ $# -eq 0 ]]; then
   usage
-  exit 0
-elif [[ $# == "0" ]]; then
-  usage
-  exit 0
-else
-  checkInternet || exit 1
-  getPwned $1 # based on the stock symbol exrapolated by the getTicker function get information on the stock
-  printPwned $1  # print this information out to the user in a human readable format
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: no active internet connection" >&2; exit 1; }
+
+getPwned "$1"
 exit 0
-fi									

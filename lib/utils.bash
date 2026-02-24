@@ -89,6 +89,18 @@ checkInternet() {
 }
 
 # UI Helpers
+is_interactive() {
+    # Returns 0 (true) if connected to a terminal and GATHM_NON_INTERACTIVE is not set
+    if [[ -n "${GATHM_NON_INTERACTIVE}" ]]; then
+        return 1
+    fi
+    if [ -t 0 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 print_header() {
     clear
     echo -e "${BOLD}${GREEN}"
@@ -105,8 +117,10 @@ EOF
 }
 
 pause() {
-    read -n 1 -s -r -p "Press any key to continue..."
-    echo
+    if is_interactive; then
+        read -n 1 -s -r -p "Press any key to continue..."
+        echo
+    fi
 }
 
 print_divider() {

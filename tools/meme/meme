@@ -109,10 +109,12 @@ if [[ -n "$OUTPUT_FILE" ]]; then
     # Download directly to the specified file
     httpGet "$full_url" > "$OUTPUT_FILE"
     echo "${GREEN}Meme saved to '$OUTPUT_FILE'${RESETBG}"
-    # Ask if user wants to open the file
-    read -p "Do you want to open the file now? [y/N]: " answer
-    if [[ "$answer" == [Yy] ]]; then
-        open_file "$OUTPUT_FILE"
+    # Ask if user wants to open the file (only in interactive mode)
+    if is_interactive; then
+        read -p "Do you want to open the file now? [y/N]: " answer
+        if [[ "$answer" == [Yy] ]]; then
+            open_file "$OUTPUT_FILE"
+        fi
     fi
 else
     # Download to a temporary file for display

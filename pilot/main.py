@@ -51,7 +51,7 @@ def run_gathm_tool_raw(command: str) -> str:
     tool_path = TOOLS_DIR / tool_name / tool_name
     if not tool_path.is_file(): return f"Error: Tool '{tool_name}' not found."
     try:
-        env = {**os.environ, "TERM": "xterm-256color"}
+        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
         shell_cmd = f'source "{GATHM_ROOT}/lib/utils.bash" && "{tool_path}" {tool_args}'
         result = subprocess.run(["bash", "-c", shell_cmd], capture_output=True, text=True, timeout=30, env=env)
         output = result.stdout.strip()

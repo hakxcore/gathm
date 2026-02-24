@@ -1,313 +1,102 @@
 #!/usr/bin/env bash
 # Author: Hakxcore https://github.com/hakxcore
-configuredDownloadClient=""
-configuredUploadClient=""
-configuredClient=""
-currentVersion="2.1.3"
-down="false"
-##Color
-RED="$(printf '\033[31m')"  GREEN="$(printf '\033[32m')"  ORANGE="$(printf '\033[33m')"  BLUE="$(printf '\033[34m')" 
-MAGENTA="$(printf '\033[35m')"  CYAN="$(printf '\033[36m')"  WHITE="$(printf '\033[37m')"  BLACK="$(printf '\033[30m')"  
-REDBG="$(printf '\033[41m')"  GREENBG="$(printf '\033[42m')"  ORANGEBG="$(printf '\033[43m')"  BLUEBG="$(printf '\033[44m')"  
-MAGENTABG="$(printf '\033[45m')"  CYANBG="$(printf '\033[46m')"  WHITEBG="$(printf '\033[47m')"  BLACKBG="$(printf '\033[40m')" 
-RESETBG="$(printf '\e[0m')"  BLINK="$(printf '\033[5;31m')"
+# Description: Quickly transfer files from the command line.
 
-##Platform Check
-if [[ "$OSTYPE" == linux-android* ]]; then
-  distro="termux"
-  platform="Termux"
-  prefix="/data/data/com.termux/files/"
-  SUDO=""
-fi
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
 
-if [ -z "$distro" ]; then
-  distro=$(ls /etc | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
-  platform="Debian"
-  prefix=""
-  SUDO="sudo"
-fi
+currentVersion="3.0.0"
 
-if [ -z "$distro" ]; then
-  if [ -f "/etc/os-release" ]; then
-    distro="$(source /etc/os-release && echo $ID)"
-  elif [ "$OSTYPE" == "darwin" ]; then
-    distro="darwin"
-    platform="Darwin"
-    prefix=""
-    SUDO="sudo"
-  else 
-    distro="invalid"
-  fi
-fi
-
-getConfiguredDownloadClient()
+## This function handles the file upload
+upload_file()
 {
-  if  command -v curl &>/dev/null; then
-    configuredDownloadClient="curl"
-  elif command -v wget &>/dev/null; then
-    configuredDownloadClient="wget"
-  elif command -v fetch &>/dev/null; then
-    configuredDownloadClient="fetch"
-  else
-    echo "Error: Downloading with this tool requires either curl, wget, or fetch to be installed." >&2
-    return 1
-  fi
-}
-
-httpGet()
-{
-  case "$configuredClient" in
-    curl)  curl -A curl -s "$@" ;;
-    wget)  wget -qO- "$@" ;;
-    httpie) http -b GET "$@" ;;
-    fetch) fetch -q "$@" ;;
-  esac
-}
-
-
-getConfiguredClient()
-{
-  if  command -v curl &>/dev/null; then
-    configuredClient="curl"
-  elif command -v wget &>/dev/null; then
-    configuredClient="wget"
-  elif command -v http &>/dev/null; then
-    configuredClient="httpie"
-  elif command -v fetch &>/dev/null; then
-    configuredClient="fetch"
-  else
-    echo "Error: This tool requires either curl, wget, httpie or fetch to be installed." >&2
-    return 1
-  fi
-}
-
-
-getconfiguredUploadClient()
-{
-  if  command -v curl &>/dev/null; then
-    configuredUploadClient="curl"
-  elif command -v wget &>/dev/null; then
-    configuredUploadClient="wget"
-  else
-    echo "Error: Uploading with this tool requires either curl or wget to be installed." >&2
-    return 1
-  fi
-}
-
-update()
-{
-  repositoryName="termux-snippets" 
-  githubUserName="Hakxcore" 
-  nameOfInstallFile="install" 
-  latestVersion=$(httpGet https://api.github.com/repos/$githubUserName/$repositoryName/tags | grep -Eo '"name":.*?[^\\]",'| head -1 | grep -Eo "[0-9.]+" ) #always grabs the tag without the v option
-
-  if [[ $currentVersion == "" || $repositoryName == "" || $githubUserName == "" || $nameOfInstallFile == "" ]]; then
-    echo "Error: update utility has not been configured correctly." >&2
-    exit 1
-  elif [[ $latestVersion == "" ]]; then
-    echo "Error: no active internet connection" >&2
-    exit 1
-  else
-    if [[ "$latestVersion" != "$currentVersion" ]]; then
-      echo "Version $latestVersion available"
-      echo -n "Do you wish to update $repositoryName [Y/n]: "
-      read -r answer
-      if [[ "$answer" == [Yy] ]]; then
-        cd ~ || { echo 'Update Failed'; exit 1; }
-        if [[ -d  ~/$repositoryName ]]; then rm -r -f $repositoryName || { echo "Permissions Error: try running the update again"; exit 1; } ; fi
-        echo -n "Downloading latest version of: $repositoryName."
-        git clone -q "https://github.com/$githubUserName/$repositoryName" && touch .TSnippetsHiddenFile || { echo "Failure!"; exit 1; } &
-        while [ ! -f .TSnippetsHiddenFile ]; do { echo -n "."; sleep 2; };done
-        rm -f .TSnippetsHiddenFile
-        echo "Success!"
-        cd $repositoryName || { echo 'Update Failed'; exit 1; }
-        git checkout "v$latestVersion" 2> /dev/null || git checkout "$latestVersion" 2> /dev/null || echo "Couldn't git checkout to stable release, updating to latest commit."      
-	      $SUDO ./$nameOfInstallFile "update" || exit 1
-        cd ..
-        rm -r -f $repositoryName || { echo "Permissions Error: update succesfull but cannot delete temp files located at ~/$repositoryName delete this directory again"; exit 1; }
-      else
-        exit 1
-      fi
-    else
-      echo "$repositoryName is already the latest version"
+    local file_path="$1"
+    if [[ ! -f "$file_path" ]]; then
+        echo "Error: Invalid file path." >&2
+        return 1
     fi
-  fi
+
+    local filename=$(basename "$file_path")
+    echo "${BLUE}Uploading $filename...${RESETBG}"
+
+    local response
+    response=$(curl -s --upload-file "$file_path" "https://free.keep.sh") || { echo "Failure!"; return 1; }
+    
+    echo -e "${GREEN}Success!${RESETBG}"
+    echo -e "${BLUE}Transfer Download Command:${RESETBG} transfer -d $(echo "$response" | cut -d "/" -f 4) $filename"
+    echo -e "${BLUE}Transfer File URL:${RESETBG} $response"
+    
+    # Check if qrify exists (it's another gathm tool)
+    local qrify_tool="$(dirname "$0")/../qrify/qrify"
+    if [[ -f "$qrify_tool" ]]; then
+        echo -e "\nOr scan this QR Code:"
+        bash "$qrify_tool" "$response"
+    fi
 }
 
-checkInternet()
+## This function handles the file download
+download_file()
 {
-  httpGet github.com > /dev/null 2>&1 || { echo "Error: no active internet connection" >&2; return 1; } # query github with a get request
+    local file_id="$1"
+    local filename="$2"
+    
+    if [[ -z "$file_id" || -z "$filename" ]]; then
+        echo "Error: Missing file ID or filename for download." >&2
+        usage
+        return 1
+    fi
+
+    echo "${BLUE}Downloading $filename...${RESETBG}"
+    curl -s -L "https://free.keep.sh/$file_id/$filename" > "$filename" || { echo "Failure"; return 1; }
+    echo -e "${GREEN}File saved as $filename${RESETBG}"
 }
 
-httpSingleUpload()
-{
-  case "$configuredUploadClient" in
-    curl) response=$(curl -s --upload-file "$1" "https://free.keep.sh" | tee /dev/null) || { echo "Failure!"; return 1;};;
-    wget) response=$(wget --progress=dot --method PUT --body-file="$1" "https://free.keep.sh" | tee /dev/null) || { echo "Failure!"; return 1;} ;;
-  esac
-  echo  "$MAGENTA Success! $RESETBG"
-}
-
-singleUpload()
-{
-  filePath=$(echo $1)
-  if [ ! -f $filePath ];then { echo "Error: invalid file path"; return 1;}; fi
-  tempFileName=$(echo $1 | sed "s/.*\///")
-  echo "$BLUE Uploading $tempFileName $RESETBG"
-  httpSingleUpload "$filePath" "$tempFileName"
-}
-
-##Print upload response after 
-printUploadResponse()
-{
-fileID=$(echo $response | cut -d "/" -f 4)
-echo " $BLUE>"$RESETBG"Transfer Download Command: $GREEN transfer -d $fileID $tempFileName$RESETBG"
-echo " $BLUE>"$RESETBG"Transfer File URL:$GREEN$response$RESETBG"
-# echo "$RED""Or scan this QR-Code"$RESETBG
-echo -e "\n\n\t Or scan this QR Code"
-qrify $response
-}
-
-##Upload file to server
-onetimeUpload()
-{
-  response=$(curl -s -T $1 temp.sh)
-  downlink=$response # | python -c "import sys, json; print json.load(sys.stdin)['file']['download_page']"
-}
-
-##Print Download link
-printOntimeUpload()
-{
-  cat <<EOF
-  Download link: $GREEN$downlink$RESETBG
-EOF
-echo -e "\n\n\t Or scan this QR Code"
-qrify $downlink
-}
-
-##Download file from the link
-httpDownload()
-{
-  # if [[ -d Trans-download ]]; then
-  #   echo "Downloading....."
-  #   else
-  #     mkdir Trans-download
-  # fi
-  echo "Downloading....."
-  # https://free.keep.sh/9ab64df49d/your-file.txt > your-file.
-  curl -s -L https://free.keep.sh/$1/$2 > $inputFileName || echo "Failure";
-  # curl -A curl -s https://transfer.sh/$2 -o Trans-download/$2 || echo "Failure";  
- echo "$BLUE""File saved"$RESETBG
-}
-
-##Usage and Help
 usage()
 {
   cat <<EOF
-Transfer
+Transfer (v$currentVersion)
 
 Description: Quickly transfer files from the command line.
 
-Usage: transfer [flags] or transfer [flag] [args] or transfer [filePathToUpload]
-  -d  Download a single file
-      First arg: File url id
-      Second arg: File name
-  -o  Onetime file upload
-  -u  Update Termux-snippets Tools
-  -h  Show the help
-  -v  Get the tool version
+Usage: transfer [flags] or transfer [file]
+  -d [id] [name]  Download a file by ID and name
+  -o [file]       One-time file upload
+  -h              Show the help
+  -v              Get the tool version
+
 Examples:
-  transfer ~/fileToTransfer.txt
-  transfer ~/firstFileToTransfer.txt ~/secondFileToTransfer.txt ~/thirdFileToTransfer.txt
-  transfer -d fileID fileName
-  transfer -o ~/fileToTransfer.txt
+  transfer myfile.txt
+  transfer -d 9ab64df49d myfile.txt
 EOF
 }
 
-##Options(flags)
-while getopts "o:d:uvh" opt; do
+# --- Option Parsing ---
+while getopts "o:d:vh" opt; do
   case "$opt" in
-    \?) echo "Invalid option: -$OPTARG" >&2
-      exit 1
-    ;;
-    h)  usage
-      exit 0
-    ;;
-    v)  echo "Version $currentVersion"
-      exit 0
-    ;;
-    u)
-      getConfiguredClient || exit 1
-      checkInternet || exit 1
-      update || exit 1
-      exit 0
-    ;;
-    o)
-      onetime="true"
-    ;;
-    d)
-      down="true"
-      if [ $# -lt 3 ];then { echo "Error: not enough arguments for downloading a file, see the usage"; return 1;};fi
-      if [ $# -gt 3 ];then { echo "Error: to many enough arguments for downloading a file, see the usage"; return 1;};fi
-      inputId=$2 #(echo "$*" | sed s/-d//g | sed s/-o//g | cut -d " " -f 2)
-      inputFileName=$3 #(echo "$*" | sed s/-d//g | sed s/-o//g | cut -d " " -f 3)
-      httpDownload $inputId $inputFileName
-    ;;
-    :)  echo "Option -$OPTARG requires an argument." >&2
-      exit 1
-    ;;
+    d) download_file "$OPTARG" "$3"; exit 0 ;;
+    o) upload_file "$OPTARG"; exit 0 ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
   esac
 done
 
-##Driver
-if [[ $# == "0" ]]; then
+if [[ $# -eq 0 ]]; then
   usage
-  exit 0
-elif [[ $# == "1" ]];then
-  if [[ $1 == "help" ]]; then
-    usage
-    exit 0
-  elif [[ $1 == "update" ]]; then
-    getConfiguredClient || exit 1
-    checkInternet || exit 1
-    update || exit 1
-    exit 0
-  elif [ -f $1 ];then
-    getConfiguredClient || exit 1
-    checkInternet || exit 1
-    getconfiguredUploadClient || exit 1
-    singleUpload "$1" || exit 1
-    printUploadResponse
-    exit 0
-  else
-    echo "Error: invalid filepath"
-    exit 1
-  fi
-else
-  if $down && ! $onetime ;then
-    getConfiguredClient || exit 1
-    checkInternet || exit 1
-    getConfiguredDownloadClient || exit 1
-    singleDownload "$inputFilePath" "$inputID" "$inputFileName" || exit 1
-    exit 0
-  elif ! $down && ! $onetime; then
-    getConfiguredClient || exit 1
-    checkInternet || exit 1
-    getconfiguredUploadClient || exit 1
-    for path in "$@";do
-      singleUpload "$path" || exit 1
-      printUploadResponse
-      echo
-    done
-    exit 0
-  elif ! $down && $onetime; then
-    getConfiguredClient || exit 1
-    if [[ $configuredClient -ne "curl" ]];then
-      echo "Error: curl must be installed to use one time file upload"
-      exit 1
-    fi
-    inputFileName=$(echo "$*" | sed s/-o//g | cut -d " " -f 2 )
-    onetimeUpload "$inputFileName"
-    printOntimeUpload
-  fi
+  exit 1
 fi
+
+# Driver for direct file upload
+check_dependencies curl
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: no active internet connection" >&2; exit 1; }
+
+# Handle multiple files or direct upload
+if [[ "$1" == "-d" ]]; then
+    download_file "$2" "$3"
+else
+    for file in "$@"; do
+        upload_file "$file"
+    done
+fi
+
+exit 0
