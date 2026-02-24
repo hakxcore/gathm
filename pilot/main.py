@@ -67,32 +67,29 @@ class AgentState(TypedDict):
     next_step: str
 
 # System prompt for models without native tool support
-available_tools = discover_tools()
-tool_descriptions = "\n".join([f"- {name}: {get_tool_description(name)}" for name in available_tools])
+def call_model(state: AgentState):
+    # Re-discover tools to ensure we have the latest descriptions
+    available_tools = discover_tools()
+    tool_descriptions = "\n".join([f"- {name}: {get_tool_description(name)}" for name in available_tools])
 
-SYSTEM_PROMPT = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
+    system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
 You have access to the following gathm tools:
 {tool_descriptions}
 
-To use a tool, you MUST use the following format:
+CRITICAL RULES:
+1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
 Action Input: [tool_name] [arguments]
 
-The 'Action Input' must be a valid gathm tool command.
-Example:
-Thought: I need to check the weather in London.
-Action: gathm
-Action Input: weather London
+2. For MATH (derivatives, integrals, etc.), use the 'newton' tool.
+3. For company STOCKS (Apple, Google), use the 'stocks' tool.
+4. For CRYPTO (Bitcoin, ETH), use the 'cryptocurrency' tool.
+5. If a tool fails (like 'googler' returning no results), try an alternative tool or explain the failure.
 
 When you have a final answer, provide it directly without the Action format.
-Always use tools to fetch real data before answering questions about weather, news, crypto, etc.
 """
-
-llm = ChatOllama(model="gemma3:12b", temperature=0)
-
-def call_model(state: AgentState):
-    messages = [HumanMessage(content=SYSTEM_PROMPT)] + state['messages']
+    messages = [HumanMessage(content=system_prompt)] + state['messages']
     response = llm.invoke(messages)
     
     # Check for tool call in the text

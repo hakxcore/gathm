@@ -1,6 +1,6 @@
 name: cryptocurrency
 version: "3.0.0"
-description: "Cryptocurrency exchange rates, prices, and charts"
+description: "Get real-time CRYPTOCURRENCY prices (Bitcoin, Ethereum, etc.). Use this ONLY for crypto coins. DO NOT use this for company stocks like Apple or Tesla."
 category: data
 
 dependencies:

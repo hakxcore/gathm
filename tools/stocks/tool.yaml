@@ -1,6 +1,6 @@
 name: stocks
 version: "3.0.0"
-description: "Get real-time stock price and information for a given ticker symbol."
+description: "Get real-time STOCK market prices (NASDAQ, NYSE, etc.) for a given ticker symbol. Use this for companies like Apple (AAPL), Google (GOOGL), or Microsoft (MSFT). DO NOT use for Bitcoin or Ethereum."
 category: finance
 
 dependencies:
