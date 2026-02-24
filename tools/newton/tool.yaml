@@ -1,0 +1,23 @@
+name: newton
+version: "3.0.0"
+description: "Numerical calculations and symbolic math parsing (simplification, calculus, etc.)"
+category: science
+
+dependencies:
+  system: [curl, python3]
+
+input_schema:
+  arguments:
+    - name: operation
+      type: string
+      required: true
+      description: "Math operation (simplify, factor, derive, integrate, zeroes, tangent, area, cos, sin, tan, abs, log)"
+    - name: expression
+      type: string
+      required: true
+      description: "Mathematical expression. Use [ ] instead of ( )"
+
+output_schema:
+  text: "Result of the mathematical operation"
+
+tags: [math, science, calculus, logic, calculation]

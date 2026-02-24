@@ -1,38 +1,26 @@
 name: qrify
 version: "3.0.0"
 description: "QR code generation and decoding"
-category: security
+category: utility
 
 dependencies:
-  system: [curl]
-
-apis:
-  - name: qrenco.de
-    base_url: https://qrenco.de
-    health_endpoint: https://qrenco.de
-    auth_required: false
+  system: [curl, python3]
 
 input_schema:
   arguments:
     - name: text
       type: string
-      required: true
+      required: false
       description: "Text or URL to encode as QR code"
   flags:
+    - flag: "-f"
+      description: "Save QR code as a PNG file"
+      has_argument: true
     - flag: "-d"
-      description: "Decode a QR code image"
-    - flag: "-h"
-      description: "Show help"
-    - flag: "-v"
-      description: "Show version"
+      description: "Decode a QR code image file"
+      has_argument: true
 
 output_schema:
   text: "QR code ASCII art or decoded content"
-  json_fields:
-    - name: input
-      type: string
-    - name: qr_text
-      type: string
 
-fallback_tool: null
 tags: [security, qrcode, encoding, utility]

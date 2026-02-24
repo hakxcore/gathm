@@ -6,12 +6,6 @@ category: networking
 dependencies:
   system: [curl]
 
-apis:
-  - name: ki.tc
-    base_url: https://ki.tc
-    health_endpoint: https://ki.tc
-    auth_required: false
-
 input_schema:
   arguments:
     - name: url
@@ -20,21 +14,11 @@ input_schema:
       description: "URL to shorten or expand"
   flags:
     - flag: "-s"
-      description: "Shorten URL"
+      description: "Shorten URL (mandatory if not expanding)"
     - flag: "-e"
-      description: "Expand URL"
-    - flag: "-h"
-      description: "Show help"
-    - flag: "-v"
-      description: "Show version"
+      description: "Expand URL (mandatory if not shortening)"
 
 output_schema:
   text: "Shortened or expanded URL"
-  json_fields:
-    - name: original_url
-      type: string
-    - name: short_url
-      type: string
 
-fallback_tool: null
 tags: [networking, url, shortener, utility]

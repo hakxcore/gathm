@@ -4,16 +4,14 @@ description: "Song lyrics fetcher by artist and title"
 category: media
 
 dependencies:
-  system: [curl]
-
-apis:
-  - name: lyrics.ovh
-    base_url: https://api.lyrics.ovh/v1
-    health_endpoint: https://api.lyrics.ovh
-    auth_required: false
+  system: [curl, python3]
 
 input_schema:
   arguments:
+    - name: flags
+      type: string
+      required: true
+      description: "Required flags: -a for artist, -s for song"
     - name: artist
       type: string
       required: true
@@ -23,20 +21,11 @@ input_schema:
       required: true
       description: "Song title"
   flags:
-    - flag: "-h"
-      description: "Show help"
-    - flag: "-v"
-      description: "Show version"
+    - flag: "-f"
+      description: "Export lyrics to file"
+      has_argument: true
 
 output_schema:
   text: "Song lyrics"
-  json_fields:
-    - name: artist
-      type: string
-    - name: song
-      type: string
-    - name: lyrics
-      type: string
 
-fallback_tool: null
 tags: [media, music, lyrics, entertainment]
