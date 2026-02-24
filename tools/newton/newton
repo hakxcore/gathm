@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Author: Alexander Epstein https://github.com/alexanderepstein
+# Description: Performs numerical calculations from simplification to calculus.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+# Note: The original API was newton.now.sh, but it has moved or might be unstable.
+# We'll use the current active one: https://newton.vercel.app/api/v2/
+API_BASE="https://newton.vercel.app/api/v2"
+
+simpleOperations=(simplify factor derive integrate zeroes roots tangent area cos sin tan arccos arcsin arctan abs log)
+
+usage()
+{
+  cat <<EOF
+Newton (v$currentVersion)
+Description: Performs numerical calculations from simplification to calculus.
+
+Usage: newton [operation] [expression]
+  [operation]  The math operation to perform (see list below)
+  [expression] The mathematical expression. Use [ ] instead of ( ) 
+
+Operations:
+  simplify, factor, derive, integrate, zeroes, tangent, area, 
+  cos, sin, tan, arccos, arcsin, arctan, abs, log
+
+Examples:
+  newton simplify "2x+2x"
+  newton derive "x^2"
+  newton integrate "x^2"
+  newton cos "pi"
+EOF
+}
+
+convert_brackets() {
+    # Replace [ with ( and ] with ) for the API, but users should provide [ ] to avoid bash subshell issues
+    echo "$1" | sed 's/\[/(/g; s/\]/)/g'
+}
+
+encode_equation() {
+    # Newton API expects / as (over) and - as %2D or literal in some cases
+    echo "$1" | sed 's/\//(over)/g' | sed 's/~/|/g'
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -lt 2 ]]; then
+  usage
+  exit 1
+fi
+
+OPERATION=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+EXPRESSION="$2"
+
+# Map 'roots' to 'zeroes'
+[[ "$OPERATION" == "roots" ]] && OPERATION="zeroes"
+
+# Validate operation
+VALID_OP=false
+for op in "${simpleOperations[@]}"; do
+    if [[ "$op" == "$OPERATION" ]]; then
+        VALID_OP=true
+        break
+    fi
+done
+
+if ! $VALID_OP; then
+    echo "Error: Invalid operation '$OPERATION'"
+    exit 1
+fi
+
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+# Prepare expression
+FINAL_EXPR=$(convert_brackets "$EXPRESSION")
+ENCODED_EXPR=$(encode_equation "$FINAL_EXPR")
+
+URL="${API_BASE}/${OPERATION}/${ENCODED_EXPR}"
+RESPONSE=$(httpGet "$URL")
+
+# Extract result using python (Newton returns JSON like {"operation":"...","expression":"...","result":"..."})
+RESULT=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('result', 'Error: No result'))" 2>/dev/null)
+
+echo "Operation: $OPERATION"
+echo "Expression: $EXPRESSION"
+echo "Result: $RESULT"
+
+exit 0

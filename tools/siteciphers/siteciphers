@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Author: Alexander Epstein https://github.com/alexanderepstein
+# Description: Checks the available SSL/TLS ciphers for an https site.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+DELAY=0.1 # Reduced default delay for efficiency, but users can override
+
+usage()
+{
+  cat <<EOF
+Siteciphers (v$currentVersion)
+Description: Checks the available ciphers for the SSL of an https site.
+
+Usage: siteciphers [website]
+  [website]  The domain to check (e.g., google.com)
+  -d <secs>  Delay between requests (default: 0.1)
+  -h         Show the help
+  -v         Get the tool version
+
+Examples:
+  siteciphers github.com
+  siteciphers -d 0 google.com
+EOF
+}
+
+checkCiphers()
+{
+  local server="$1"
+  if [[ "$server" != *":"* ]]; then
+      server="${server}:443"
+  fi
+
+  check_dependencies openssl
+  
+  # Get all local ciphers supported by this openssl version
+  local ciphers=$(openssl ciphers 'ALL:eNULL' | sed -e 's/:/ /g')
+  
+  echo "Checking ciphers for $server..."
+  print_divider
+
+  for cipher in $ciphers; do
+    # Try connecting with each cipher
+    local result=$(echo -n | timeout 5 openssl s_client -cipher "$cipher" -connect "$server" 2>&1)
+    
+    if [[ "$result" == *"Cipher is $cipher"* ]] || [[ "$result" == *"Cipher    :"* ]]; then
+        echo -e "${GREEN}[YES]${RESETBG} $cipher"
+    elif [[ "$result" == *":error:"* ]]; then
+        # Too much output if we show every NO, so maybe only show YES or summary
+        # But for AI, we'll keep it simple
+        : # echo "[NO]  $cipher"
+    fi
+    sleep $DELAY
+  done
+}
+
+# --- Option Parsing ---
+while getopts "d:vh" opt; do
+  case "$opt" in
+    d) DELAY=$OPTARG ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+checkCiphers "$1"
+
+exit 0

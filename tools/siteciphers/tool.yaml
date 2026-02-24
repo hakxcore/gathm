@@ -1,0 +1,23 @@
+name: siteciphers
+version: "3.0.0"
+description: "Checks which SSL/TLS ciphers are enabled or disabled for a given HTTPS site."
+category: security
+
+dependencies:
+  system: [openssl]
+
+input_schema:
+  arguments:
+    - name: website
+      type: string
+      required: true
+      description: "Website domain to check (e.g., github.com)"
+  flags:
+    - flag: "-d"
+      description: "Delay between requests in seconds"
+      has_argument: true
+
+output_schema:
+  text: "List of supported ciphers (YES) for the site"
+
+tags: [security, ssl, tls, ciphers, website]
