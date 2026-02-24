@@ -1,92 +1,103 @@
 #!/usr/bin/env bash
-# Author: Hakxcore https://github.com/hakxcore
-# Description: A wrapper around openssl to encrypt and decrypt files.
+# Author: Hakxcore & Alexander Epstein
+# Description: A wrapper around openssl for file encryption and decryption.
 
 # Source the shared utility library
 source "$(dirname "$0")/../../lib/utils.bash"
 
 currentVersion="3.0.0"
 
-# --- Usage and Help ---
+check_openssl() {
+    check_dependencies openssl
+}
+
+encrypt()
+{
+    local input="$1"
+    local output="$2"
+    if [[ ! -f "$input" ]]; then
+        echo "Error: Input file '$input' not found."
+        return 1
+    fi
+    
+    echo "Encrypting $input..."
+    # Note: openssl 1.1.1+ requires -pbkdf2 for better security and to avoid warnings
+    local pbkdf2_flag=""
+    openssl version | grep -qE "1\.1\.1|[3-9]\." && pbkdf2_flag="-pbkdf2"
+    
+    openssl enc -aes-256-cbc -salt -a $pbkdf2_flag -in "$input" -out "$output"
+}
+
+decrypt()
+{
+    local input="$1"
+    local output="$2"
+    if [[ ! -f "$input" ]]; then
+        echo "Error: Input file '$input' not found."
+        return 1
+    fi
+    
+    echo "Decrypting $input..."
+    local pbkdf2_flag=""
+    openssl version | grep -qE "1\.1\.1|[3-9]\." && pbkdf2_flag="-pbkdf2"
+    
+    openssl enc -aes-256-cbc -d -a $pbkdf2_flag -in "$input" -out "$output"
+}
+
 usage()
 {
-cat <<EOF
+  cat <<EOF
 Crypt (v$currentVersion)
+Description: Encrypt or decrypt files using AES-256.
 
-Description: A wrapper around openssl that facilitates encrypting and decrypting files using AES-256.
-
-Usage: crypt [flag] <inputFile> <outputFile>
-  -e  Encrypt the inputFile.
-  -d  Decrypt the inputFile.
-  -h  Show this help message.
-  -v  Get the tool version.
+Usage: crypt [flag] [inputFile] [outputFile]
+  -e  Encrypt file
+  -d  Decrypt file
+  -h  Show the help
+  -v  Get the tool version
 
 Examples:
-  crypt -e mySecrets.txt myEncryptedData.dat
-  crypt -d myEncryptedData.dat myDecryptedSecrets.txt
+  crypt -e secret.txt secret.enc
+  crypt -d secret.enc secret.txt
 EOF
 }
 
-# --- Main Logic ---
-
-# Initialize mode variable
-MODE=""
+# --- Initialize Variables ---
+ACTION=""
 
 # --- Option Parsing ---
-while getopts "edvh" opt; do
+while getopts "e:d:vh" opt; do
   case "$opt" in
-    \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
-    h)  usage; exit 0 ;;
-    v)  echo "Version $currentVersion"; exit 0 ;;
-    e)  MODE="encrypt" ;;
-    d)  MODE="decrypt" ;;
+    e) ACTION="encrypt"; INPUT_FILE="$OPTARG"; OUTPUT_FILE="$3" ;;
+    d) ACTION="decrypt"; INPUT_FILE="$OPTARG"; OUTPUT_FILE="$3" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
   esac
 done
-# Remove options from the argument list
-shift $((OPTIND - 1))
 
+# Fallback for positional if getopts logic is complex with multiple args
+if [[ -z "$ACTION" ]]; then
+    if [[ "$1" == "-e" ]]; then
+        ACTION="encrypt"; INPUT_FILE="$2"; OUTPUT_FILE="$3"
+    elif [[ "$1" == "-d" ]]; then
+        ACTION="decrypt"; INPUT_FILE="$2"; OUTPUT_FILE="$3"
+    else
+        usage
+        exit 1
+    fi
+fi
 
-# --- Main Driver ---
-
-# Check for required dependencies
-check_dependencies openssl
-
-# Check that a mode was selected
-if [[ -z "$MODE" ]]; then
-    echo "${RED}Error: You must specify a mode, either -e (encrypt) or -d (decrypt).${RESETBG}"
+if [[ -z "$INPUT_FILE" || -z "$OUTPUT_FILE" ]]; then
+    echo "Error: Missing input or output file."
     usage
     exit 1
 fi
 
-# Check for the correct number of arguments (inputFile and outputFile)
-if [[ $# -ne 2 ]]; then
-    echo "${RED}Error: You must provide an input file and an output file.${RESETBG}"
-    usage
-    exit 1
-fi
-
-inputFile="$1"
-outputFile="$2"
-
-if [[ "$MODE" == "encrypt" ]]; then
-    echo "Encrypting '$inputFile' to '$outputFile'..."
-    # The -pbkdf2 and -iter flags increase the number of iterations, making brute-force attacks harder.
-    openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt -a -in "$inputFile" -out "$outputFile"
-    if [[ $? -eq 0 ]]; then
-        echo "${GREEN}Successfully encrypted.${RESETBG}"
-    else
-        echo "${RED}Encryption failed. Check if '$inputFile' exists.${RESETBG}"
-        exit 1
-    fi
-elif [[ "$MODE" == "decrypt" ]]; then
-    echo "Decrypting '$inputFile' to '$outputFile'..."
-    openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -d -a -in "$inputFile" -out "$outputFile"
-    if [[ $? -eq 0 ]]; then
-        echo "${GREEN}Successfully decrypted.${RESETBG}"
-    else
-        echo "${RED}Decryption failed. Check the file and password.${RESETBG}"
-        exit 1
-    fi
+check_openssl
+if [[ "$ACTION" == "encrypt" ]]; then
+    encrypt "$INPUT_FILE" "$OUTPUT_FILE"
+else
+    decrypt "$INPUT_FILE" "$OUTPUT_FILE"
 fi
 
 exit 0
