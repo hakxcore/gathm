@@ -1,0 +1,27 @@
+name: currency
+version: "3.0.0"
+description: "Real-time currency converter supporting multiple global currencies."
+category: finance
+
+dependencies:
+  system: [curl, bc]
+
+input_schema:
+  arguments:
+    - name: base
+      type: string
+      required: true
+      description: "Base currency code (e.g., USD, EUR, INR)"
+    - name: target
+      type: string
+      required: true
+      description: "Target currency code (e.g., GBP, JPY, CAD)"
+    - name: amount
+      type: string
+      required: true
+      description: "Amount to convert"
+
+output_schema:
+  text: "Conversion results including rate and total amount"
+
+tags: [finance, currency, money, conversion]

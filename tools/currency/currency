@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Author: Alexander Epstein https://github.com/alexanderepstein
+# Description: A realtime currency converter.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+currencyCodes=(AUD BAM BGN BMD BND BRL CAD CHF CNY CZK DJF DKK
+  EUR GBP HKD HRK HUF IDR ISK ILS INR
+  JPY KRW MXN MYR NOK NZD PAB PHP PLN
+  RON RUB SEK SGD THB TRY USD ZAR)
+
+peggedTo()
+{
+  case "$@" in
+    BAM)  echo "EUR:1.95583" ;;
+    BMD)  echo "USD:1.0" ;;
+    BND)  echo "SGD:1.0" ;;
+    DJF)  echo "USD:177.721" ;;
+    PAB)  echo "USD:1.0" ;;
+    *)    echo "1" ;;
+  esac
+}
+
+checkValidCurrency()
+{
+  local code=$(echo "${1}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+  for c in "${currencyCodes[@]}"; do
+    if [[ "$c" == "$code" ]]; then
+      echo "0"
+      return 0
+    fi
+  done
+  echo "1"
+}
+
+convertCurrency()
+{
+  local base=$1
+  local exchangeTo=$2
+  local amount=$3
+
+  local trueBase=$(echo "$base" | tr '[:lower:]' '[:upper:]')
+  local trueTarget=$(echo "$exchangeTo" | tr '[:lower:]' '[:upper:]')
+  
+  local peggedBase=$( peggedTo "$trueBase" )
+  local peggedTarget=$( peggedTo "$trueTarget" )
+  local coef1="1"
+  local coef2="1"
+
+  if [[ "$peggedBase" =~ ^[A-Z]+:[0-9.]+$ ]]; then
+    trueBase=$(echo "$peggedBase" | cut -d: -f1)
+    coef1=$(echo "$peggedBase" | cut -d: -f2)
+  fi
+  if [[ "$peggedTarget" =~ ^[A-Z]+:[0-9.]+$ ]]; then
+    trueTarget=$(echo "$peggedTarget" | cut -d: -f1)
+    coef2=$(echo "$peggedTarget" | cut -d: -f2)
+  fi
+
+  local exchangeRate
+  if [[ "$trueBase" == "$trueTarget" ]]; then
+    exchangeRate="1"
+  else
+    # Using exchangerate-api.com as in original
+    local api_response=$(httpGet "https://api.exchangerate-api.com/v4/latest/$trueBase")
+    exchangeRate=$(echo "$api_response" | grep -Eo "$trueTarget":[0-9.]*" | cut -d: -f2)
+  fi
+
+  if [[ -z "$exchangeRate" ]]; then
+    echo "Error: Could not fetch exchange rate for $trueTarget"
+    return 1
+  fi
+
+  local exchangeAmount
+  if ! command -v bc &>/dev/null; then
+    # Integer fallback
+    exchangeAmount=$(( (amount * 100 * exchangeRate / 100 * coef2 / 100) / (coef1 / 100) ))
+  else
+    exchangeRate=$( echo "scale=8; $exchangeRate / $coef1" | bc )
+    exchangeRate=$( echo "scale=8; $exchangeRate * $coef2" | bc )
+    exchangeAmount=$( echo "scale=2; $exchangeRate * $amount" | bc )
+  fi
+
+  cat <<EOF
+=========================
+| $base to $exchangeTo
+| Rate: $exchangeRate
+| $base: $amount
+| $exchangeTo: $exchangeAmount
+=========================
+EOF
+}
+
+usage()
+{
+  cat <<EOF
+Currency (v$currentVersion)
+Description: A realtime currency converter.
+
+Usage: currency [base] [exchangeTo] [amount]
+  -h  Show the help
+  -v  Get the tool version
+
+Supported Currencies:
+AUD, BGN, BRL, CAD, ZAR, CHF, CNY, CZK, DKK, EUR, GBP, HKD, HRK, 
+HUF, ISK, IDR, ILS, INR, JPY, KRW, MXN, MYR, NOK, NZD, PHP, PLN, 
+RON, RUB, SEK, SGD, THB, TRY, USD
+
+Examples:
+  currency EUR USD 12.35
+  currency USD INR 100
+EOF
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  if is_interactive; then
+      echo -n "What is the base currency: "
+      read -r base
+      echo -n "What currency to exchange to: "
+      read -r exchangeTo
+      echo -n "What is the amount being exchanged: "
+      read -r amount
+      convertCurrency "$base" "$exchangeTo" "$amount"
+  else
+      usage
+      exit 1
+  fi
+elif [[ $# -eq 3 ]]; then
+  getConfiguredClient || exit 1
+  checkInternet || { echo "Error: no active internet connection" >&2; exit 1; }
+  convertCurrency "$1" "$2" "$3"
+else
+  usage
+  exit 1
+fi

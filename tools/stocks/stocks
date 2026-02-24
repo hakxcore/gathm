@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Author: Alexander Epstein https://github.com/alexanderepstein
+# Description: Finds the latest information on a certain stock.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# Note: The original APIs (Yahoo/FinancialModelingPrep) often change or require keys.
+# We'll use a more stable approach or provide clear error handling.
+
+printStockInformation()
+{
+  local symbol="$1"
+  # Using a placeholder for modern stock API or informing the user
+  # For now, we'll try to use a public endpoint if available, but many are now private.
+  # Let's use a simpler approach or a known working one for gathm.
+  
+  echo "Fetching stock information for: $symbol"
+  
+  # Try fetching from a common public endpoint (e.g., query1.finance.yahoo.com)
+  local response=$(httpGet "https://query1.finance.yahoo.com/v8/finance/chart/$symbol?interval=1d")
+  
+  if [[ -z "$response" ]] || [[ "$response" == *"Error"* ]]; then
+      echo "Error: Could not fetch data for symbol $symbol. It might be invalid or the API is restricted."
+      return 1
+  fi
+
+  # Extract data using python
+  python3 -c "import sys, json; 
+try:
+    data = json.load(sys.stdin)
+    meta = data['chart']['result'][0]['meta']
+    print('Symbol: ' + meta.get('symbol', 'N/A'))
+    print('Currency: ' + meta.get('currency', 'N/A'))
+    print('Exchange: ' + meta.get('exchangeName', 'N/A'))
+    print('Latest Price: ' + str(meta.get('regularMarketPrice', 'N/A')))
+    print('Previous Close: ' + str(meta.get('previousClose', 'N/A')))
+except Exception as e:
+    print('Error parsing stock data: ' + str(e))
+" <<< "$response"
+}
+
+usage()
+{
+  cat <<EOF
+Stocks (v$currentVersion)
+Description: Finds the latest information on a certain stock.
+
+Usage: stocks [ticker]
+  -h  Show the help
+  -v  Get the tool version
+
+Examples:
+  stocks AAPL
+  stocks TSLA
+  stocks MSFT
+EOF
+}
+
+# --- Option Parsing ---
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: no active internet connection" >&2; exit 1; }
+
+printStockInformation "$1"
+exit 0

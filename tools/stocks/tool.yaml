@@ -1,0 +1,19 @@
+name: stocks
+version: "3.0.0"
+description: "Get real-time stock price and information for a given ticker symbol."
+category: finance
+
+dependencies:
+  system: [curl, python3]
+
+input_schema:
+  arguments:
+    - name: ticker
+      type: string
+      required: true
+      description: "Stock ticker symbol (e.g., AAPL, TSLA, MSFT)"
+
+output_schema:
+  text: "Stock details including latest price, exchange, and currency"
+
+tags: [finance, stocks, markets, investment]
