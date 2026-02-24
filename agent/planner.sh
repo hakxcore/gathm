@@ -146,21 +146,20 @@ _display_plan() {
         echo -e "  Plan ID: ${CYAN}$plan_id${RESETBG}"
         echo ""
 
-        # Parse and display steps
+        # Parse and display steps using awk to extract full JSON objects
         local step=0
-        while IFS= read -r line; do
+        while IFS= read -r step_json; do
+            [[ -z "$step_json" || "$step_json" == "{}" ]] && continue
             local s_tool s_args s_desc
-            s_tool=$(echo "$line" | grep -o '"tool":"[^"]*"' | cut -d'"' -f4)
-            s_args=$(echo "$line" | grep -o '"args":"[^"]*"' | cut -d'"' -f4)
-            s_desc=$(echo "$line" | grep -o '"description":"[^"]*"' | cut -d'"' -f4)
+            s_tool=$(echo "$step_json" | grep -o '"tool":"[^"]*"' | cut -d'"' -f4)
+            s_args=$(echo "$step_json" | grep -o '"args":"[^"]*"' | cut -d'"' -f4)
+            s_desc=$(echo "$step_json" | grep -o '"description":"[^"]*"' | cut -d'"' -f4)
 
             if [[ -n "$s_tool" ]]; then
                 step=$((step + 1))
-                local health
-                health=$(healthcheck_tool "$s_tool" 2>/dev/null)
-                local status
+                local health status status_icon
+                health=$(healthcheck_tool "$s_tool" 2>/dev/null || true)
                 status=$(echo "$health" | grep -o '"status":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "unknown")
-                local status_icon
                 case "$status" in
                     healthy) status_icon="${GREEN}[OK]${RESETBG}" ;;
                     degraded) status_icon="${ORANGE}[!!]${RESETBG}" ;;
@@ -171,7 +170,7 @@ _display_plan() {
                 echo -e "    Tool: ${CYAN}$s_tool${RESETBG} $s_args  $status_icon"
                 echo ""
             fi
-        done <<< "$(echo "$plan" | tr ',' '\n')"
+        done <<< "$(echo "$plan" | awk 'BEGIN{RS="[{]";FS="[}]"} NR>1{print "{"$1"}"}')"
 
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
         echo ""
