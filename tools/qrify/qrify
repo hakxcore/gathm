@@ -1,115 +1,112 @@
 #!/usr/bin/env bash
-# Author: Hakxcore https://github.com/hakxcore
-# Description: Generates and decodes QR codes from the command line.
+# Author: Hakxcore & Alexander Epstein
+# Description: Converts strings or URLs into a QR code, or decodes them.
 
 # Source the shared utility library
 source "$(dirname "$0")/../../lib/utils.bash"
 
 currentVersion="3.0.0"
 
-# --- Usage and Help ---
+makeqr()
+{
+    local input=$(echo "$1" | sed 's/ /%20/g')
+    # Using qrenco.de for terminal output
+    httpGet "https://qrenco.de/$input"
+}
+
+makeQRFile()
+{
+    local filename="$1"
+    local data=$(echo "$2" | sed 's/ /%20/g')
+    
+    [[ "$filename" != *.png ]] && filename="${filename}.png"
+    
+    echo "Generating QR code image: $filename"
+    httpGet "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=$data" > "$filename"
+    echo "Saved to $filename"
+}
+
+decodeQR()
+{
+    local file_path="$1"
+    if [[ ! -f "$file_path" ]]; then
+        echo "Error: File not found: $file_path"
+        return 1
+    fi
+
+    echo "Decoding QR code from $file_path..."
+    
+    # Use the qrserver.com API for decoding
+    local response=$(curl -s -F "file=@$file_path" http://api.qrserver.com/v1/read-qr-code/)
+    
+    if [[ -z "$response" ]]; then
+        echo "Error: Could not connect to decoding API."
+        return 1
+    fi
+
+    # Extract data using python
+    local data=$(echo "$response" | python3 -c "import sys, json; 
+try:
+    res = json.load(sys.stdin)
+    print(res[0]['symbol'][0]['data'] or 'Error: ' + res[0]['symbol'][0]['error'])
+except Exception:
+    print('Error: Could not parse response')
+" 2>/dev/null)
+
+    echo "Decoded Data: $data"
+}
+
 usage()
 {
-cat <<EOF
+  cat <<EOF
 Qrify (v$currentVersion)
+Description: Converts strings or URLs into a QR code.
 
-Description: Converts a string into a QR code or decodes a QR code from an image.
-             Uses qrenco.de for terminal display and api.qrserver.com for file I/O.
-
-Usage: qrify [flags] <argument>
-  -e <text>     Encode the given text. (This is the default action).
-  -d <file>     Decode the given QR code image file.
-  -o <file>     (With -e) Save the QR code to a file instead of terminal display.
+Usage: qrify [string]
+  -f <file>   Save QR code as a PNG file
+  -d <file>   Decode a QR code from an image file
+  -h          Show the help
+  -v          Get the tool version
 
 Examples:
-  qrify "hello world"
-  qrify -e "https://www.google.com"
-  qrify -e "some text" -o my_qr.png
-  qrify -d my_qr.png
-
-Please Note: This script uses external APIs. Do not encode sensitive data.
+  qrify "Hello Gathm"
+  qrify -f myqr.png "https://github.com"
+  qrify -d myqr.png
 EOF
 }
 
-# --- Helper Functions ---
-urlencode() {
-    python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.stdin.read()))'
-}
-
-# --- Main Logic ---
-
-# Initialize variables
-MODE="encode" # Default action is to encode
-TEXT_TO_ENCODE=""
-FILE_TO_DECODE=""
-OUTPUT_FILE=""
+# --- Initialize Variables ---
+FILE_OUT=""
+FILE_DEC=""
 
 # --- Option Parsing ---
-# Separate getopts loop to find the mode first
-while getopts "e:d:o:vh" opt; do
+while getopts "f:d:vh" opt; do
   case "$opt" in
-    e) MODE="encode"; TEXT_TO_ENCODE="$OPTARG" ;;
-    d) MODE="decode"; FILE_TO_DECODE="$OPTARG" ;;
-    o) OUTPUT_FILE="$OPTARG" ;;
+    f) FILE_OUT="$OPTARG" ;;
+    d) FILE_DEC="$OPTARG" ;;
     v) echo "Version $currentVersion"; exit 0 ;;
     h) usage; exit 0 ;;
-    \?) usage; exit 1 ;;
   esac
 done
+shift $((OPTIND - 1))
 
-# --- Main Driver ---
-
-# Check for internet connection first
+check_dependencies curl python3
 getConfiguredClient || exit 1
-checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+checkInternet || { echo "Error: No internet connection"; exit 1; }
 
-if [[ "$MODE" == "encode" ]]; then
-    # If -e was not used, the first positional argument is the text
-    if [[ -z "$TEXT_TO_ENCODE" ]]; then
-        shift $((OPTIND - 1))
-        if [[ $# -eq 0 ]]; then
-            echo "${RED}Error: No text provided to encode.${RESETBG}"
-            usage
-            exit 1
-        fi
-        TEXT_TO_ENCODE="$1"
-    fi
-
-    check_dependencies python3
-    encoded_text=$(echo -n "$TEXT_TO_ENCODE" | urlencode)
-
-    if [[ -n "$OUTPUT_FILE" ]]; then
-        # Save to file using qrserver
-        echo "Generating QR code and saving to '$OUTPUT_FILE'..."
-        httpGet "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encoded_text}" > "$OUTPUT_FILE"
-        echo "${GREEN}Done.${RESETBG}"
-    else
-        # Display in terminal using qrenco.de
-        httpGet "qrenco.de/${encoded_text}"
-    fi
-
-elif [[ "$MODE" == "decode" ]]; then
-    if [[ ! -f "$FILE_TO_DECODE" ]]; then
-        echo "${RED}Error: File not found: $FILE_TO_DECODE${RESETBG}"
+if [[ -n "$FILE_DEC" ]]; then
+    decodeQR "$FILE_DEC"
+elif [[ -n "$FILE_OUT" ]]; then
+    if [[ $# -eq 0 ]]; then
+        echo "Error: Missing data to encode."
         exit 1
     fi
-
-    check_dependencies jq python3
-    echo "Decoding '$FILE_TO_DECODE'..."
-    
-    # Use curl directly for multipart/form-data upload
-    response=$(curl -s -F "file=@$FILE_TO_DECODE" http://api.qrserver.com/v1/read-qr-code/)
-    
-    # Check for errors and parse the response with jq
-    error=$(echo "$response" | jq -r '.[0].symbol[0].error')
-
-    if [[ "$error" != "null" ]]; then
-        echo "${RED}Error decoding QR code: $error${RESETBG}"
-        exit 1
-    else
-        data=$(echo "$response" | jq -r '.[0].symbol[0].data')
-        echo "${GREEN}Decoded data:${RESETBG} $data"
-    fi
+    makeQRFile "$FILE_OUT" "$*"
+elif [[ $# -gt 0 ]]; then
+    makeqr "$*"
+else
+    usage
+    exit 0
 fi
 
 exit 0

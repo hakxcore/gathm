@@ -1,38 +1,53 @@
 #!/usr/bin/env bash
-# Author: Hakxcore https://github.com/hakxcore
-# Description: Fetches song lyrics from lrclib.net.
+# Author: Hakxcore & Alexander Epstein
+# Description: Fetch lyrics for a certain song.
 
 # Source the shared utility library
 source "$(dirname "$0")/../../lib/utils.bash"
 
 currentVersion="3.0.0"
-API_URL="https://lrclib.net/api/search"
 
-# --- Usage and Help ---
-usage()
+getLyrics()
 {
-cat <<EOF
-Lyrics (v$currentVersion)
+    local artist=$(echo "$1" | sed 's/ /%20/g; s/&/%26/g; s/,/%2C/g; s/-/%2D/g')
+    local song=$(echo "$2" | sed 's/ /%20/g; s/&/%26/g; s/,/%2C/g; s/-/%2D/g')
+    
+    # Using the lyrics.ovh API
+    local response=$(httpGet "https://api.lyrics.ovh/v1/$artist/$song")
+    
+    if [[ -z "$response" ]]; then
+        echo "Error: Could not connect to lyrics API."
+        return 1
+    fi
 
-Description: Fetches song lyrics from lrclib.net.
-
-Usage: lyrics -a <artist> -s <song> [-f <file>]
-  -a <artist>   The artist of the song.
-  -s <song>     The title of the song.
-  -f <file>     (Optional) Save the lyrics to a file instead of printing.
-  
-  -h            Show this help message.
-  -v            Get the tool version.
-
-Examples:
-  lyrics -a "Queen" -s "Bohemian Rhapsody"
-  lyrics -a "Led Zeppelin" -s "Stairway to Heaven" -f lyrics.txt
-EOF
+    # Extract lyrics using python
+    local lyrics=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('lyrics', ''))" 2>/dev/null)
+    
+    if [[ -z "$lyrics" ]]; then
+        echo "Error: No lyrics found for '$2' by '$1'."
+        return 1
+    fi
+    
+    echo -e "$lyrics"
 }
 
-# --- Helper Functions ---
-urlencode() {
-    python3 -c 'import urllib.parse; import sys; print(urllib.parse.quote(sys.stdin.read()))'
+usage()
+{
+  cat <<EOF
+Lyrics (v$currentVersion)
+Description: Fetch lyrics for a certain song.
+
+Usage: lyrics -a [artist] -s [song]
+  -a  Artist of the song
+  -s  Song name
+  -f  [file] Export to file instead of stdout
+  -h  Show the help
+  -v  Get the tool version
+
+Examples:
+   lyrics -a "Logic" -s "Run It"
+   lyrics -a "Beatles" -s "Yesterday" -f yesterday.txt
+EOF
 }
 
 # --- Initialize Variables ---
@@ -48,51 +63,30 @@ while getopts "a:s:f:vh" opt; do
     f) FILE_PATH="$OPTARG" ;;
     v) echo "Version $currentVersion"; exit 0 ;;
     h) usage; exit 0 ;;
-    \?) usage; exit 1 ;;
   esac
 done
 
-# --- Main Driver ---
-
-# Check that artist and song were provided
 if [[ -z "$ARTIST" || -z "$SONG" ]]; then
-    echo "${RED}Error: You must provide both an artist (-a) and a song (-s).${RESETBG}"
     usage
     exit 1
 fi
 
-# Check for required dependencies
-check_dependencies jq python3
-
-# Check for internet connection
+check_dependencies python3
 getConfiguredClient || exit 1
-checkInternet || { echo "${RED}Error: No active internet connection.${RESETBG}"; exit 1; }
+checkInternet || { echo "Error: No internet connection"; exit 1; }
 
-# URL-encode inputs
-encoded_artist=$(echo "$ARTIST" | urlencode)
-encoded_song=$(echo "$SONG" | urlencode)
+LYRICS_TEXT=$(getLyrics "$ARTIST" "$SONG")
+[[ $? -ne 0 ]] && exit 1
 
-# Construct the final API URL
-full_url="${API_URL}?artist_name=${encoded_artist}&track_name=${encoded_song}"
-
-# Fetch and process the data
-echo "Fetching lyrics for '$SONG' by '$ARTIST'..."
-lyrics=$(httpGet "$full_url" | jq -r '.[0].plainLyrics // "not found"')
-
-# Check if lyrics were found
-if [[ -z "$lyrics" || "$lyrics" == "not found" ]]; then
-    echo "${RED}Error: Lyrics not found for this song.${RESETBG}"
-    exit 1
-fi
-
-# Output the lyrics
 if [[ -n "$FILE_PATH" ]]; then
-    echo "$lyrics" > "$FILE_PATH"
-    echo "${GREEN}Lyrics saved to '$FILE_PATH'${RESETBG}"
+    if [[ -f "$FILE_PATH" ]] && is_interactive; then
+        read -p "File '$FILE_PATH' already exists. Overwrite? [y/N]: " answer
+        [[ "$answer" != [Yy] ]] && exit 0
+    fi
+    echo -e "$LYRICS_TEXT" > "$FILE_PATH"
+    echo "Lyrics saved to $FILE_PATH"
 else
-    print_divider
-    echo -e "${GREEN}$lyrics${RESETBG}"
-    print_divider
+    echo -e "$LYRICS_TEXT"
 fi
 
 exit 0
