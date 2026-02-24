@@ -1,0 +1,42 @@
+name: ipinfo
+version: "3.0.0"
+description: "IP address information and geolocation lookup"
+category: networking
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: ipinfo.io
+    base_url: https://ipinfo.io
+    health_endpoint: https://ipinfo.io
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: ip
+      type: string
+      required: false
+      description: "IP address to look up (defaults to current IP)"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "IP address details and geolocation"
+  json_fields:
+    - name: ip
+      type: string
+    - name: city
+      type: string
+    - name: region
+      type: string
+    - name: country
+      type: string
+    - name: org
+      type: string
+
+fallback_tool: geo
+tags: [networking, ip, geolocation, lookup]

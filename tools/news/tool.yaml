@@ -1,0 +1,39 @@
+name: news
+version: "3.0.0"
+description: "Latest news headlines from the terminal"
+category: data
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: getnews
+    base_url: https://getnews.tech
+    health_endpoint: https://getnews.tech
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: topic
+      type: string
+      required: false
+      description: "News topic to search for"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "News headlines and summaries"
+  json_fields:
+    - name: headlines
+      type: array
+      items:
+        - name: title
+          type: string
+        - name: source
+          type: string
+
+fallback_tool: null
+tags: [data, news, headlines, current-events]

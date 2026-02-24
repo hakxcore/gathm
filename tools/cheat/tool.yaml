@@ -1,0 +1,37 @@
+name: cheat
+version: "3.0.0"
+description: "Programming language cheatsheets and command references"
+category: data
+author: hakxcore
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: cheat.sh
+    base_url: https://cheat.sh
+    health_endpoint: https://cheat.sh
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "Language or command to look up (e.g., python, git, awk)"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Cheatsheet content for the queried topic"
+  json_fields:
+    - name: query
+      type: string
+    - name: content
+      type: string
+
+fallback_tool: null
+tags: [development, reference, programming, cheatsheet]

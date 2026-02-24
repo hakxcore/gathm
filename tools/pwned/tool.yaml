@@ -1,0 +1,38 @@
+name: pwned
+version: "3.0.0"
+description: "Check if your email/account has been compromised in data breaches"
+category: security
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: haveibeenpwned
+    base_url: https://haveibeenpwned.com/api/v3
+    health_endpoint: https://haveibeenpwned.com
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: account
+      type: string
+      required: true
+      description: "Email address or username to check"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Data breach results for the account"
+  json_fields:
+    - name: account
+      type: string
+    - name: breaches
+      type: array
+    - name: pwned
+      type: boolean
+
+fallback_tool: null
+tags: [security, breach, password, email, haveibeenpwned]

@@ -1,0 +1,38 @@
+name: transfer
+version: "3.0.0"
+description: "File upload and download via transfer.sh"
+category: networking
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: transfer.sh
+    base_url: https://transfer.sh
+    health_endpoint: https://transfer.sh
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: file
+      type: string
+      required: true
+      description: "File path to upload or download URL"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Transfer URL or downloaded file path"
+  json_fields:
+    - name: file
+      type: string
+    - name: url
+      type: string
+    - name: operation
+      type: string
+
+fallback_tool: null
+tags: [networking, file-transfer, upload, download, sharing]

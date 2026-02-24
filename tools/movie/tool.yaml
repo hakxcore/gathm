@@ -1,0 +1,51 @@
+name: movie
+version: "3.0.0"
+description: "Movie information lookup including ratings, plot, and cast"
+category: data
+
+dependencies:
+  system: [curl, python3]
+
+apis:
+  - name: omdbapi
+    base_url: http://www.omdbapi.com
+    health_endpoint: http://www.omdbapi.com/?apikey=946f500a&t=test
+    auth_required: true
+    auth_type: api_key
+
+input_schema:
+  arguments:
+    - name: title
+      type: string
+      required: true
+      description: "Movie title to search for"
+  flags:
+    - flag: "-d"
+      description: "Show detailed information"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Movie information with title, year, ratings, plot"
+  json_fields:
+    - name: title
+      type: string
+    - name: year
+      type: string
+    - name: runtime
+      type: string
+    - name: genre
+      type: string
+    - name: director
+      type: string
+    - name: actors
+      type: string
+    - name: plot
+      type: string
+    - name: ratings
+      type: object
+
+fallback_tool: null
+tags: [data, movies, entertainment, imdb, ratings]

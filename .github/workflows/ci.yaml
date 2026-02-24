@@ -1,0 +1,138 @@
+name: CI - Lint, Test & Validate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint main entry point
+        run: shellcheck -x gathm
+
+      - name: Lint utility libraries
+        run: |
+          for f in lib/*.bash; do
+            echo "Checking $f..."
+            shellcheck -x "$f" || true
+          done
+
+      - name: Lint agent scripts
+        run: |
+          for f in agent/*.sh; do
+            echo "Checking $f..."
+            shellcheck -x "$f" || true
+          done
+
+      - name: Lint tool scripts
+        run: |
+          for dir in tools/*/; do
+            tool_name=$(basename "$dir")
+            tool_file="$dir/$tool_name"
+            if [ -f "$tool_file" ]; then
+              echo "Checking $tool_file..."
+              shellcheck -x "$tool_file" || true
+            fi
+          done
+
+  validate-manifests:
+    name: Validate Tool Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate all tool.yaml files
+        run: |
+          python3 -c "
+          import yaml, sys, os
+          errors = 0
+          required_fields = ['name', 'version', 'description', 'category']
+          for tool_dir in sorted(os.listdir('tools')):
+              manifest_path = os.path.join('tools', tool_dir, 'tool.yaml')
+              if os.path.exists(manifest_path):
+                  try:
+                      with open(manifest_path) as f:
+                          data = yaml.safe_load(f)
+                      for field in required_fields:
+                          if field not in data:
+                              print(f'ERROR: {manifest_path} missing field: {field}')
+                              errors += 1
+                      print(f'OK: {manifest_path}')
+                  except Exception as e:
+                      print(f'ERROR: {manifest_path} - {e}')
+                      errors += 1
+              else:
+                  print(f'WARN: {tool_dir} has no tool.yaml manifest')
+          if errors > 0:
+              sys.exit(1)
+          print(f'All manifests valid!')
+          "
+
+  # Cross-platform agent smoke tests
+  test-agent:
+    name: Agent Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq || true
+
+      - name: Show platform info
+        run: |
+          echo "OS: $(uname -s)"
+          echo "Bash: ${BASH_VERSION}"
+          echo "Shell: $SHELL"
+
+      - name: Test agent initialization
+        run: bash agent/orchestrator.sh status --json
+
+      - name: Test tool listing
+        run: bash agent/orchestrator.sh list --json
+
+      - name: Test health check
+        run: bash agent/orchestrator.sh health all --json
+
+      - name: Test natural language query
+        run: bash agent/orchestrator.sh ask "what is the weather" --json
+
+      - name: Test task planning
+        run: bash agent/orchestrator.sh plan "daily briefing" --json
+
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t gathm:test .
+
+      - name: Test container
+        run: |
+          docker run --rm gathm:test gathm-agent status --json
+          docker run --rm gathm:test gathm-agent list --json

@@ -1,0 +1,37 @@
+name: shodan
+version: "3.0.0"
+description: "Shodan search engine for network device scanning and research"
+category: security
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: shodan
+    base_url: https://api.shodan.io
+    health_endpoint: https://api.shodan.io
+    auth_required: true
+    auth_type: api_key
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "Shodan search query"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Shodan search results with host details"
+  json_fields:
+    - name: results
+      type: array
+    - name: total
+      type: number
+
+fallback_tool: null
+tags: [security, scanning, network, shodan, iot, vulnerability]

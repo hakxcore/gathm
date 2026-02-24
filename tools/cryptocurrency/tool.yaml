@@ -1,0 +1,38 @@
+name: cryptocurrency
+version: "3.0.0"
+description: "Cryptocurrency exchange rates, prices, and charts"
+category: data
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: rate.sx
+    base_url: https://rate.sx
+    health_endpoint: https://rate.sx
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: coin
+      type: string
+      required: false
+      description: "Cryptocurrency symbol (e.g., btc, eth)"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Cryptocurrency price and chart data"
+  json_fields:
+    - name: coin
+      type: string
+    - name: price
+      type: string
+    - name: change
+      type: string
+
+fallback_tool: null
+tags: [data, crypto, bitcoin, ethereum, finance]

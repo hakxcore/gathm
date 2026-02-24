@@ -1,0 +1,40 @@
+name: covidinfo
+version: "3.0.0"
+description: "Global COVID-19 statistics and data"
+category: data
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: corona-stats
+    base_url: https://corona-stats.online
+    health_endpoint: https://corona-stats.online
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: country
+      type: string
+      required: false
+      description: "Country to get COVID stats for"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "COVID-19 statistics table"
+  json_fields:
+    - name: country
+      type: string
+    - name: cases
+      type: number
+    - name: deaths
+      type: number
+    - name: recovered
+      type: number
+
+fallback_tool: null
+tags: [data, health, covid, statistics]

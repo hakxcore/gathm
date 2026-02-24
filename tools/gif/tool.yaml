@@ -1,0 +1,31 @@
+name: gif
+version: "3.0.0"
+description: "View animated GIFs in the terminal"
+category: media
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: e.xec.sh
+    base_url: https://e.xec.sh
+    health_endpoint: https://e.xec.sh
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: url
+      type: string
+      required: true
+      description: "URL of the GIF to display"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Animated GIF displayed in terminal"
+
+fallback_tool: null
+tags: [media, gif, animation, terminal]

@@ -1,0 +1,40 @@
+name: meme
+version: "3.0.0"
+description: "Meme generator from the command line"
+category: media
+
+dependencies:
+  system: [curl]
+
+apis:
+  - name: memegen
+    base_url: https://api.memegen.link
+    health_endpoint: https://api.memegen.link
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: top_text
+      type: string
+      required: true
+      description: "Top text for the meme"
+    - name: bottom_text
+      type: string
+      required: false
+      description: "Bottom text for the meme"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Generated meme URL"
+  json_fields:
+    - name: url
+      type: string
+    - name: template
+      type: string
+
+fallback_tool: null
+tags: [media, meme, fun, entertainment, image]

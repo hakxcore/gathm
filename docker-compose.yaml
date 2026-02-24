@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # Gathm API Server
+  gathm-api:
+    build: .
+    container_name: gathm-api
+    ports:
+      - "8080:8080"
+    environment:
+      - GATHM_LOG_LEVEL=INFO
+      - GATHM_OUTPUT_MODE=json
+      - GATHM_MAX_RETRIES=3
+      # API keys (set these in .env file or environment)
+      - OMDB_API_KEY=${OMDB_API_KEY:-946f500a}
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+    volumes:
+      - gathm-data:/root/.gathm
+      - gathm-logs:/root/.gathm/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "gathm-agent health all --json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Gathm Health Monitor (continuous monitoring sidecar)
+  gathm-monitor:
+    build: .
+    container_name: gathm-monitor
+    command: ["bash", "/opt/gathm/agent/orchestrator.sh", "monitor", "60"]
+    environment:
+      - GATHM_LOG_LEVEL=INFO
+    volumes:
+      - gathm-data:/root/.gathm
+      - gathm-logs:/root/.gathm/logs
+    restart: unless-stopped
+    depends_on:
+      - gathm-api
+
+volumes:
+  gathm-data:
+    driver: local
+  gathm-logs:
+    driver: local
