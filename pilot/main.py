@@ -151,7 +151,7 @@ def run_gathm_tool_raw(command: str) -> str:
             ["bash", "-c", shell_cmd, "gathm-tool", *tool_args],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,
             env=env
         )
         output = result.stdout.strip()

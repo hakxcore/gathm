@@ -1,6 +1,6 @@
 name: portscan
-version: "3.0.0"
-description: "Flexible TCP/UDP port scanner with nmap or Python fallback engine"
+version: "3.1.0"
+description: "Flexible TCP/UDP port scanner with CIDR subnet support and nmap or Python engine"
 category: security
 
 dependencies:
@@ -11,7 +11,7 @@ input_schema:
     - name: target
       type: string
       required: true
-      description: "Hostname or IP to scan"
+      description: "Hostname, IP, or CIDR range (e.g. 192.168.1.0/24) to scan"
   flags:
     - flag: "-t"
       description: "Scan mode: tcp, udp, both"

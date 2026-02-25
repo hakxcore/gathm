@@ -4,7 +4,7 @@
 
 source "$(dirname "$0")/../../lib/utils.bash"
 
-currentVersion="3.0.0"
+currentVersion="3.1.0"
 scan_mode="tcp"
 ports="21,22,25,53,80,110,143,443,445,3389,8080"
 timeout_seconds=1
@@ -16,7 +16,7 @@ Portscan (v$currentVersion)
 Description: Scan TCP/UDP ports using nmap (if available) or a built-in Python scanner.
 
 Usage: portscan [flags] [target]
-  [target]      Hostname or IP address
+  [target]      Hostname, IP address, or CIDR range (e.g. 192.168.1.0/24)
   -t MODE       Scan mode: tcp | udp | both (default: $scan_mode)
   -p PORTS      Port list/range (default: $ports)
   -w SECONDS    Per-port timeout in seconds (default: $timeout_seconds)
@@ -28,6 +28,8 @@ Examples:
   portscan scanme.nmap.org
   portscan -t both -p 1-1024 scanme.nmap.org
   portscan -t udp -p 53,67,68 -e python 8.8.8.8
+  portscan 192.168.1.0/24
+  portscan -p 22,80,443 10.0.0.0/24
 USAGE
 }
 
@@ -49,9 +51,11 @@ run_nmap_scan() {
 run_python_scan() {
   local target="$1"
   python3 - "$target" "$scan_mode" "$ports" "$timeout_seconds" <<'PY'
+import ipaddress
 import socket
 import sys
-from typing import List, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Set, Tuple
 
 target = sys.argv[1].strip()
 mode = sys.argv[2].strip().lower()
@@ -91,6 +95,20 @@ def parse_ports(spec: str) -> List[int]:
                 out.add(p)
     return sorted(out)
 
+def expand_targets(target: str) -> List[str]:
+    """Expand CIDR notation or range into individual IPs. Single hosts pass through."""
+    if "/" in target:
+        try:
+            network = ipaddress.ip_network(target, strict=False)
+            if network.num_addresses > 65536:
+                print(f"Error: Subnet {target} too large ({network.num_addresses} hosts, limit: 65536).")
+                sys.exit(1)
+            return [str(ip) for ip in network.hosts()]
+        except ValueError as exc:
+            print(f"Error: Invalid CIDR notation '{target}' ({exc}).")
+            sys.exit(1)
+    return [target]
+
 ports = parse_ports(port_spec)
 if not ports:
     print("Error: No valid ports to scan.")
@@ -100,34 +118,33 @@ if len(ports) > 4096:
     print(f"Error: Refusing to scan {len(ports)} ports in one run (limit: 4096).")
     sys.exit(1)
 
-try:
-    info = socket.getaddrinfo(target, None, 0, socket.SOCK_STREAM)
-except socket.gaierror as exc:
-    print(f"Error: Failed to resolve target '{target}' ({exc}).")
-    sys.exit(1)
+targets = expand_targets(target)
+is_subnet = len(targets) > 1
 
-family = info[0][0]
-ip = info[0][4][0]
+def resolve_host(host: str):
+    try:
+        info = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+        return info[0][0], info[0][4][0]
+    except socket.gaierror:
+        return None, None
 
-def addr_for_port(port: int):
-    if family == socket.AF_INET6:
-        return (ip, port, 0, 0)
-    return (ip, port)
-
-def scan_tcp(port: int) -> bool:
+def scan_tcp_port(family, ip, port: int) -> bool:
     sock = socket.socket(family, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
-        code = sock.connect_ex(addr_for_port(port))
-        return code == 0
+        addr = (ip, port, 0, 0) if family == socket.AF_INET6 else (ip, port)
+        return sock.connect_ex(addr) == 0
+    except (OSError, socket.error):
+        return False
     finally:
         sock.close()
 
-def scan_udp(port: int):
+def scan_udp_port(family, ip, port: int) -> str:
     sock = socket.socket(family, socket.SOCK_DGRAM)
     sock.settimeout(timeout)
     try:
-        sock.sendto(b"\x00", addr_for_port(port))
+        addr = (ip, port, 0, 0) if family == socket.AF_INET6 else (ip, port)
+        sock.sendto(b"\x00", addr)
         try:
             sock.recvfrom(1024)
             return "open"
@@ -142,41 +159,94 @@ def scan_udp(port: int):
     finally:
         sock.close()
 
-tcp_open = []
-udp_open = []
-udp_open_filtered = []
+def scan_single_host(host: str) -> Dict:
+    """Scan a single host and return results dict."""
+    family, ip = resolve_host(host)
+    if ip is None:
+        return {"host": host, "ip": None, "error": f"Failed to resolve '{host}'"}
 
-for port in ports:
-    if mode in {"tcp", "both"} and scan_tcp(port):
-        tcp_open.append(port)
+    tcp_open = []
+    udp_open = []
+    udp_open_filtered = []
 
-    if mode in {"udp", "both"}:
-        state = scan_udp(port)
-        if state == "open":
-            udp_open.append(port)
-        elif state == "open|filtered":
-            udp_open_filtered.append(port)
+    for port in ports:
+        if mode in {"tcp", "both"} and scan_tcp_port(family, ip, port):
+            tcp_open.append(port)
+        if mode in {"udp", "both"}:
+            state = scan_udp_port(family, ip, port)
+            if state == "open":
+                udp_open.append(port)
+            elif state == "open|filtered":
+                udp_open_filtered.append(port)
+
+    return {
+        "host": host, "ip": ip,
+        "tcp_open": tcp_open, "udp_open": udp_open,
+        "udp_open_filtered": udp_open_filtered,
+    }
 
 print("Engine: python")
 print(f"Target: {target}")
-print(f"Resolved IP: {ip}")
 print(f"Mode: {mode}")
-print(f"Ports Scanned: {len(ports)}")
+print(f"Ports per host: {len(ports)}")
 
-if mode in {"tcp", "both"}:
-    if tcp_open:
-        print("Open TCP Ports: " + ", ".join(str(p) for p in tcp_open))
-    else:
-        print("Open TCP Ports: none")
+if is_subnet:
+    print(f"Hosts to scan: {len(targets)}")
+    # Use threading for parallel host scanning (cap at 50 threads)
+    max_workers = min(50, len(targets))
+    results: List[Dict] = []
+    hosts_with_open_ports = 0
 
-if mode in {"udp", "both"}:
-    if udp_open:
-        print("Open UDP Ports: " + ", ".join(str(p) for p in udp_open))
-    else:
-        print("Open UDP Ports: none detected")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(scan_single_host, h): h for h in targets}
+        for future in as_completed(futures):
+            result = future.result()
+            if result.get("error"):
+                continue
+            has_open = (result.get("tcp_open") or result.get("udp_open")
+                        or result.get("udp_open_filtered"))
+            if has_open:
+                results.append(result)
+                hosts_with_open_ports += 1
 
-    if udp_open_filtered:
-        print("Open|Filtered UDP Ports: " + ", ".join(str(p) for p in udp_open_filtered))
+    print(f"\nHosts with open ports: {hosts_with_open_ports}/{len(targets)}")
+    # Sort results by IP for consistent output
+    results.sort(key=lambda r: ipaddress.ip_address(r["ip"]))
+    for r in results:
+        print(f"\n  Host: {r['ip']}")
+        if mode in {"tcp", "both"} and r.get("tcp_open"):
+            print(f"    Open TCP: {', '.join(str(p) for p in r['tcp_open'])}")
+        if mode in {"udp", "both"} and r.get("udp_open"):
+            print(f"    Open UDP: {', '.join(str(p) for p in r['udp_open'])}")
+        if mode in {"udp", "both"} and r.get("udp_open_filtered"):
+            print(f"    Open|Filtered UDP: {', '.join(str(p) for p in r['udp_open_filtered'])}")
+
+    if not results:
+        print("No hosts with open ports found.")
+else:
+    # Single host scan (original behavior)
+    family, ip = resolve_host(targets[0])
+    if ip is None:
+        print(f"Error: Failed to resolve target '{targets[0]}'.")
+        sys.exit(1)
+
+    print(f"Resolved IP: {ip}")
+    result = scan_single_host(targets[0])
+
+    if mode in {"tcp", "both"}:
+        if result.get("tcp_open"):
+            print("Open TCP Ports: " + ", ".join(str(p) for p in result["tcp_open"]))
+        else:
+            print("Open TCP Ports: none")
+
+    if mode in {"udp", "both"}:
+        if result.get("udp_open"):
+            print("Open UDP Ports: " + ", ".join(str(p) for p in result["udp_open"]))
+        else:
+            print("Open UDP Ports: none detected")
+
+        if result.get("udp_open_filtered"):
+            print("Open|Filtered UDP Ports: " + ", ".join(str(p) for p in result["udp_open_filtered"]))
 PY
 }
 
