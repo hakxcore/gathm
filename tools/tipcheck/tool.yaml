@@ -1,0 +1,31 @@
+name: tipcheck
+version: "3.0.0"
+description: "Threat intelligence reputation checks using VirusTotal and AbuseIPDB"
+category: security
+
+dependencies:
+  system: [curl, python3]
+
+input_schema:
+  arguments:
+    - name: indicator
+      type: string
+      required: true
+      description: "Domain, IP, URL, or file hash"
+  flags:
+    - flag: "-s"
+      description: "Provider: all, vt, abuseipdb"
+      has_argument: true
+    - flag: "-t"
+      description: "Request timeout in seconds"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Threat reputation and analysis summary from selected providers"
+
+fallback_tool: urlscan
+tags: [security, threat-intel, virustotal, abuseipdb, osint, reputation]

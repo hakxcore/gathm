@@ -137,12 +137,41 @@ _match_intent() {
     local query_lower="$1"
     local best_match=""
     local best_score=0
+    local normalized_query
+    normalized_query=$(echo "$query_lower" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/ /g' | tr -s ' ' | sed 's/^ //; s/ $//')
 
     # Each line: "patterns|tool_name"
     # Patterns within a group separated by spaces
     local intents="
 weather forecast temperature rain snow climate|weather
 ip address wan lan geolocation where_am_i my_ip|geo
+dns mx txt cname aaaa ns doh resolve|dns
+rdap registrar registrant domain_owner nameserver registration_data|rdap
+rdns reverse_dns ptr reverse_lookup ip_to_domain|rdns
+whois whois_lookup registrant_contact registrar_lookup ownership_lookup|whois
+certificate cert tls ssl expiry issuer san|certinfo
+cve cvss advisory vuln vulnerability cwe|cve
+http https headers status response endpoint uptime|httpprobe
+dnssec dnskey ds rrsig signed_zone chain_of_trust|dnssec
+asn bgp prefix prefixes autonomous_system route routing|asn
+urlscan phishing suspicious_url malware_url reputation domain_intel|urlscan
+waf firewall cloudflare akamai incapsula sucuri bot_protection wafdetect|wafdetect
+subdomain subdomains crt certificate_transparency enumerate_hosts|subdomains
+robots robots_txt crawl_directives sitemap crawler bot_rules|robotsaudit
+security_headers hsts csp x_frame_options referrer_policy headers_audit|headersaudit
+subfinder passive_subdomain projectdiscovery_subfinder|subfinder
+dnsx dns_probe mass_dns projectdiscovery_dnsx|dnsx
+httpx web_probe banner_grab projectdiscovery_httpx|httpx
+naabu port_scan fast_port_scan projectdiscovery_naabu|naabu
+katana web_crawler endpoint_crawler projectdiscovery_katana|katana
+nuclei template_scan vuln_templates projectdiscovery_nuclei|nuclei
+uncover search_engine_discovery internet_asset_discovery projectdiscovery_uncover|uncover
+pdchain recon_chain projectdiscovery_chain recon_workflow|pdchain
+strix strix_tool strix_runner|strix
+portscan tcp_scan udp_scan port_range service_discovery nmap|portscan
+maltego graph_investigation entity_graph transforms|maltego
+tipcheck threat_intel virustotal abuseipdb ioc_reputation|tipcheck
+imganalyze image_analysis ocr object_detection image_forensics|imganalyze
 search google find_online look_up_online|googler
 movie film cinema imdb rating|movie
 define meaning definition dictionary|define
@@ -175,7 +204,7 @@ ip_info ip_detail ip_lookup|ipinfo
             # Convert underscores to spaces for matching
             local match_pattern
             match_pattern=$(echo "$p" | tr '_' ' ')
-            if echo "$query_lower" | grep -qi "$match_pattern" 2>/dev/null; then
+            if [[ " $normalized_query " == *" $match_pattern "* ]]; then
                 score=$((score + 1))
             fi
         done
@@ -508,6 +537,12 @@ cmd_status() {
     fi
 }
 
+# --- Engineering Agent ---
+cmd_engineer() {
+    source "$GATHM_ROOT/engineer/engineer.sh"
+    cmd_engineer "$@"
+}
+
 # --- Continuous Monitoring ---
 cmd_monitor() {
     local interval="${1:-30}"
@@ -564,6 +599,7 @@ ${BOLD}Commands:${RESETBG}
   run <tool> [args]       Execute a tool with auto-recovery and circuit breaking
   ask <query>             Natural language tool selection and execution
   plan <description>      Decompose a task into a tool execution plan
+  engineer <task>         AI engineering agent for code and tool development
   chain '<t1 | t2 | t3>'  Execute a tool pipeline (pipe output between tools)
   list [--json]           List all available tools with metadata
   health [tool|all]       Run health checks on tools
@@ -621,6 +657,7 @@ case "$command" in
     run)      cmd_run "$@" ;;
     ask)      cmd_ask "$@" ;;
     plan)     source "$AGENT_DIR/planner.sh"; cmd_plan "$@" ;;
+    engineer) cmd_engineer "$@" ;;
     chain)    cmd_chain "$@" ;;
     list)     cmd_list "$@" ;;
     health)   cmd_health "$@" ;;

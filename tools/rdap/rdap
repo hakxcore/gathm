@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: RDAP lookup for domain and IP registration details.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+BASE_URL="https://rdap.org"
+
+usage() {
+  cat <<EOF
+RDAP (v$currentVersion)
+Description: Look up registration data for a domain or IP via RDAP.
+
+Usage: rdap [target]
+  [target]  Domain (example.com) or IP (8.8.8.8 / 2001:4860:4860::8888)
+  -h        Show the help
+  -v        Get the tool version
+
+Examples:
+  rdap example.com
+  rdap 8.8.8.8
+EOF
+}
+
+normalize_target() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  echo "$value"
+}
+
+is_ip_target() {
+  local value="$1"
+  if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    return 0
+  fi
+  if [[ "$value" == *":"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+query_rdap() {
+  local target="$1"
+  local object_type="domain"
+  local endpoint_target
+  endpoint_target=$(normalize_target "$target")
+
+  if is_ip_target "$endpoint_target"; then
+    object_type="ip"
+  fi
+
+  local response
+  response=$(httpGet "$BASE_URL/$object_type/$endpoint_target")
+  if [[ -z "$response" ]]; then
+    echo "Error: Empty response from RDAP service."
+    return 1
+  fi
+
+  echo "$response" | python3 - "$object_type" "$endpoint_target" <<'PY'
+import json
+import sys
+
+object_type = sys.argv[1]
+target = sys.argv[2]
+
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: Unable to parse RDAP response ({exc}).")
+    sys.exit(1)
+
+if isinstance(data, dict) and data.get("errorCode"):
+    desc = data.get("description") or []
+    detail = desc[0] if desc else "request failed"
+    print(f"Error: RDAP {data.get('errorCode')} - {detail}")
+    sys.exit(1)
+
+def vcard_fn(entity):
+    vcard = entity.get("vcardArray")
+    if not isinstance(vcard, list) or len(vcard) < 2:
+        return None
+    for row in vcard[1]:
+        if len(row) >= 4 and row[0] == "fn":
+            return row[3]
+    return None
+
+def event_value(obj, action):
+    for event in obj.get("events", []) or []:
+        if str(event.get("eventAction", "")).lower() == action.lower():
+            return event.get("eventDate")
+    return None
+
+if object_type == "domain":
+    registrar = None
+    for entity in data.get("entities", []) or []:
+        roles = [str(r).lower() for r in entity.get("roles", []) or []]
+        if "registrar" in roles:
+            registrar = vcard_fn(entity) or entity.get("handle")
+            break
+
+    nameservers = []
+    for ns in data.get("nameservers", []) or []:
+        if ns.get("ldhName"):
+            nameservers.append(ns["ldhName"])
+
+    statuses = ", ".join(data.get("status", []) or []) or "N/A"
+    created = event_value(data, "registration")
+    updated = event_value(data, "last changed")
+    expiry = event_value(data, "expiration")
+
+    print("Object: domain")
+    print(f"Domain: {data.get('ldhName') or target}")
+    print(f"Handle: {data.get('handle', 'N/A')}")
+    print(f"Status: {statuses}")
+    print(f"Registrar: {registrar or 'N/A'}")
+    if created:
+        print(f"Created: {created}")
+    if updated:
+        print(f"Updated: {updated}")
+    if expiry:
+        print(f"Expiration: {expiry}")
+    if nameservers:
+        print("Nameservers:")
+        for ns in nameservers[:12]:
+            print(f"  - {ns}")
+else:
+    statuses = ", ".join(data.get("status", []) or []) or "N/A"
+    print("Object: ip")
+    print(f"IP: {target}")
+    print(f"Handle: {data.get('handle', 'N/A')}")
+    print(f"Name: {data.get('name', 'N/A')}")
+    print(f"Country: {data.get('country', 'N/A')}")
+    print(f"IP Version: {data.get('ipVersion', 'N/A')}")
+    print(f"Start Address: {data.get('startAddress', 'N/A')}")
+    print(f"End Address: {data.get('endAddress', 'N/A')}")
+    print(f"Status: {statuses}")
+PY
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+query_rdap "$1"
+exit $?

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Wrapper for ProjectDiscovery uncover.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+TOOL_BIN="uncover"
+
+usage() {
+  cat <<USAGE
+Uncover (v$currentVersion)
+Description: Search-engine-based asset discovery wrapper for ProjectDiscovery uncover.
+
+Usage: uncover [flags] [query]
+  [query]   Search query (shortcut for: uncover -q query)
+  -h        Show this help
+  -v        Show wrapper version
+
+Examples:
+  uncover "ssl:"example.com""
+  uncover -q "title:login" -engine shodan
+USAGE
+}
+
+ensure_tool() {
+  if ! command -v "$TOOL_BIN" >/dev/null 2>&1; then
+    echo "Error: '$TOOL_BIN' is not installed. Install from ProjectDiscovery to use this wrapper." >&2
+    return 1
+  fi
+}
+
+run_tool() {
+  if [[ $# -eq 1 && "$1" != -* ]]; then
+    exec "$TOOL_BIN" -q "$1"
+  fi
+  exec "$TOOL_BIN" "$@"
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+ensure_tool || exit 1
+run_tool "$@"

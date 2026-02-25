@@ -65,7 +65,7 @@ convertCurrency()
   else
     # Using exchangerate-api.com as in original
     local api_response=$(httpGet "https://api.exchangerate-api.com/v4/latest/$trueBase")
-    exchangeRate=$(echo "$api_response" | grep -Eo "$trueTarget":[0-9.]*" | cut -d: -f2)
+    exchangeRate=$(echo "$api_response" | grep -Eo "\"$trueTarget\":[0-9.]+" | head -n 1 | cut -d: -f2)
   fi
 
   if [[ -z "$exchangeRate" ]]; then

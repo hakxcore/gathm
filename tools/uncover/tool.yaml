@@ -1,0 +1,28 @@
+name: uncover
+version: "3.0.0"
+description: "ProjectDiscovery uncover wrapper for search-engine asset discovery"
+category: security
+
+dependencies:
+  system: [uncover]
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "Search query"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Discovered internet assets"
+  json_fields:
+    - name: asset
+      type: string
+
+fallback_tool: googler
+tags: [projectdiscovery, uncover, osint, discovery, security]

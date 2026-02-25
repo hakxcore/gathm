@@ -1,0 +1,5 @@
+pyautogen
+autogen-ext[openai,anthropic]
+python-dotenv
+pyyaml
+rich

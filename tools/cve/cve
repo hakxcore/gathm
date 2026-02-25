@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Query CVE vulnerability details from NVD.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+NVD_BASE="https://services.nvd.nist.gov/rest/json/cves/2.0"
+DEFAULT_LIMIT=5
+
+usage() {
+  cat <<EOF
+CVE (v$currentVersion)
+Description: Look up CVE records and severity details from NVD.
+
+Usage: cve [flags] [CVE-ID]
+  [CVE-ID]      CVE identifier (e.g., CVE-2024-3094)
+  -k <keyword>  Keyword search (product/vendor/topic)
+  -l <limit>    Number of results to print (default: $DEFAULT_LIMIT, max: 20)
+  -h            Show the help
+  -v            Get the tool version
+
+Examples:
+  cve CVE-2024-3094
+  cve -k openssl -l 3
+EOF
+}
+
+is_valid_cve_id() {
+  local value
+  value=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+  [[ "$value" =~ ^CVE-[0-9]{4}-[0-9]{4,}$ ]]
+}
+
+urlencode() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+}
+
+build_query_url() {
+  local cve_id="$1"
+  local keyword="$2"
+  local limit="$3"
+
+  if [[ -n "$cve_id" ]]; then
+    echo "$NVD_BASE?cveId=$(urlencode "$cve_id")"
+  else
+    echo "$NVD_BASE?keywordSearch=$(urlencode "$keyword")&resultsPerPage=$limit"
+  fi
+}
+
+render_results() {
+  local response="$1"
+  local query_label="$2"
+  local limit="$3"
+
+  echo "$response" | python3 - "$query_label" "$limit" <<'PY'
+import json
+import sys
+
+query_label = sys.argv[1]
+limit = int(sys.argv[2])
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: Could not parse NVD response ({exc}).")
+    sys.exit(1)
+
+def severity_from_metrics(metrics):
+    if not isinstance(metrics, dict):
+        return "N/A"
+    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        entries = metrics.get(key)
+        if isinstance(entries, list) and entries:
+            item = entries[0]
+            cvss = item.get("cvssData", {}) if isinstance(item, dict) else {}
+            sev = cvss.get("baseSeverity") or item.get("baseSeverity")
+            score = cvss.get("baseScore")
+            if sev and score is not None:
+                return f"{sev} ({score})"
+            if sev:
+                return str(sev)
+    return "N/A"
+
+def english_description(cve):
+    for desc in cve.get("descriptions", []) or []:
+        if str(desc.get("lang", "")).lower() == "en":
+            return str(desc.get("value", ""))
+    return ""
+
+def shorten(text, n=200):
+    text = " ".join(str(text).split())
+    if len(text) <= n:
+        return text
+    return text[: n - 3] + "..."
+
+total = int(payload.get("totalResults", 0))
+items = payload.get("vulnerabilities") or []
+print(f"Query: {query_label}")
+print(f"Total Results: {total}")
+if not items:
+    print("No CVE results found.")
+    sys.exit(0)
+
+print("Results:")
+for entry in items[:limit]:
+    cve = entry.get("cve", {})
+    cve_id = cve.get("id", "N/A")
+    published = cve.get("published", "N/A")
+    modified = cve.get("lastModified", "N/A")
+    severity = severity_from_metrics(cve.get("metrics"))
+    description = shorten(english_description(cve))
+    print(f"  - {cve_id}")
+    print(f"    Severity: {severity}")
+    print(f"    Published: {published}")
+    print(f"    Last Modified: {modified}")
+    if description:
+        print(f"    Summary: {description}")
+PY
+}
+
+keyword=""
+limit="$DEFAULT_LIMIT"
+cve_id=""
+
+while getopts "k:l:vh" opt; do
+  case "$opt" in
+    k) keyword="$OPTARG" ;;
+    l) limit="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ "$limit" =~ ^[0-9]+$ ]]; then
+  if [[ "$limit" -lt 1 ]]; then limit=1; fi
+  if [[ "$limit" -gt 20 ]]; then limit=20; fi
+else
+  echo "Error: limit must be a number."
+  exit 1
+fi
+
+if [[ -n "$keyword" && $# -gt 0 ]]; then
+  echo "Error: Use either a CVE ID or -k keyword, not both."
+  usage
+  exit 1
+fi
+
+if [[ -n "$keyword" ]]; then
+  query_label="keyword: $keyword"
+elif [[ $# -eq 1 ]]; then
+  cve_id=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+  if ! is_valid_cve_id "$cve_id"; then
+    echo "Error: Invalid CVE ID format."
+    usage
+    exit 1
+  fi
+  query_label="$cve_id"
+else
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+url=$(build_query_url "$cve_id" "$keyword" "$limit")
+response=$(httpGet "$url")
+if [[ -z "$response" ]]; then
+  echo "Error: Empty response from NVD API."
+  exit 1
+fi
+
+render_results "$response" "$query_label" "$limit"
+exit $?

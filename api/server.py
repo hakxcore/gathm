@@ -16,6 +16,7 @@ Endpoints:
     GET  /api/v1/health/{tool}          - Tool health check
     POST /api/v1/agent/ask              - Natural language query
     POST /api/v1/agent/plan             - Create execution plan
+    POST /api/v1/agent/engineer         - Engineering agent task
     POST /api/v1/agent/chain            - Execute tool pipeline
     GET  /api/v1/agent/status           - Agent status
     POST /api/v1/agent/heal             - Self-heal tools
@@ -253,6 +254,7 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
                     "GET /api/v1/health/{tool}": "Tool health check",
                     "POST /api/v1/agent/ask": "Natural language query",
                     "POST /api/v1/agent/plan": "Create execution plan",
+                    "POST /api/v1/agent/engineer": "Engineering agent task",
                     "POST /api/v1/agent/chain": "Execute tool pipeline",
                     "GET /api/v1/agent/status": "Agent status",
                     "POST /api/v1/agent/heal": "Self-heal tools",
@@ -298,6 +300,15 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "Missing 'task' field"}, 400)
                 return
             result = run_agent_command("plan", task)
+            self._send_json(result)
+
+        # POST /api/v1/agent/engineer
+        elif path == "/api/v1/agent/engineer":
+            task = body.get("task", "")
+            if not task:
+                self._send_json({"error": "Missing 'task' field"}, 400)
+                return
+            result = run_agent_command("engineer", task)
             self._send_json(result)
 
         # POST /api/v1/agent/chain

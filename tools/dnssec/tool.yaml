@@ -1,0 +1,40 @@
+name: dnssec
+version: "3.0.0"
+description: "DNSSEC checker for DS/DNSKEY presence and resolver validation flags"
+category: security
+
+dependencies:
+  system: [curl, python3]
+
+apis:
+  - name: dns.google
+    base_url: https://dns.google/resolve
+    health_endpoint: https://dns.google/resolve?name=cloudflare.com&type=DNSKEY&do=1
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: domain
+      type: string
+      required: true
+      description: "Domain to check for DNSSEC posture"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "DNSSEC posture, AD flag, status codes, and DS/DNSKEY record summary"
+  json_fields:
+    - name: domain
+      type: string
+    - name: dnssec_posture
+      type: string
+    - name: ds_records
+      type: number
+    - name: dnskey_records
+      type: number
+
+fallback_tool: dns
+tags: [security, dnssec, dnskey, ds, rrsig, domain]

@@ -54,11 +54,11 @@ agent:
 categories:
   security:
     description: "Security and hacking tools"
-    tools: [cipher, crypt, pwned, qrify, shodan]
+    tools: [certinfo, cipher, crypt, cve, dnssec, headersaudit, katana, naabu, nuclei, pdchain, portscan, pwned, qrify, robotsaudit, shodan, siteciphers, tipcheck, uncover, urlscan, wafdetect]
     requires_approval: true
   networking:
     description: "Networking and connectivity tools"
-    tools: [geo, ipinfo, shorturl, transfer]
+    tools: [asn, dns, dnsx, geo, httpprobe, httpx, ipinfo, rdap, rdns, shorturl, subdomains, subfinder, transfer, whois]
     requires_approval: false
   data:
     description: "Data and information retrieval"
@@ -70,7 +70,7 @@ categories:
     requires_approval: false
   productivity:
     description: "Productivity tools"
-    tools: [todo]
+    tools: [todo, strix, maltego, imganalyze]
     requires_approval: false
 
 # API keys and secrets (use environment variables in production)

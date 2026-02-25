@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Image analysis helper for metadata, OCR, and object extraction.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+model="${GATHM_IMAGE_MODEL:-${GATHM_OLLAMA_MODEL:-${OLLAMA_MODEL:-gemma3:12b}}}"
+timeout_seconds=120
+
+usage() {
+  cat <<USAGE
+ImgAnalyze (v$currentVersion)
+Description: Analyze images using metadata extraction, OCR, and local Ollama object recognition.
+
+Usage: imganalyze [flags] <command> <image_path>
+
+Commands:
+  meta <image_path>      Show basic file/image metadata
+  ocr <image_path>       Extract text with tesseract OCR
+  objects <image_path>   Identify visible objects using local Ollama vision model
+
+Flags:
+  -m MODEL      Ollama model for objects command (default: $model)
+  -t SECONDS    Timeout for Ollama calls (default: $timeout_seconds)
+  -h            Show this help
+  -v            Show tool version
+
+Examples:
+  imganalyze meta ./screenshot.png
+  imganalyze ocr ./invoice.jpg
+  imganalyze -m gemma3:12b objects ./photo.png
+USAGE
+}
+
+ensure_image_path() {
+  local path="$1"
+  if [[ -z "$path" ]]; then
+    echo "Error: image path is required." >&2
+    return 1
+  fi
+  if [[ ! -f "$path" ]]; then
+    echo "Error: image not found: $path" >&2
+    return 1
+  fi
+}
+
+show_metadata() {
+  local image_path="$1"
+  python3 - "$image_path" <<'PY'
+import os
+import sys
+
+image_path = sys.argv[1]
+print(f"Path: {image_path}")
+print(f"File Size: {os.path.getsize(image_path)} bytes")
+
+try:
+    from PIL import Image  # type: ignore
+except Exception:
+    print("Pillow: not installed (install pillow for dimensions/format/mode output)")
+    sys.exit(0)
+
+try:
+    with Image.open(image_path) as img:
+        print(f"Format: {img.format}")
+        print(f"Dimensions: {img.width}x{img.height}")
+        print(f"Mode: {img.mode}")
+except Exception as exc:
+    print(f"Warning: failed to parse image with Pillow ({exc})")
+PY
+}
+
+run_ocr() {
+  local image_path="$1"
+  if ! command -v tesseract >/dev/null 2>&1; then
+    echo "Error: tesseract is not installed. Install tesseract to use OCR." >&2
+    return 1
+  fi
+  tesseract "$image_path" stdout 2>/dev/null
+}
+
+run_object_analysis() {
+  local image_path="$1"
+
+  local payload
+  payload=$(python3 - "$image_path" "$model" <<'PY'
+import base64
+import json
+import pathlib
+import sys
+
+image_path = pathlib.Path(sys.argv[1])
+model = sys.argv[2]
+
+img_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+payload = {
+    "model": model,
+    "stream": False,
+    "prompt": (
+        "Identify the main objects in this image. "
+        "Return concise bullets with object name and confidence as low/medium/high."
+    ),
+    "images": [img_b64],
+}
+print(json.dumps(payload))
+PY
+)
+
+  local response
+  response=$(curl -sS --max-time "$timeout_seconds" "http://127.0.0.1:11434/api/generate" \
+    -H "Content-Type: application/json" \
+    -d "$payload" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Error: failed to call local Ollama API at http://127.0.0.1:11434" >&2
+    echo "$response" >&2
+    return 1
+  fi
+
+  echo "$response" | python3 - "$model" <<'PY'
+import json
+import sys
+
+model = sys.argv[1]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: could not parse Ollama response ({exc})")
+    sys.exit(1)
+
+if payload.get("error"):
+    print(f"Error: {payload['error']}")
+    sys.exit(1)
+
+print(f"Model: {model}")
+print("Object Analysis:")
+resp = payload.get("response", "").strip()
+if resp:
+    print(resp)
+else:
+    print("No response text from model.")
+PY
+}
+
+while getopts "m:t:vh" opt; do
+  case "$opt" in
+    m) model="$OPTARG" ;;
+    t) timeout_seconds="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -lt 2 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "Error: -t expects a whole number of seconds." >&2
+  exit 1
+fi
+
+command_name="$1"
+image_path="$2"
+
+ensure_image_path "$image_path" || exit 1
+
+case "$command_name" in
+  meta)
+    check_dependencies python3
+    show_metadata "$image_path"
+    ;;
+  ocr)
+    run_ocr "$image_path"
+    ;;
+  objects|detect)
+    check_dependencies curl python3
+    run_object_analysis "$image_path"
+    ;;
+  *)
+    echo "Error: unknown command '$command_name'." >&2
+    usage
+    exit 1
+    ;;
+esac
+
+exit $?

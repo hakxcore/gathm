@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Threat-intelligence reputation checks via VirusTotal and AbuseIPDB.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+provider="all"
+timeout_seconds=25
+
+usage() {
+  cat <<USAGE
+TIPCheck (v$currentVersion)
+Description: Query threat intelligence providers (VirusTotal / AbuseIPDB) for indicator reputation.
+
+Usage: tipcheck [flags] [indicator]
+  [indicator]   Domain, IP, URL, or file hash
+  -s PROVIDER   all | vt | abuseipdb (default: $provider)
+  -t SECONDS    Request timeout in seconds (default: $timeout_seconds)
+  -h            Show this help
+  -v            Show tool version
+
+Environment Variables:
+  VT_API_KEY or VIRUSTOTAL_API_KEY   VirusTotal API key
+  ABUSEIPDB_API_KEY                  AbuseIPDB API key
+
+Examples:
+  tipcheck 8.8.8.8
+  tipcheck -s vt https://example.com/login
+  tipcheck -s abuseipdb 1.1.1.1
+USAGE
+}
+
+detect_indicator_type() {
+  local value="$1"
+  if [[ "$value" =~ ^https?:// ]]; then
+    echo "url"
+    return 0
+  fi
+
+  if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$value" == *":"* ]]; then
+    echo "ip"
+    return 0
+  fi
+
+  if [[ "$value" =~ ^[A-Fa-f0-9]{32}$ || "$value" =~ ^[A-Fa-f0-9]{40}$ || "$value" =~ ^[A-Fa-f0-9]{64}$ || "$value" =~ ^[A-Fa-f0-9]{128}$ ]]; then
+    echo "hash"
+    return 0
+  fi
+
+  if [[ "$value" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo "domain"
+    return 0
+  fi
+
+  echo "unknown"
+}
+
+vt_endpoint_for() {
+  local indicator="$1"
+  local type="$2"
+  local base="https://www.virustotal.com/api/v3"
+
+  case "$type" in
+    ip) echo "$base/ip_addresses/$indicator" ;;
+    domain) echo "$base/domains/$indicator" ;;
+    hash) echo "$base/files/$indicator" ;;
+    url)
+      python3 - "$indicator" <<'PY'
+import base64
+import sys
+
+url = sys.argv[1].encode("utf-8")
+encoded = base64.urlsafe_b64encode(url).decode("ascii").strip("=")
+print(f"https://www.virustotal.com/api/v3/urls/{encoded}")
+PY
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+run_virustotal() {
+  local indicator="$1"
+  local type="$2"
+  local vt_key="${VT_API_KEY:-${VIRUSTOTAL_API_KEY:-}}"
+
+  if [[ -z "$vt_key" ]]; then
+    echo "Provider: VirusTotal"
+    echo "Status: skipped (set VT_API_KEY or VIRUSTOTAL_API_KEY)"
+    return 0
+  fi
+
+  local endpoint
+  endpoint=$(vt_endpoint_for "$indicator" "$type") || {
+    echo "Provider: VirusTotal"
+    echo "Status: unsupported indicator type '$type'"
+    return 1
+  }
+
+  local response
+  response=$(curl -sS --max-time "$timeout_seconds" -H "x-apikey: $vt_key" "$endpoint" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Provider: VirusTotal"
+    echo "Status: request failed"
+    echo "Detail: $response"
+    return 1
+  fi
+
+  echo "$response" | python3 - "$indicator" "$type" <<'PY'
+import datetime
+import json
+import sys
+
+indicator = sys.argv[1]
+indicator_type = sys.argv[2]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print("Provider: VirusTotal")
+    print(f"Status: parse error ({exc})")
+    sys.exit(1)
+
+if isinstance(payload, dict) and payload.get("error"):
+    err = payload["error"]
+    print("Provider: VirusTotal")
+    print("Status: error")
+    print(f"Detail: {err.get('message', 'Unknown error')}")
+    sys.exit(1)
+
+data = payload.get("data") or {}
+attrs = data.get("attributes") or {}
+stats = attrs.get("last_analysis_stats") or {}
+
+malicious = stats.get("malicious", 0)
+suspicious = stats.get("suspicious", 0)
+undetected = stats.get("undetected", 0)
+harmless = stats.get("harmless", 0)
+reputation = attrs.get("reputation", "N/A")
+last_mod = attrs.get("last_modification_date")
+
+print("Provider: VirusTotal")
+print(f"Indicator: {indicator} ({indicator_type})")
+print(f"Reputation: {reputation}")
+print(f"Analysis: malicious={malicious}, suspicious={suspicious}, harmless={harmless}, undetected={undetected}")
+if isinstance(last_mod, int):
+    dt = datetime.datetime.utcfromtimestamp(last_mod).isoformat() + "Z"
+    print(f"Last Modified: {dt}")
+
+if indicator_type == "domain":
+    whois_date = attrs.get("whois_date")
+    if isinstance(whois_date, int):
+        dt = datetime.datetime.utcfromtimestamp(whois_date).isoformat() + "Z"
+        print(f"WHOIS Date: {dt}")
+    category = attrs.get("categories")
+    if isinstance(category, dict) and category:
+        print("Categories:")
+        for k, v in list(category.items())[:5]:
+            print(f"  - {k}: {v}")
+PY
+}
+
+run_abuseipdb() {
+  local indicator="$1"
+  local type="$2"
+  local abuse_key="${ABUSEIPDB_API_KEY:-}"
+
+  if [[ "$type" != "ip" ]]; then
+    echo "Provider: AbuseIPDB"
+    echo "Status: skipped (only IP indicators are supported)"
+    return 0
+  fi
+
+  if [[ -z "$abuse_key" ]]; then
+    echo "Provider: AbuseIPDB"
+    echo "Status: skipped (set ABUSEIPDB_API_KEY)"
+    return 0
+  fi
+
+  local response
+  response=$(curl -sS --max-time "$timeout_seconds" -G "https://api.abuseipdb.com/api/v2/check" \
+    --data-urlencode "ipAddress=$indicator" \
+    --data-urlencode "maxAgeInDays=90" \
+    --data-urlencode "verbose=true" \
+    -H "Key: $abuse_key" \
+    -H "Accept: application/json" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Provider: AbuseIPDB"
+    echo "Status: request failed"
+    echo "Detail: $response"
+    return 1
+  fi
+
+  echo "$response" | python3 - "$indicator" <<'PY'
+import json
+import sys
+
+indicator = sys.argv[1]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print("Provider: AbuseIPDB")
+    print(f"Status: parse error ({exc})")
+    sys.exit(1)
+
+if isinstance(payload, dict) and payload.get("errors"):
+    err = payload["errors"][0] if payload["errors"] else {}
+    print("Provider: AbuseIPDB")
+    print("Status: error")
+    print(f"Detail: {err.get('detail', 'Unknown error')}")
+    sys.exit(1)
+
+data = payload.get("data") or {}
+print("Provider: AbuseIPDB")
+print(f"Indicator: {indicator} (ip)")
+print(f"Abuse Confidence Score: {data.get('abuseConfidenceScore', 'N/A')}")
+print(f"Total Reports: {data.get('totalReports', 'N/A')}")
+print(f"Last Reported At: {data.get('lastReportedAt', 'N/A')}")
+print(f"Country: {data.get('countryCode', 'N/A')}")
+print(f"Usage Type: {data.get('usageType', 'N/A')}")
+print(f"ISP: {data.get('isp', 'N/A')}")
+print(f"Domain: {data.get('domain', 'N/A')}")
+
+hostnames = data.get("hostnames") or []
+if hostnames:
+    print("Hostnames:")
+    for host in hostnames[:10]:
+        print(f"  - {host}")
+PY
+}
+
+while getopts "s:t:vh" opt; do
+  case "$opt" in
+    s) provider="$(echo "$OPTARG" | tr '[:upper:]' '[:lower:]')" ;;
+    t) timeout_seconds="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "Error: -t expects a whole number of seconds." >&2
+  exit 1
+fi
+
+case "$provider" in
+  all|vt|abuseipdb) ;;
+  *)
+    echo "Error: -s must be one of all, vt, abuseipdb." >&2
+    exit 1
+    ;;
+esac
+
+indicator="$1"
+indicator_type=$(detect_indicator_type "$indicator")
+if [[ "$indicator_type" == "unknown" ]]; then
+  echo "Error: Could not infer indicator type for '$indicator'." >&2
+  exit 1
+fi
+
+check_dependencies curl python3
+
+overall_exit=0
+ran_provider=0
+
+if [[ "$provider" == "all" || "$provider" == "vt" ]]; then
+  run_virustotal "$indicator" "$indicator_type" || overall_exit=1
+  ran_provider=1
+fi
+
+if [[ "$provider" == "all" || "$provider" == "abuseipdb" ]]; then
+  if [[ "$ran_provider" -eq 1 ]]; then
+    echo ""
+  fi
+  run_abuseipdb "$indicator" "$indicator_type" || overall_exit=1
+  ran_provider=1
+fi
+
+if [[ "$ran_provider" -eq 0 ]]; then
+  echo "Error: No provider executed." >&2
+  exit 1
+fi
+
+exit $overall_exit

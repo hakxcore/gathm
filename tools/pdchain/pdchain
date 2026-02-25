@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: ProjectDiscovery discovery chain orchestrator.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+mode="passive"
+out_dir=""
+top_ports="100"
+crawl_depth="2"
+nuclei_severity="medium,high,critical"
+
+usage() {
+  cat <<USAGE
+PDChain (v$currentVersion)
+Description: Run chained recon workflow (subdomain -> dns/http probe -> optional active scan).
+
+Usage: pdchain [flags] [domain]
+  [domain]         Root domain target
+  -m <mode>        Workflow mode: passive | active | full (default: passive)
+  -o <dir>         Output directory (default: /tmp/gathm-pdchain-<domain>-<timestamp>)
+  -p <top_ports>   Top ports for naabu (default: $top_ports)
+  -d <depth>       Crawl depth for katana (default: $crawl_depth)
+  -s <severity>    Nuclei severities CSV (default: $nuclei_severity)
+  -h               Show help
+  -v               Show version
+
+Modes:
+  passive: subdomain + resolution + http probe
+  active:  passive + naabu + katana + nuclei
+  full:    same as active
+
+Examples:
+  pdchain example.com
+  pdchain -m active -o /tmp/pd example.com
+USAGE
+}
+
+has_bin() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+dedupe_file() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    awk 'NF' "$file" | sort -u > "${file}.tmp" && mv "${file}.tmp" "$file"
+  fi
+}
+
+run_subdomain_stage() {
+  local domain="$1"
+  local hosts_file="$2"
+
+  echo "[1/6] Subdomain discovery"
+  : > "$hosts_file"
+
+  if has_bin subfinder; then
+    echo "  - using subfinder"
+    subfinder -d "$domain" -silent 2>/dev/null >> "$hosts_file" || true
+  fi
+
+  # Built-in fallback/source enrichment
+  local sub_out
+  sub_out=$("$(dirname "$0")/../subdomains/subdomains" -l 200 "$domain" 2>/dev/null || true)
+  echo "$sub_out" | awk '/^  - /{print $2}' >> "$hosts_file"
+
+  echo "$domain" >> "$hosts_file"
+  dedupe_file "$hosts_file"
+}
+
+run_dns_stage() {
+  local hosts_file="$1"
+  local resolved_file="$2"
+
+  echo "[2/6] DNS resolution"
+  : > "$resolved_file"
+  if has_bin dnsx; then
+    echo "  - using dnsx"
+    dnsx -l "$hosts_file" -silent 2>/dev/null >> "$resolved_file" || true
+  else
+    echo "  - dnsx not installed, using host list as fallback"
+    cat "$hosts_file" >> "$resolved_file"
+  fi
+  dedupe_file "$resolved_file"
+}
+
+run_http_stage() {
+  local resolved_file="$1"
+  local live_file="$2"
+
+  echo "[3/6] HTTP probing"
+  : > "$live_file"
+  if has_bin httpx; then
+    echo "  - using httpx"
+    httpx -l "$resolved_file" -silent 2>/dev/null >> "$live_file" || true
+  else
+    echo "  - httpx not installed, building https:// fallback list"
+    awk 'NF {print "https://"$0}' "$resolved_file" >> "$live_file"
+  fi
+  dedupe_file "$live_file"
+}
+
+run_naabu_stage() {
+  local resolved_file="$1"
+  local ports_file="$2"
+
+  echo "[4/6] Port scanning"
+  : > "$ports_file"
+  if has_bin naabu; then
+    echo "  - using naabu"
+    naabu -list "$resolved_file" -top-ports "$top_ports" -silent 2>/dev/null >> "$ports_file" || true
+  else
+    echo "  - naabu not installed, skipping"
+  fi
+}
+
+run_katana_stage() {
+  local live_file="$1"
+  local crawl_file="$2"
+
+  echo "[5/6] Crawling"
+  : > "$crawl_file"
+  if has_bin katana; then
+    echo "  - using katana"
+    katana -list "$live_file" -depth "$crawl_depth" -silent 2>/dev/null >> "$crawl_file" || true
+  else
+    echo "  - katana not installed, skipping"
+  fi
+}
+
+run_nuclei_stage() {
+  local live_file="$1"
+  local nuclei_file="$2"
+
+  echo "[6/6] Vulnerability templates"
+  : > "$nuclei_file"
+  if has_bin nuclei; then
+    echo "  - using nuclei"
+    nuclei -l "$live_file" -severity "$nuclei_severity" -silent 2>/dev/null >> "$nuclei_file" || true
+  else
+    echo "  - nuclei not installed, skipping"
+  fi
+}
+
+print_summary() {
+  local hosts_file="$1"
+  local resolved_file="$2"
+  local live_file="$3"
+  local ports_file="$4"
+  local crawl_file="$5"
+  local nuclei_file="$6"
+
+  echo
+  echo "PDChain Summary"
+  print_divider
+  echo "Output Directory: $out_dir"
+  echo "Hosts:      $(wc -l < "$hosts_file" 2>/dev/null | tr -d ' ') -> $hosts_file"
+  echo "Resolved:   $(wc -l < "$resolved_file" 2>/dev/null | tr -d ' ') -> $resolved_file"
+  echo "Live:       $(wc -l < "$live_file" 2>/dev/null | tr -d ' ') -> $live_file"
+  if [[ "$mode" == "active" || "$mode" == "full" ]]; then
+    echo "Ports:      $(wc -l < "$ports_file" 2>/dev/null | tr -d ' ') -> $ports_file"
+    echo "Crawl URLs: $(wc -l < "$crawl_file" 2>/dev/null | tr -d ' ') -> $crawl_file"
+    echo "Nuclei:     $(wc -l < "$nuclei_file" 2>/dev/null | tr -d ' ') -> $nuclei_file"
+  fi
+}
+
+while getopts "m:o:p:d:s:vh" opt; do
+  case "$opt" in
+    m) mode="$OPTARG" ;;
+    o) out_dir="$OPTARG" ;;
+    p) top_ports="$OPTARG" ;;
+    d) crawl_depth="$OPTARG" ;;
+    s) nuclei_severity="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+case "$mode" in
+  passive|active|full) ;;
+  *)
+    echo "Error: invalid mode '$mode'"
+    usage
+    exit 1
+    ;;
+esac
+
+local_domain="$1"
+if [[ -z "$out_dir" ]]; then
+  ts=$(date +%Y%m%d-%H%M%S)
+  safe_domain=$(echo "$local_domain" | tr '/:' '__')
+  out_dir="/tmp/gathm-pdchain-${safe_domain}-${ts}"
+fi
+mkdir -p "$out_dir"
+
+hosts_file="$out_dir/hosts.txt"
+resolved_file="$out_dir/resolved.txt"
+live_file="$out_dir/live.txt"
+ports_file="$out_dir/ports.txt"
+crawl_file="$out_dir/crawl.txt"
+nuclei_file="$out_dir/nuclei.txt"
+
+run_subdomain_stage "$local_domain" "$hosts_file"
+run_dns_stage "$hosts_file" "$resolved_file"
+run_http_stage "$resolved_file" "$live_file"
+
+if [[ "$mode" == "active" || "$mode" == "full" ]]; then
+  run_naabu_stage "$resolved_file" "$ports_file"
+  run_katana_stage "$live_file" "$crawl_file"
+  run_nuclei_stage "$live_file" "$nuclei_file"
+fi
+
+print_summary "$hosts_file" "$resolved_file" "$live_file" "$ports_file" "$crawl_file" "$nuclei_file"
+exit 0

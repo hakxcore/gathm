@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: DNS record lookup using DNS-over-HTTPS.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+BASE_URL="https://dns.google/resolve"
+recordType="A"
+
+usage() {
+  cat <<EOF
+DNS (v$currentVersion)
+Description: Query DNS records using DNS-over-HTTPS.
+
+Usage: dns [flags] [domain]
+  [domain]  Domain name to resolve
+  -t TYPE   Record type (A, AAAA, CNAME, MX, TXT, NS, SOA, PTR, CAA, SRV, ANY)
+  -h        Show the help
+  -v        Get the tool version
+
+Examples:
+  dns example.com
+  dns -t MX gmail.com
+  dns -t TXT openai.com
+EOF
+}
+
+normalize_domain() {
+  local domain="$1"
+  domain="${domain#http://}"
+  domain="${domain#https://}"
+  domain="${domain%%/*}"
+  echo "$domain"
+}
+
+is_valid_type() {
+  local t
+  t=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+  case "$t" in
+    A|AAAA|CNAME|MX|TXT|NS|SOA|PTR|CAA|SRV|ANY) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+query_dns() {
+  local domain="$1"
+  local type="$2"
+  local query_domain
+  query_domain=$(normalize_domain "$domain")
+  local response
+  response=$(httpGet "$BASE_URL?name=$query_domain&type=$type")
+  if [[ -z "$response" ]]; then
+    echo "Error: Empty response from DNS service."
+    return 1
+  fi
+
+  echo "$response" | python3 - "$query_domain" "$type" <<'PY'
+import json
+import sys
+
+domain = sys.argv[1]
+rtype = sys.argv[2]
+
+status_map = {
+    0: "NOERROR",
+    1: "FORMERR",
+    2: "SERVFAIL",
+    3: "NXDOMAIN",
+    4: "NOTIMP",
+    5: "REFUSED",
+}
+type_map = {
+    1: "A",
+    2: "NS",
+    5: "CNAME",
+    6: "SOA",
+    12: "PTR",
+    15: "MX",
+    16: "TXT",
+    28: "AAAA",
+    33: "SRV",
+    257: "CAA",
+    255: "ANY",
+}
+
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: Unable to parse DNS response ({exc}).")
+    sys.exit(1)
+
+status_code = int(data.get("Status", -1))
+status_name = status_map.get(status_code, f"UNKNOWN({status_code})")
+print(f"Query: {domain} ({rtype})")
+print(f"Status: {status_name}")
+
+comment = data.get("Comment")
+if comment:
+    print(f"Comment: {comment}")
+
+answers = data.get("Answer") or []
+if not answers:
+    print("Answers: none")
+    sys.exit(0 if status_code == 0 else 1)
+
+print("Answers:")
+for item in answers:
+    rr_type = type_map.get(item.get("type"), str(item.get("type", "N/A")))
+    ttl = item.get("TTL", "N/A")
+    name = item.get("name", "N/A")
+    value = item.get("data", "")
+    print(f"  - {name} {rr_type} {value} (TTL={ttl})")
+PY
+}
+
+while getopts "t:vh" opt; do
+  case "$opt" in
+    t) recordType=$(echo "$OPTARG" | tr '[:lower:]' '[:upper:]') ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if ! is_valid_type "$recordType"; then
+  echo "Error: Unsupported record type '$recordType'."
+  usage
+  exit 1
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+query_dns "$1" "$recordType"
+exit $?

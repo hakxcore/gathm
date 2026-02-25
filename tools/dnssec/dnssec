@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: DNSSEC posture check using DNS-over-HTTPS.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+BASE_URL="https://dns.google/resolve"
+
+usage() {
+  cat <<EOF
+DNSSEC (v$currentVersion)
+Description: Check DNSSEC indicators (DS + DNSKEY + AD) for a domain.
+
+Usage: dnssec [domain]
+  [domain]  Domain to inspect
+  -h        Show the help
+  -v        Get the tool version
+
+Examples:
+  dnssec cloudflare.com
+  dnssec example.com
+EOF
+}
+
+normalize_domain() {
+  local domain="$1"
+  domain="${domain#http://}"
+  domain="${domain#https://}"
+  domain="${domain%%/*}"
+  echo "$domain"
+}
+
+check_dnssec() {
+  local input_domain="$1"
+  local domain
+  domain=$(normalize_domain "$input_domain")
+
+  local ds_json dnskey_json a_json
+  ds_json=$(httpGet "$BASE_URL?name=$domain&type=DS&do=1")
+  dnskey_json=$(httpGet "$BASE_URL?name=$domain&type=DNSKEY&do=1")
+  a_json=$(httpGet "$BASE_URL?name=$domain&type=A&do=1")
+
+  if [[ -z "$ds_json" || -z "$dnskey_json" || -z "$a_json" ]]; then
+    echo "Error: Empty response from DNS service."
+    return 1
+  fi
+
+  DS_JSON="$ds_json" DNSKEY_JSON="$dnskey_json" A_JSON="$a_json" python3 - "$domain" <<'PY'
+import json
+import os
+import sys
+
+domain = sys.argv[1]
+
+def parse(payload, label):
+    try:
+        return json.loads(payload)
+    except Exception as exc:
+        print(f"Error: Could not parse {label} response ({exc}).")
+        sys.exit(1)
+
+ds = parse(os.environ.get("DS_JSON", ""), "DS")
+dnskey = parse(os.environ.get("DNSKEY_JSON", ""), "DNSKEY")
+a = parse(os.environ.get("A_JSON", ""), "A")
+
+def status_name(code):
+    mapping = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+    return mapping.get(int(code), f"UNKNOWN({code})")
+
+ds_answers = ds.get("Answer") or []
+dnskey_answers = dnskey.get("Answer") or []
+a_answers = a.get("Answer") or []
+
+has_ds = len(ds_answers) > 0
+has_dnskey = len(dnskey_answers) > 0
+ad_validated = bool(a.get("AD"))
+
+if has_ds and has_dnskey:
+    posture = "ENABLED"
+elif has_dnskey and not has_ds:
+    posture = "PARTIAL"
+else:
+    posture = "NOT_ENABLED"
+
+print(f"Domain: {domain}")
+print(f"DNSSEC Posture: {posture}")
+print(f"Resolver AD Flag (A query): {'true' if ad_validated else 'false'}")
+print(f"DS Status: {status_name(ds.get('Status', -1))}")
+print(f"DNSKEY Status: {status_name(dnskey.get('Status', -1))}")
+print(f"DS Records: {len(ds_answers)}")
+print(f"DNSKEY Records: {len(dnskey_answers)}")
+
+if ds_answers:
+    print("DS Records:")
+    for ans in ds_answers[:5]:
+        print(f"  - {ans.get('data', '')}")
+
+if dnskey_answers:
+    print("DNSKEY Records:")
+    for ans in dnskey_answers[:5]:
+        print(f"  - {ans.get('data', '')[:90]}...")
+PY
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+check_dnssec "$1"
+exit $?

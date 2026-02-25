@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: TLS certificate inspection for HTTPS endpoints.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+usage() {
+  cat <<EOF
+CertInfo (v$currentVersion)
+Description: Inspect TLS certificate details for a host.
+
+Usage: certinfo [host[:port]]
+  [host[:port]]  Domain name and optional port (default: 443)
+  -h             Show the help
+  -v             Get the tool version
+
+Examples:
+  certinfo github.com
+  certinfo example.com:8443
+EOF
+}
+
+normalize_target() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  echo "$value"
+}
+
+fetch_peer_certificate() {
+  local server="$1"
+  local host="$2"
+  local raw
+
+  if command -v timeout >/dev/null 2>&1; then
+    raw=$(timeout 10 bash -c "echo | openssl s_client -servername \"$host\" -connect \"$server\" 2>/dev/null" 2>/dev/null)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    raw=$(gtimeout 10 bash -c "echo | openssl s_client -servername \"$host\" -connect \"$server\" 2>/dev/null" 2>/dev/null)
+  else
+    raw=$(echo | openssl s_client -servername "$host" -connect "$server" 2>/dev/null)
+  fi
+
+  echo "$raw" | awk '/-----BEGIN CERTIFICATE-----/{flag=1} flag{print} /-----END CERTIFICATE-----/{exit}'
+}
+
+inspect_certificate() {
+  local input_target="$1"
+  local normalized
+  normalized=$(normalize_target "$input_target")
+
+  if [[ -z "$normalized" ]]; then
+    echo "Error: Empty target."
+    return 1
+  fi
+
+  local server="$normalized"
+  if [[ "$server" != *:* ]]; then
+    server="${server}:443"
+  fi
+  local host="${server%%:*}"
+
+  local cert_pem
+  cert_pem=$(fetch_peer_certificate "$server" "$host")
+  if [[ -z "$cert_pem" ]]; then
+    echo "Error: Could not retrieve certificate from $server"
+    return 1
+  fi
+
+  local cert_details
+  cert_details=$(echo "$cert_pem" | openssl x509 -noout -subject -issuer -dates -serial -fingerprint -sha256 -ext subjectAltName 2>/dev/null)
+  if [[ -z "$cert_details" ]]; then
+    echo "Error: Unable to parse certificate data."
+    return 1
+  fi
+
+  local not_after
+  not_after=$(echo "$cert_details" | sed -n 's/^notAfter=//p')
+
+  local validity
+  validity=$(python3 - "$not_after" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+value = sys.argv[1].strip()
+if not value:
+    print("UNKNOWN|unknown")
+    sys.exit(0)
+
+parsed = None
+for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y GMT"):
+    try:
+        parsed = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        break
+    except Exception:
+        pass
+
+if parsed is None:
+    print("UNKNOWN|unknown")
+    sys.exit(0)
+
+days_left = (parsed - datetime.now(timezone.utc)).days
+if days_left < 0:
+    state = "EXPIRED"
+elif days_left <= 30:
+    state = "EXPIRING_SOON"
+else:
+    state = "VALID"
+print(f"{state}|{days_left}")
+PY
+)
+
+  local cert_state="${validity%%|*}"
+  local days_left="${validity##*|}"
+
+  echo "Server: $server"
+  echo "Certificate Status: $cert_state"
+  if [[ "$days_left" != "unknown" ]]; then
+    echo "Days Until Expiry: $days_left"
+  fi
+  echo "$cert_details" | sed -n 's/^subject=/Subject: /p'
+  echo "$cert_details" | sed -n 's/^issuer=/Issuer: /p'
+  echo "$cert_details" | sed -n 's/^notBefore=/Valid From: /p'
+  echo "$cert_details" | sed -n 's/^notAfter=/Valid Until: /p'
+  echo "$cert_details" | sed -n 's/^serial=/Serial: /p'
+  echo "$cert_details" | sed -n 's/^sha256 Fingerprint=/SHA256 Fingerprint: /p'
+
+  local san_line
+  san_line=$(echo "$cert_details" | awk '/X509v3 Subject Alternative Name/{getline; gsub(/^ +/, ""); print}')
+  if [[ -n "$san_line" ]]; then
+    echo "SAN: $san_line"
+  fi
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies openssl python3
+inspect_certificate "$1"
+exit $?

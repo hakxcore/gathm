@@ -1,0 +1,37 @@
+name: portscan
+version: "3.0.0"
+description: "Flexible TCP/UDP port scanner with nmap or Python fallback engine"
+category: security
+
+dependencies:
+  system: [python3]
+
+input_schema:
+  arguments:
+    - name: target
+      type: string
+      required: true
+      description: "Hostname or IP to scan"
+  flags:
+    - flag: "-t"
+      description: "Scan mode: tcp, udp, both"
+      has_argument: true
+    - flag: "-p"
+      description: "Port list or range"
+      has_argument: true
+    - flag: "-w"
+      description: "Per-port timeout (seconds)"
+      has_argument: true
+    - flag: "-e"
+      description: "Engine: auto, nmap, python"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Port scan results for TCP/UDP services"
+
+fallback_tool: naabu
+tags: [security, networking, portscan, tcp, udp, nmap, reconnaissance]

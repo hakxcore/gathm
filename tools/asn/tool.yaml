@@ -1,0 +1,40 @@
+name: asn
+version: "3.0.0"
+description: "ASN lookup and IP-to-ASN mapping with BGP prefix intelligence"
+category: networking
+
+dependencies:
+  system: [curl, python3]
+
+apis:
+  - name: bgpview
+    base_url: https://api.bgpview.io
+    health_endpoint: https://api.bgpview.io/asn/15169
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "ASN (AS12345) or IP address"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "ASN details including org, country, and BGP prefixes"
+  json_fields:
+    - name: asn
+      type: string
+    - name: name
+      type: string
+    - name: country
+      type: string
+    - name: prefixes
+      type: array
+
+fallback_tool: ipinfo
+tags: [networking, asn, bgp, prefixes, routing, ip]

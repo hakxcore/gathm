@@ -1,0 +1,25 @@
+name: strix
+version: "3.0.0"
+description: "Wrapper for local strix binary to expose it through gathm"
+category: utility
+
+dependencies:
+  system: [strix]
+
+input_schema:
+  arguments:
+    - name: args
+      type: string
+      required: true
+      description: "Arguments forwarded to strix"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Output from local strix command"
+
+fallback_tool: null
+tags: [strix, integration, utility]

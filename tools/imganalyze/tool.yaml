@@ -1,0 +1,35 @@
+name: imganalyze
+version: "3.0.0"
+description: "Basic image analysis: metadata, OCR text extraction, and object identification"
+category: utility
+
+dependencies:
+  system: [python3]
+
+input_schema:
+  arguments:
+    - name: command
+      type: string
+      required: true
+      description: "meta, ocr, or objects"
+    - name: image_path
+      type: string
+      required: true
+      description: "Path to image file"
+  flags:
+    - flag: "-m"
+      description: "Ollama model for object analysis"
+      has_argument: true
+    - flag: "-t"
+      description: "Timeout in seconds"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Image metadata, OCR text, or object analysis summary"
+
+fallback_tool: null
+tags: [image, ocr, vision, object-detection, ollama, reconnaissance]

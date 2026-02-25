@@ -1,0 +1,29 @@
+name: whois
+version: "3.0.0"
+description: "WHOIS lookup for domain/IP registration with RDAP fallback"
+category: networking
+
+dependencies:
+  system: [whois]
+
+input_schema:
+  arguments:
+    - name: target
+      type: string
+      required: true
+      description: "Domain name or IP address"
+  flags:
+    - flag: "-r"
+      description: "Force RDAP backend"
+    - flag: "-w"
+      description: "Force native whois backend"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Registration details and ownership metadata"
+
+fallback_tool: rdap
+tags: [networking, whois, rdap, registrar, domain, osint]

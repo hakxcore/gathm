@@ -1,0 +1,28 @@
+name: subfinder
+version: "3.0.0"
+description: "ProjectDiscovery subfinder wrapper for passive subdomain discovery"
+category: networking
+
+dependencies:
+  system: [subfinder]
+
+input_schema:
+  arguments:
+    - name: domain
+      type: string
+      required: true
+      description: "Target root domain"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Subdomain enumeration results"
+  json_fields:
+    - name: subdomains
+      type: array
+
+fallback_tool: subdomains
+tags: [projectdiscovery, subfinder, subdomain, osint, networking]

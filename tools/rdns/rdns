@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Reverse DNS lookup from IP address to hostname (PTR).
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+usage() {
+  cat <<USAGE
+rDNS (v$currentVersion)
+Description: Resolve reverse DNS (PTR) records for IPv4/IPv6 addresses.
+
+Usage: rdns [ip-address]
+  [ip-address]  Target IPv4 or IPv6 address
+  -h            Show this help
+  -v            Show tool version
+
+Examples:
+  rdns 8.8.8.8
+  rdns 2606:4700:4700::1111
+USAGE
+}
+
+reverse_lookup() {
+  local target_ip="$1"
+  python3 - "$target_ip" <<'PY'
+import ipaddress
+import socket
+import sys
+
+target = sys.argv[1].strip()
+
+try:
+    ipaddress.ip_address(target)
+except ValueError:
+    print(f"Error: '{target}' is not a valid IPv4/IPv6 address.")
+    sys.exit(1)
+
+try:
+    host, aliases, addrs = socket.gethostbyaddr(target)
+except socket.herror as exc:
+    print(f"IP: {target}")
+    print("PTR Record: not found")
+    print(f"Resolver Detail: {exc}")
+    sys.exit(0)
+except Exception as exc:
+    print(f"Error: reverse lookup failed ({exc}).")
+    sys.exit(1)
+
+print(f"IP: {target}")
+print(f"Primary PTR: {host}")
+if aliases:
+    print("Aliases:")
+    for alias in aliases:
+        print(f"  - {alias}")
+if addrs:
+    print("Address Set:")
+    for addr in addrs:
+        print(f"  - {addr}")
+PY
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+reverse_lookup "$1"
+exit $?

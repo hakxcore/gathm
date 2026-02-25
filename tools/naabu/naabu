@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Wrapper for ProjectDiscovery naabu.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+TOOL_BIN="naabu"
+
+usage() {
+  cat <<USAGE
+Naabu (v$currentVersion)
+Description: Fast port scanner wrapper for ProjectDiscovery naabu.
+
+Usage: naabu [flags] [host]
+  [host]    Target host (shortcut for: naabu -host host)
+  -h        Show this help
+  -v        Show wrapper version
+
+Examples:
+  naabu example.com
+  naabu -host example.com -top-ports 100
+USAGE
+}
+
+ensure_tool() {
+  if ! command -v "$TOOL_BIN" >/dev/null 2>&1; then
+    echo "Error: '$TOOL_BIN' is not installed. Install from ProjectDiscovery to use this wrapper." >&2
+    return 1
+  fi
+}
+
+run_tool() {
+  if [[ $# -eq 1 && "$1" != -* ]]; then
+    exec "$TOOL_BIN" -host "$1"
+  fi
+  exec "$TOOL_BIN" "$@"
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+ensure_tool || exit 1
+run_tool "$@"

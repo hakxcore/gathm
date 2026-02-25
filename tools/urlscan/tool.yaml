@@ -1,0 +1,43 @@
+name: urlscan
+version: "3.0.0"
+description: "URLScan public intelligence search for URLs/domains and verdict metadata"
+category: security
+
+dependencies:
+  system: [curl, python3]
+
+apis:
+  - name: urlscan
+    base_url: https://urlscan.io/api/v1/search/
+    health_endpoint: https://urlscan.io/api/v1/search/?q=domain:example.com&size=1
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "URL, domain, or URLScan query expression"
+  flags:
+    - flag: "-l"
+      description: "Maximum results to return"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "URLScan search results with verdict, IP, country, and result links"
+  json_fields:
+    - name: url
+      type: string
+    - name: domain
+      type: string
+    - name: malicious
+      type: boolean
+    - name: score
+      type: number
+
+fallback_tool: googler
+tags: [security, urlscan, threat-intel, phishing, url, domain]

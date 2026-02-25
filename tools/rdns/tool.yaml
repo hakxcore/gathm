@@ -1,0 +1,32 @@
+name: rdns
+version: "3.0.0"
+description: "Reverse DNS lookup (PTR) for IPv4/IPv6 addresses"
+category: networking
+
+dependencies:
+  system: [python3]
+
+input_schema:
+  arguments:
+    - name: ip_address
+      type: string
+      required: true
+      description: "IPv4 or IPv6 address to reverse-resolve"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Reverse DNS hostnames, aliases, and resolver details"
+  json_fields:
+    - name: ip
+      type: string
+    - name: primary_ptr
+      type: string
+    - name: aliases
+      type: array
+
+fallback_tool: dns
+tags: [networking, dns, reverse-dns, ptr, ip]

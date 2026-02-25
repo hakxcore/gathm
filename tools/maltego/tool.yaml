@@ -1,0 +1,28 @@
+name: maltego
+version: "3.0.0"
+description: "Maltego integration helper for CSV entities, enrichment bundles, and app launch"
+category: utility
+
+dependencies:
+  system: [python3]
+
+input_schema:
+  arguments:
+    - name: command
+      type: string
+      required: true
+      description: "entities, enrich, or open"
+  flags:
+    - flag: "-o"
+      description: "Output file path"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "CSV or JSON outputs suitable for graph-based workflows"
+
+fallback_tool: strix
+tags: [maltego, integration, osint, graph, investigation]

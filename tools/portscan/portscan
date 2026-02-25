@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Flexible TCP/UDP port scanner with nmap or Python engine.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+scan_mode="tcp"
+ports="21,22,25,53,80,110,143,443,445,3389,8080"
+timeout_seconds=1
+engine="auto"
+
+usage() {
+  cat <<USAGE
+Portscan (v$currentVersion)
+Description: Scan TCP/UDP ports using nmap (if available) or a built-in Python scanner.
+
+Usage: portscan [flags] [target]
+  [target]      Hostname or IP address
+  -t MODE       Scan mode: tcp | udp | both (default: $scan_mode)
+  -p PORTS      Port list/range (default: $ports)
+  -w SECONDS    Per-port timeout in seconds (default: $timeout_seconds)
+  -e ENGINE     Engine: auto | nmap | python (default: $engine)
+  -h            Show this help
+  -v            Show tool version
+
+Examples:
+  portscan scanme.nmap.org
+  portscan -t both -p 1-1024 scanme.nmap.org
+  portscan -t udp -p 53,67,68 -e python 8.8.8.8
+USAGE
+}
+
+run_nmap_scan() {
+  local target="$1"
+  local args=(-Pn -p "$ports" --host-timeout "${timeout_seconds}s")
+
+  case "$scan_mode" in
+    tcp)  args=(-sT "${args[@]}") ;;
+    udp)  args=(-sU "${args[@]}") ;;
+    both) args=(-sT -sU "${args[@]}") ;;
+    *) echo "Error: Invalid mode '$scan_mode'." >&2; return 1 ;;
+  esac
+
+  echo "Engine: nmap"
+  exec nmap "${args[@]}" "$target"
+}
+
+run_python_scan() {
+  local target="$1"
+  python3 - "$target" "$scan_mode" "$ports" "$timeout_seconds" <<'PY'
+import socket
+import sys
+from typing import List, Set
+
+target = sys.argv[1].strip()
+mode = sys.argv[2].strip().lower()
+port_spec = sys.argv[3].strip()
+timeout = float(sys.argv[4])
+
+if mode not in {"tcp", "udp", "both"}:
+    print(f"Error: Unsupported mode '{mode}'.")
+    sys.exit(1)
+
+def parse_ports(spec: str) -> List[int]:
+    out: Set[int] = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            parts = token.split("-", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                start = int(parts[0])
+                end = int(parts[1])
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            for p in range(start, end + 1):
+                if 1 <= p <= 65535:
+                    out.add(p)
+        else:
+            try:
+                p = int(token)
+            except ValueError:
+                continue
+            if 1 <= p <= 65535:
+                out.add(p)
+    return sorted(out)
+
+ports = parse_ports(port_spec)
+if not ports:
+    print("Error: No valid ports to scan.")
+    sys.exit(1)
+
+if len(ports) > 4096:
+    print(f"Error: Refusing to scan {len(ports)} ports in one run (limit: 4096).")
+    sys.exit(1)
+
+try:
+    info = socket.getaddrinfo(target, None, 0, socket.SOCK_STREAM)
+except socket.gaierror as exc:
+    print(f"Error: Failed to resolve target '{target}' ({exc}).")
+    sys.exit(1)
+
+family = info[0][0]
+ip = info[0][4][0]
+
+def addr_for_port(port: int):
+    if family == socket.AF_INET6:
+        return (ip, port, 0, 0)
+    return (ip, port)
+
+def scan_tcp(port: int) -> bool:
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        code = sock.connect_ex(addr_for_port(port))
+        return code == 0
+    finally:
+        sock.close()
+
+def scan_udp(port: int):
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(b"\x00", addr_for_port(port))
+        try:
+            sock.recvfrom(1024)
+            return "open"
+        except socket.timeout:
+            return "open|filtered"
+        except ConnectionRefusedError:
+            return "closed"
+        except OSError as exc:
+            if getattr(exc, "errno", None) in {61, 111, 10061}:
+                return "closed"
+            return "open|filtered"
+    finally:
+        sock.close()
+
+tcp_open = []
+udp_open = []
+udp_open_filtered = []
+
+for port in ports:
+    if mode in {"tcp", "both"} and scan_tcp(port):
+        tcp_open.append(port)
+
+    if mode in {"udp", "both"}:
+        state = scan_udp(port)
+        if state == "open":
+            udp_open.append(port)
+        elif state == "open|filtered":
+            udp_open_filtered.append(port)
+
+print("Engine: python")
+print(f"Target: {target}")
+print(f"Resolved IP: {ip}")
+print(f"Mode: {mode}")
+print(f"Ports Scanned: {len(ports)}")
+
+if mode in {"tcp", "both"}:
+    if tcp_open:
+        print("Open TCP Ports: " + ", ".join(str(p) for p in tcp_open))
+    else:
+        print("Open TCP Ports: none")
+
+if mode in {"udp", "both"}:
+    if udp_open:
+        print("Open UDP Ports: " + ", ".join(str(p) for p in udp_open))
+    else:
+        print("Open UDP Ports: none detected")
+
+    if udp_open_filtered:
+        print("Open|Filtered UDP Ports: " + ", ".join(str(p) for p in udp_open_filtered))
+PY
+}
+
+while getopts "t:p:w:e:vh" opt; do
+  case "$opt" in
+    t) scan_mode="$(echo "$OPTARG" | tr '[:upper:]' '[:lower:]')" ;;
+    p) ports="$OPTARG" ;;
+    w) timeout_seconds="$OPTARG" ;;
+    e) engine="$(echo "$OPTARG" | tr '[:upper:]' '[:lower:]')" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Error: -w expects a positive number." >&2
+  exit 1
+fi
+
+case "$scan_mode" in
+  tcp|udp|both) ;;
+  *)
+    echo "Error: -t must be one of tcp, udp, both." >&2
+    exit 1
+    ;;
+esac
+
+case "$engine" in
+  auto|nmap|python) ;;
+  *)
+    echo "Error: -e must be one of auto, nmap, python." >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$engine" == "nmap" ]]; then
+  if ! command -v nmap >/dev/null 2>&1; then
+    echo "Error: nmap engine requested but nmap is not installed." >&2
+    exit 1
+  fi
+  run_nmap_scan "$1"
+elif [[ "$engine" == "auto" && $(command -v nmap >/dev/null 2>&1; echo $?) -eq 0 ]]; then
+  run_nmap_scan "$1"
+else
+  check_dependencies python3
+  run_python_scan "$1"
+fi
+
+exit $?

@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: HTTP security headers posture audit.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+timeout_seconds=15
+insecure=0
+
+usage() {
+  cat <<EOF
+HeadersAudit (v$currentVersion)
+Description: Audit key HTTP response security headers.
+
+Usage: headersaudit [flags] [url-or-host]
+  [url-or-host]  URL or host to inspect (default scheme: https://)
+  -k             Skip TLS certificate verification
+  -t <seconds>   Max request time (default: $timeout_seconds)
+  -h             Show the help
+  -v             Get the tool version
+
+Examples:
+  headersaudit example.com
+  headersaudit https://example.com/login
+  headersaudit -k -t 8 https://self-signed.badssl.com
+EOF
+}
+
+normalize_target() {
+  local value="$1"
+  if [[ "$value" =~ ^https?:// ]]; then
+    echo "$value"
+  else
+    echo "https://$value"
+  fi
+}
+
+audit_headers() {
+  local input="$1"
+  local target
+  target=$(normalize_target "$input")
+
+  local curl_args=(-sS -L -D - -o /dev/null --max-time "$timeout_seconds")
+  if [[ "$insecure" -eq 1 ]]; then
+    curl_args+=(-k)
+  fi
+
+  local output
+  output=$(curl "${curl_args[@]}" "$target" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Error: Could not fetch headers for $target"
+    echo "$output" | tail -n 1
+    return 1
+  fi
+
+  local headers
+  headers=$(echo "$output" | tr -d '\r')
+  local last_block
+  last_block=$(echo "$headers" | awk 'BEGIN{RS=""; ORS=""} {block=$0} END{print block}')
+  local status_line status_code
+  status_line=$(echo "$last_block" | head -n 1)
+  status_code=$(echo "$status_line" | awk '{print $2}')
+
+  HEADERS_BLOCK="$last_block" TARGET_URL="$target" STATUS_CODE="${status_code:-N/A}" python3 - <<'PY'
+import os
+import re
+
+block = os.environ.get("HEADERS_BLOCK", "")
+target = os.environ.get("TARGET_URL", "")
+status = os.environ.get("STATUS_CODE", "N/A")
+
+header_map = {}
+for line in block.splitlines()[1:]:
+    if ":" not in line:
+        continue
+    k, v = line.split(":", 1)
+    header_map[k.strip().lower()] = v.strip()
+
+checks = [
+    ("strict-transport-security", "Strict-Transport-Security"),
+    ("content-security-policy", "Content-Security-Policy"),
+    ("x-frame-options", "X-Frame-Options"),
+    ("x-content-type-options", "X-Content-Type-Options"),
+    ("referrer-policy", "Referrer-Policy"),
+    ("permissions-policy", "Permissions-Policy"),
+    ("cross-origin-opener-policy", "Cross-Origin-Opener-Policy"),
+    ("cross-origin-resource-policy", "Cross-Origin-Resource-Policy"),
+    ("cross-origin-embedder-policy", "Cross-Origin-Embedder-Policy"),
+]
+
+present = []
+missing = []
+for key, label in checks:
+    if key in header_map and header_map[key]:
+        present.append((label, header_map[key]))
+    else:
+        missing.append(label)
+
+score = int(round((len(present) / len(checks)) * 100)) if checks else 0
+
+print(f"Target: {target}")
+print(f"HTTP Status: {status}")
+print(f"Header Security Score: {score}% ({len(present)}/{len(checks)})")
+print("Present Security Headers:")
+if present:
+    for label, value in present:
+        short = value if len(value) <= 120 else value[:117] + "..."
+        print(f"  - {label}: {short}")
+else:
+    print("  - none")
+
+print("Missing Security Headers:")
+if missing:
+    for label in missing:
+        print(f"  - {label}")
+else:
+    print("  - none")
+
+server = header_map.get("server")
+if server:
+    print(f"Server Header: {server}")
+PY
+}
+
+while getopts "kt:vh" opt; do
+  case "$opt" in
+    k) insecure=1 ;;
+    t) timeout_seconds="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "Error: -t expects an integer number of seconds."
+  exit 1
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies curl python3
+audit_headers "$1"
+exit $?

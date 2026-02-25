@@ -19,6 +19,141 @@ capabilities:
     tools: [geo, ipinfo]
     primary: geo
 
+  dns_lookup:
+    description: "Resolve DNS records (A, AAAA, MX, TXT, CNAME, NS, etc.)"
+    tools: [dns]
+    primary: dns
+
+  rdap_lookup:
+    description: "Look up RDAP registration details for domains and IPs"
+    tools: [rdap]
+    primary: rdap
+
+  whois_lookup:
+    description: "Retrieve WHOIS registration records for domains and IPs"
+    tools: [whois, rdap]
+    primary: whois
+
+  reverse_dns_lookup:
+    description: "Resolve reverse DNS PTR records from IP addresses"
+    tools: [rdns, dns]
+    primary: rdns
+
+  asn_lookup:
+    description: "Lookup ASN ownership and BGP prefix information"
+    tools: [asn, ipinfo]
+    primary: asn
+
+  subdomain_enum:
+    description: "Enumerate subdomains from certificate transparency data"
+    tools: [subdomains, dns, rdap]
+    primary: subdomains
+
+  pd_subfinder:
+    description: "Passive subdomain discovery via ProjectDiscovery subfinder"
+    tools: [subfinder, subdomains]
+    primary: subfinder
+
+  pd_dnsx:
+    description: "High-speed DNS probing via ProjectDiscovery dnsx"
+    tools: [dnsx, dns]
+    primary: dnsx
+
+  pd_httpx:
+    description: "HTTP host probing via ProjectDiscovery httpx"
+    tools: [httpx, httpprobe]
+    primary: httpx
+
+  pd_naabu:
+    description: "Fast port scanning via ProjectDiscovery naabu"
+    tools: [naabu, portscan, shodan]
+    primary: naabu
+
+  advanced_portscan:
+    description: "Flexible TCP/UDP port scanning with custom port ranges"
+    tools: [portscan, naabu, shodan]
+    primary: portscan
+
+  pd_katana:
+    description: "Web crawling and endpoint discovery via ProjectDiscovery katana"
+    tools: [katana, robotsaudit]
+    primary: katana
+
+  pd_nuclei:
+    description: "Template-based security scanning via ProjectDiscovery nuclei"
+    tools: [nuclei, cve]
+    primary: nuclei
+
+  pd_uncover:
+    description: "Search-engine asset discovery via ProjectDiscovery uncover"
+    tools: [uncover, urlscan]
+    primary: uncover
+
+  pd_chain:
+    description: "Orchestrated ProjectDiscovery recon and scan chain"
+    tools: [pdchain, subfinder, dnsx, httpx, naabu, katana, nuclei]
+    primary: pdchain
+
+  strix_integration:
+    description: "Execute local Strix workflows through gathm"
+    tools: [strix]
+    primary: strix
+
+  maltego_integration:
+    description: "Generate Maltego-ready entity/enrichment outputs"
+    tools: [maltego]
+    primary: maltego
+
+  tls_certificate:
+    description: "Inspect TLS certificate issuer, expiry, SAN, and fingerprint"
+    tools: [certinfo, siteciphers]
+    primary: certinfo
+
+  cve_lookup:
+    description: "Look up CVE advisories and CVSS severity data"
+    tools: [cve]
+    primary: cve
+
+  http_probe:
+    description: "Probe HTTP endpoints for status, headers, IP, and latency"
+    tools: [httpprobe]
+    primary: httpprobe
+
+  dnssec_check:
+    description: "Assess DNSSEC posture using DS and DNSKEY records"
+    tools: [dnssec, dns]
+    primary: dnssec
+
+  urlscan_search:
+    description: "Search URLScan intelligence for suspicious domains/URLs"
+    tools: [urlscan, googler]
+    primary: urlscan
+
+  waf_detection:
+    description: "Detect likely WAF protections from HTTP response signals"
+    tools: [wafdetect, httpprobe]
+    primary: wafdetect
+
+  robots_audit:
+    description: "Analyze robots.txt directives and potential sensitive paths"
+    tools: [robotsaudit, httpprobe]
+    primary: robotsaudit
+
+  headers_audit:
+    description: "Evaluate HTTP security header posture and coverage"
+    tools: [headersaudit, httpprobe]
+    primary: headersaudit
+
+  threat_intelligence:
+    description: "Check indicator reputation using threat-intelligence platforms"
+    tools: [tipcheck, urlscan, shodan]
+    primary: tipcheck
+
+  image_analysis:
+    description: "Analyze images for metadata, OCR text, and visible objects"
+    tools: [imganalyze]
+    primary: imganalyze
+
   weather_forecast:
     description: "Get weather forecast for a location"
     tools: [weather]
@@ -110,6 +245,60 @@ intent_patterns:
     capability: weather_forecast
   - pattern: "ip|address|location|where am i|geolocation"
     capability: ip_lookup
+  - pattern: "dns|mx|txt|cname|aaaa|ns|resolve|record"
+    capability: dns_lookup
+  - pattern: "rdap|registrar|registrant|domain owner|nameserver"
+    capability: rdap_lookup
+  - pattern: "whois|whois lookup|domain registration|registrant contact|whois record"
+    capability: whois_lookup
+  - pattern: "reverse dns|rdns|ptr|ip to domain|reverse lookup"
+    capability: reverse_dns_lookup
+  - pattern: "asn|bgp|autonomous system|prefix|routing|route origin"
+    capability: asn_lookup
+  - pattern: "subdomain|subdomains|certificate transparency|crt.sh|host enumeration"
+    capability: subdomain_enum
+  - pattern: "subfinder|passive subdomain|projectdiscovery subfinder"
+    capability: pd_subfinder
+  - pattern: "dnsx|mass dns|dns probe|projectdiscovery dnsx"
+    capability: pd_dnsx
+  - pattern: "httpx|web probe|banner grab|projectdiscovery httpx"
+    capability: pd_httpx
+  - pattern: "naabu|fast port scan|projectdiscovery naabu"
+    capability: pd_naabu
+  - pattern: "portscan|tcp scan|udp scan|port range|service discovery|nmap"
+    capability: advanced_portscan
+  - pattern: "katana|web crawler|endpoint crawler|projectdiscovery katana"
+    capability: pd_katana
+  - pattern: "nuclei|template scan|vuln templates|projectdiscovery nuclei"
+    capability: pd_nuclei
+  - pattern: "uncover|asset discovery engine|projectdiscovery uncover"
+    capability: pd_uncover
+  - pattern: "pdchain|recon chain|projectdiscovery chain|recon workflow"
+    capability: pd_chain
+  - pattern: "strix|strix runner|strix workflow"
+    capability: strix_integration
+  - pattern: "maltego|entity graph|graph investigation|maltego transform"
+    capability: maltego_integration
+  - pattern: "certificate|cert|tls|ssl|x509|expiry|issuer|san"
+    capability: tls_certificate
+  - pattern: "cve|cvss|advisory|vulnerability|cwe"
+    capability: cve_lookup
+  - pattern: "http|https|headers|status code|latency|uptime|endpoint probe"
+    capability: http_probe
+  - pattern: "dnssec|dnskey|ds record|rrsig|chain of trust"
+    capability: dnssec_check
+  - pattern: "urlscan|phishing url|malicious url|domain reputation|scan url"
+    capability: urlscan_search
+  - pattern: "waf|web application firewall|cloudflare|akamai|incapsula|sucuri"
+    capability: waf_detection
+  - pattern: "robots.txt|robots audit|sitemap|crawler rules|crawl directives"
+    capability: robots_audit
+  - pattern: "security headers|hsts|csp|x-frame-options|header audit"
+    capability: headers_audit
+  - pattern: "threat intel|virustotal|abuseipdb|ioc reputation|indicator reputation"
+    capability: threat_intelligence
+  - pattern: "image analysis|ocr|object detection|image metadata|vision model"
+    capability: image_analysis
   - pattern: "search|google|find|look up"
     capability: web_search
   - pattern: "movie|film|cinema|imdb"

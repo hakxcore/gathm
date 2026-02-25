@@ -9,6 +9,12 @@ MAGENTA="$(printf '\033[35m')"
 CYAN="$(printf '\033[36m')"
 WHITE="$(printf '\033[37m')"
 BLACK="$(printf '\033[30m')"
+
+# Indian Tricolor
+SAFFRON="$(printf '\033[38;5;208m')" # Orange/Saffron
+INDIAN_GREEN="$(printf '\033[38;5;28m')" # Darker Green
+ASHOKA_BLUE="$(printf '\033[38;5;20m')" # Navy Blue
+
 REDBG="$(printf '\033[41m')"
 GREENBG="$(printf '\033[42m')"
 ORANGEBG="$(printf '\033[43m')"

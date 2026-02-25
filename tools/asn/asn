@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: ASN and BGP prefix intelligence lookup.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+API_BASE="https://api.bgpview.io"
+
+usage() {
+  cat <<EOF
+ASN (v$currentVersion)
+Description: Lookup ASN details, prefixes, and IP-to-ASN mappings.
+
+Usage: asn [query]
+  [query]  ASN (e.g., AS15169 or 15169) or IPv4/IPv6 address
+  -h       Show the help
+  -v       Get the tool version
+
+Examples:
+  asn AS15169
+  asn 13335
+  asn 8.8.8.8
+EOF
+}
+
+normalize_query() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  echo "$value"
+}
+
+is_ip_query() {
+  local value="$1"
+  if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    return 0
+  fi
+  if [[ "$value" == *":"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+is_asn_query() {
+  local value
+  value=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+  [[ "$value" =~ ^AS?[0-9]+$ ]]
+}
+
+lookup_asn() {
+  local input="$1"
+  local query
+  query=$(normalize_query "$input")
+
+  local mode
+  local endpoint
+  local normalized_asn
+  if is_ip_query "$query"; then
+    mode="ip"
+    endpoint="$API_BASE/ip/$query"
+  elif is_asn_query "$query"; then
+    mode="asn"
+    normalized_asn=$(echo "$query" | tr '[:lower:]' '[:upper:]' | sed 's/^AS//')
+    endpoint="$API_BASE/asn/$normalized_asn"
+  else
+    echo "Error: Query must be an ASN (AS12345) or an IP address."
+    return 1
+  fi
+
+  local response
+  response=$(httpGet "$endpoint")
+  if [[ -z "$response" ]]; then
+    echo "Error: Empty response from BGPView API."
+    return 1
+  fi
+
+  echo "$response" | python3 - "$mode" "$query" <<'PY'
+import json
+import sys
+
+mode = sys.argv[1]
+query = sys.argv[2]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: Could not parse ASN response ({exc}).")
+    sys.exit(1)
+
+if payload.get("status") != "ok":
+    print("Error: ASN lookup failed.")
+    sys.exit(1)
+
+data = payload.get("data") or {}
+
+if mode == "asn":
+    asn = data.get("asn", "N/A")
+    name = data.get("name", "N/A")
+    desc = data.get("description_short") or data.get("description_full") or "N/A"
+    country = data.get("country_code", "N/A")
+    rir = data.get("rir_allocation", "N/A")
+    email_contacts = ", ".join((data.get("email_contacts") or [])[:3]) or "N/A"
+    abuse_contacts = ", ".join((data.get("abuse_contacts") or [])[:3]) or "N/A"
+    prefixes_v4 = data.get("prefixes", {}).get("ipv4", []) or []
+    prefixes_v6 = data.get("prefixes", {}).get("ipv6", []) or []
+
+    print(f"ASN: AS{asn}")
+    print(f"Name: {name}")
+    print(f"Description: {desc}")
+    print(f"Country: {country}")
+    print(f"RIR Allocation: {rir}")
+    print(f"Email Contacts: {email_contacts}")
+    print(f"Abuse Contacts: {abuse_contacts}")
+    print(f"IPv4 Prefix Count: {len(prefixes_v4)}")
+    print(f"IPv6 Prefix Count: {len(prefixes_v6)}")
+    if prefixes_v4:
+        print("Top IPv4 Prefixes:")
+        for p in prefixes_v4[:5]:
+            print(f"  - {p.get('prefix', 'N/A')}")
+    if prefixes_v6:
+        print("Top IPv6 Prefixes:")
+        for p in prefixes_v6[:5]:
+            print(f"  - {p.get('prefix', 'N/A')}")
+else:
+    prefixes = data.get("prefixes") or []
+    print(f"IP: {query}")
+    print(f"Prefix Matches: {len(prefixes)}")
+    if not prefixes:
+        sys.exit(0)
+    print("Associated ASNs:")
+    seen = set()
+    for pref in prefixes[:8]:
+        asn_obj = pref.get("asn") or {}
+        asn_id = asn_obj.get("asn")
+        if asn_id in seen:
+            continue
+        seen.add(asn_id)
+        asn_name = asn_obj.get("name", "N/A")
+        asn_desc = asn_obj.get("description", "N/A")
+        country = asn_obj.get("country_code", "N/A")
+        prefix = pref.get("prefix", "N/A")
+        print(f"  - AS{asn_id} ({asn_name}, {country})")
+        print(f"    Prefix: {prefix}")
+        print(f"    Description: {asn_desc}")
+PY
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+lookup_asn "$1"
+exit $?

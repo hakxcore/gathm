@@ -1,0 +1,46 @@
+name: cve
+version: "3.0.0"
+description: "CVE vulnerability lookup with severity, dates, and summary details"
+category: security
+
+dependencies:
+  system: [curl, python3]
+
+apis:
+  - name: nvd
+    base_url: https://services.nvd.nist.gov/rest/json/cves/2.0
+    health_endpoint: https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2024-3094
+    auth_required: false
+
+input_schema:
+  arguments:
+    - name: cve_id
+      type: string
+      required: false
+      description: "CVE identifier (e.g., CVE-2024-3094)"
+  flags:
+    - flag: "-k"
+      description: "Keyword search"
+      has_argument: true
+    - flag: "-l"
+      description: "Max result count"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "CVE results with severity, publication dates, and short summaries"
+  json_fields:
+    - name: cve_id
+      type: string
+    - name: severity
+      type: string
+    - name: published
+      type: string
+    - name: last_modified
+      type: string
+
+fallback_tool: news
+tags: [security, cve, vulnerability, cvss, advisory]

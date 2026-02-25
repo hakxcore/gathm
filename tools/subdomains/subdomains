@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Subdomain discovery using certificate transparency logs.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+limit=30
+
+usage() {
+  cat <<EOF
+Subdomains (v$currentVersion)
+Description: Enumerate likely subdomains from certificate transparency data.
+
+Usage: subdomains [flags] [domain]
+  [domain]    Root domain (example.com)
+  -l <num>    Max subdomains to display (default: $limit, max: 200)
+  -h          Show the help
+  -v          Get the tool version
+
+Examples:
+  subdomains example.com
+  subdomains -l 50 openai.com
+EOF
+}
+
+normalize_domain() {
+  local domain="$1"
+  domain="${domain#http://}"
+  domain="${domain#https://}"
+  domain="${domain%%/*}"
+  domain=$(echo "$domain" | tr '[:upper:]' '[:lower:]')
+  echo "$domain"
+}
+
+enumerate_subdomains() {
+  local input_domain="$1"
+  local root_domain
+  root_domain=$(normalize_domain "$input_domain")
+
+  if [[ ! "$root_domain" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
+    echo "Error: Invalid domain format."
+    return 1
+  fi
+
+  local query="%25.${root_domain}"
+  local url="https://crt.sh/?q=${query}&output=json"
+  local response
+  response=$(httpGet "$url")
+  if [[ -z "$response" ]]; then
+    echo "Error: Empty response from certificate transparency source."
+    return 1
+  fi
+
+  local tmp_json
+  tmp_json=$(mktemp 2>/dev/null || echo "/tmp/gathm-subdomains-$$.json")
+  printf '%s' "$response" > "$tmp_json"
+
+  ROOT_DOMAIN="$root_domain" LIMIT="$limit" python3 - "$tmp_json" <<'PY'
+import json
+import os
+import sys
+
+root = os.environ["ROOT_DOMAIN"].lower()
+limit = int(os.environ["LIMIT"])
+with open(sys.argv[1], "r", encoding="utf-8", errors="ignore") as f:
+    raw = f.read()
+
+if not raw.strip():
+    print("No subdomains found.")
+    sys.exit(0)
+
+raw = raw.replace("\x00", "")
+
+def parse_payload(text: str):
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+
+    # Some responses can be newline-delimited objects without strict array framing.
+    rows = []
+    for line in text.splitlines():
+        line = line.strip().rstrip(",")
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                rows.append(obj)
+        except Exception:
+            continue
+    return rows
+
+entries = parse_payload(raw)
+if not entries:
+    print("No subdomains found.")
+    sys.exit(0)
+
+found = set()
+for item in entries:
+    if not isinstance(item, dict):
+        continue
+    names = str(item.get("name_value", "")).splitlines()
+    for name in names:
+        name = name.strip().lower().lstrip("*.").rstrip(".")
+        if not name:
+            continue
+        if name == root or name.endswith("." + root):
+            found.add(name)
+
+if root in found:
+    found.remove(root)
+
+sorted_names = sorted(found)
+print(f"Domain: {root}")
+print(f"Discovered Subdomains: {len(sorted_names)}")
+if not sorted_names:
+    sys.exit(0)
+
+print("Subdomain List:")
+for name in sorted_names[:limit]:
+    print(f"  - {name}")
+PY
+  local py_exit=$?
+  rm -f "$tmp_json"
+  return $py_exit
+}
+
+while getopts "l:vh" opt; do
+  case "$opt" in
+    l) limit="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ! "$limit" =~ ^[0-9]+$ ]]; then
+  echo "Error: -l expects a number."
+  exit 1
+fi
+if [[ "$limit" -lt 1 ]]; then limit=1; fi
+if [[ "$limit" -gt 200 ]]; then limit=200; fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+enumerate_subdomains "$1"
+exit $?

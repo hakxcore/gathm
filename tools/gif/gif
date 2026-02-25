@@ -13,7 +13,7 @@ if [[ "$OSTYPE" == linux-android* ]]; then
 fi
 
 if [ -z "$distro" ]; then
-  distro=$(ls /etc | awk 'match($0, "(.+?)[-_](?:release|version)", groups) {if(groups[1] != "os") {print groups[1]}}')
+  distro=$(ls /etc | awk -F'[-_]' '/(release|version)$/ { if ($1 != "os") { print $1; exit } }')
   platform="Debian"
   prefix=""
   SUDO="sudo"

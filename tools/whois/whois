@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Domain/IP WHOIS lookup with RDAP fallback.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+backend="auto"
+
+usage() {
+  cat <<USAGE
+Whois (v$currentVersion)
+Description: Retrieve registration details for domains/IPs via native whois or RDAP fallback.
+
+Usage: whois [flags] [target]
+  [target]      Domain or IP to query
+  -r            Force RDAP backend
+  -w            Force native whois backend
+  -h            Show this help
+  -v            Show tool version
+
+Examples:
+  whois example.com
+  whois -w 8.8.8.8
+  whois -r openai.com
+USAGE
+}
+
+native_whois_path() {
+  local p
+  p=$(command -v whois 2>/dev/null || true)
+  if [[ -n "$p" && "$p" != "$0" ]]; then
+    echo "$p"
+  fi
+}
+
+run_native_whois() {
+  local target="$1"
+  local p
+  p=$(native_whois_path)
+  if [[ -z "$p" ]]; then
+    echo "Error: Native 'whois' command is not installed." >&2
+    return 1
+  fi
+  exec "$p" "$target"
+}
+
+run_rdap_fallback() {
+  local target="$1"
+  local rdap_tool="$GATHM_ROOT/tools/rdap/rdap"
+  if [[ ! -x "$rdap_tool" ]]; then
+    echo "Error: RDAP fallback tool is unavailable at $rdap_tool" >&2
+    return 1
+  fi
+  "$rdap_tool" "$target"
+}
+
+while getopts "rwvh" opt; do
+  case "$opt" in
+    r) backend="rdap" ;;
+    w) backend="native" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+case "$backend" in
+  native)
+    run_native_whois "$1"
+    ;;
+  rdap)
+    run_rdap_fallback "$1"
+    ;;
+  auto)
+    if native_whois_path >/dev/null; then
+      run_native_whois "$1"
+    else
+      echo "Notice: Native whois command not found. Using RDAP fallback."
+      run_rdap_fallback "$1"
+    fi
+    ;;
+  *)
+    echo "Error: Unsupported backend '$backend'." >&2
+    exit 1
+    ;;
+esac
+exit $?

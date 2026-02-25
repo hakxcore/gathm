@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Detect likely WAF/CDN protections from HTTP response signals.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+timeout_seconds=15
+insecure=0
+
+usage() {
+  cat <<EOF
+WAFDetect (v$currentVersion)
+Description: Detect likely WAF providers using HTTP headers and response hints.
+
+Usage: wafdetect [flags] [url-or-host]
+  [url-or-host]  URL or host to inspect (default scheme: https://)
+  -k             Skip TLS cert verification
+  -t <seconds>   Max request time (default: $timeout_seconds)
+  -h             Show the help
+  -v             Get the tool version
+
+Examples:
+  wafdetect example.com
+  wafdetect https://target.example/path
+  wafdetect -k -t 8 https://self-signed.badssl.com
+EOF
+}
+
+normalize_target() {
+  local value="$1"
+  if [[ "$value" =~ ^https?:// ]]; then
+    echo "$value"
+  else
+    echo "https://$value"
+  fi
+}
+
+detect_waf() {
+  local input="$1"
+  local target
+  target=$(normalize_target "$input")
+
+  local curl_args=(-sS -L -D - -o /dev/null --max-time "$timeout_seconds")
+  if [[ "$insecure" -eq 1 ]]; then
+    curl_args+=(-k)
+  fi
+
+  local output
+  output=$(curl "${curl_args[@]}" "$target" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Error: Could not probe $target"
+    echo "$output" | tail -n 1
+    return 1
+  fi
+
+  local headers
+  headers=$(echo "$output" | tr -d '\r')
+  local last_block
+  last_block=$(echo "$headers" | awk 'BEGIN{RS=""; ORS=""} {block=$0} END{print block}')
+  local headers_lc
+  headers_lc=$(echo "$last_block" | tr '[:upper:]' '[:lower:]')
+
+  local status_line status_code
+  status_line=$(echo "$last_block" | head -n 1)
+  status_code=$(echo "$status_line" | awk '{print $2}')
+
+  local indicators=()
+  local likely=()
+
+  if echo "$headers_lc" | grep -qE 'cf-ray:|server: cloudflare|cf-cache-status:'; then
+    indicators+=("cf-ray/server:cloudflare")
+    likely+=("Cloudflare")
+  fi
+  if echo "$headers_lc" | grep -qE 'x-sucuri-id:|x-sucuri-cache:|server: sucuri'; then
+    indicators+=("x-sucuri-* headers")
+    likely+=("Sucuri")
+  fi
+  if echo "$headers_lc" | grep -qE 'x-iinfo:|incap_ses_|visid_incap|x-cdn: incapsula'; then
+    indicators+=("incapsula headers/cookies")
+    likely+=("Imperva Incapsula")
+  fi
+  if echo "$headers_lc" | grep -qE 'x-akamai|akamai|ak_bmsc'; then
+    indicators+=("akamai headers/cookies")
+    likely+=("Akamai")
+  fi
+  if echo "$headers_lc" | grep -qE 'x-amzn-waf-action:|x-amzn-requestid:|x-amz-apigw-id:'; then
+    indicators+=("x-amzn-* headers")
+    likely+=("AWS WAF/API Gateway")
+  fi
+  if echo "$headers_lc" | grep -qE 'bigip|f5'; then
+    indicators+=("bigip/f5 header or cookie")
+    likely+=("F5 BIG-IP ASM")
+  fi
+
+  # Deduplicate likely matches while preserving order.
+  local dedup_likely=()
+  local seen="|"
+  local item
+  for item in "${likely[@]}"; do
+    if [[ "$seen" != *"|$item|"* ]]; then
+      dedup_likely+=("$item")
+      seen="${seen}${item}|"
+    fi
+  done
+
+  echo "Target: $target"
+  echo "HTTP Status: ${status_code:-N/A}"
+  if [[ "${#dedup_likely[@]}" -eq 0 ]]; then
+    echo "Likely WAF: Not confidently detected"
+  else
+    echo "Likely WAF: ${dedup_likely[*]}"
+  fi
+
+  if [[ "${#indicators[@]}" -gt 0 ]]; then
+    echo "Indicators:"
+    local i
+    for i in "${indicators[@]}"; do
+      echo "  - $i"
+    done
+  fi
+
+  echo "Key Response Headers:"
+  echo "$last_block" | grep -Ei '^(HTTP/|server:|via:|x-powered-by:|x-amzn-|cf-|x-sucuri-|x-akamai|x-cdn:|set-cookie:)' | sed 's/^/  /'
+}
+
+while getopts "kt:vh" opt; do
+  case "$opt" in
+    k) insecure=1 ;;
+    t) timeout_seconds="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "Error: -t expects an integer number of seconds."
+  exit 1
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies curl
+detect_waf "$1"
+exit $?

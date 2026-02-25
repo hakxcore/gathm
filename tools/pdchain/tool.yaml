@@ -1,0 +1,47 @@
+name: pdchain
+version: "3.0.0"
+description: "Meta-tool pipeline for ProjectDiscovery recon/scanning workflow"
+category: security
+
+dependencies:
+  system: [bash]
+
+input_schema:
+  arguments:
+    - name: domain
+      type: string
+      required: true
+      description: "Target root domain"
+  flags:
+    - flag: "-m"
+      description: "Mode: passive|active|full"
+      has_argument: true
+    - flag: "-o"
+      description: "Output directory"
+      has_argument: true
+    - flag: "-p"
+      description: "Naabu top ports"
+      has_argument: true
+    - flag: "-d"
+      description: "Katana crawl depth"
+      has_argument: true
+    - flag: "-s"
+      description: "Nuclei severities CSV"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Recon pipeline summary and output file locations"
+  json_fields:
+    - name: output_directory
+      type: string
+    - name: hosts_count
+      type: number
+    - name: live_count
+      type: number
+
+fallback_tool: subdomains
+tags: [projectdiscovery, pipeline, recon, chain, pdchain]

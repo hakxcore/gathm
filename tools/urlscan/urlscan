@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Search URLScan intelligence for domains/URLs.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+BASE_URL="https://urlscan.io/api/v1/search/"
+limit=5
+
+usage() {
+  cat <<EOF
+URLScan (v$currentVersion)
+Description: Search URLScan public intelligence results.
+
+Usage: urlscan [flags] [query]
+  [query]    URL, domain, or raw search query
+  -l <num>   Max results to display (default: $limit, max: 20)
+  -h         Show the help
+  -v         Get the tool version
+
+Examples:
+  urlscan paypal.com
+  urlscan https://example.org/login
+  urlscan "domain:openai.com AND verdicts.overall.malicious:false"
+EOF
+}
+
+normalize_query() {
+  local raw="$1"
+  local cleaned="$raw"
+  cleaned="${cleaned#http://}"
+  cleaned="${cleaned#https://}"
+  cleaned="${cleaned%%/*}"
+
+  if [[ "$raw" =~ ^https?:// ]]; then
+    echo "domain:$cleaned"
+    return 0
+  fi
+
+  # Domain-like simple input: convert to domain query.
+  if [[ "$raw" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    echo "domain:$raw"
+    return 0
+  fi
+
+  echo "$raw"
+}
+
+urlencode() {
+  python3 - "$1" <<'PY'
+import sys
+import urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+}
+
+search_urlscan() {
+  local input="$1"
+  local query
+  query=$(normalize_query "$input")
+  local encoded
+  encoded=$(urlencode "$query")
+  local response
+  response=$(httpGet "${BASE_URL}?q=${encoded}&size=${limit}")
+  if [[ -z "$response" ]]; then
+    echo "Error: Empty response from URLScan."
+    return 1
+  fi
+
+  echo "$response" | python3 - "$query" "$limit" <<'PY'
+import json
+import sys
+
+query = sys.argv[1]
+limit = int(sys.argv[2])
+
+try:
+    payload = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Error: Could not parse URLScan response ({exc}).")
+    sys.exit(1)
+
+results = payload.get("results") or []
+total = payload.get("total", len(results))
+print(f"Query: {query}")
+print(f"Total Results: {total}")
+if not results:
+    print("No URLScan results found.")
+    sys.exit(0)
+
+print("Results:")
+for item in results[:limit]:
+    task = item.get("task", {}) or {}
+    page = item.get("page", {}) or {}
+    verdicts = item.get("verdicts", {}) or {}
+    overall = (verdicts.get("overall", {}) or {})
+    stats = item.get("stats", {}) or {}
+
+    task_url = task.get("url", "N/A")
+    time = task.get("time", "N/A")
+    country = page.get("country", "N/A")
+    ip_addr = page.get("ip", "N/A")
+    domain = page.get("domain", "N/A")
+    malicious = overall.get("malicious", False)
+    score = overall.get("score", 0)
+    result_link = item.get("result", "N/A")
+    requests = stats.get("requests", "N/A")
+    uniq_countries = stats.get("uniqCountries", "N/A")
+
+    print(f"  - URL: {task_url}")
+    print(f"    Domain: {domain} | IP: {ip_addr} | Country: {country}")
+    print(f"    Time: {time}")
+    print(f"    Verdict: malicious={malicious}, score={score}")
+    print(f"    Requests: {requests}, Unique Countries: {uniq_countries}")
+    print(f"    Result: {result_link}")
+PY
+}
+
+while getopts "l:vh" opt; do
+  case "$opt" in
+    l) limit="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ! "$limit" =~ ^[0-9]+$ ]]; then
+  echo "Error: -l expects a number."
+  exit 1
+fi
+if [[ "$limit" -lt 1 ]]; then limit=1; fi
+if [[ "$limit" -gt 20 ]]; then limit=20; fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies python3
+getConfiguredClient || exit 1
+checkInternet || { echo "Error: No internet connection"; exit 1; }
+
+search_urlscan "$1"
+exit $?

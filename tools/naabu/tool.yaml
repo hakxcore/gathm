@@ -1,0 +1,30 @@
+name: naabu
+version: "3.0.0"
+description: "ProjectDiscovery naabu wrapper for fast host port scanning"
+category: security
+
+dependencies:
+  system: [naabu]
+
+input_schema:
+  arguments:
+    - name: host
+      type: string
+      required: true
+      description: "Target host"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Open port scan results"
+  json_fields:
+    - name: host
+      type: string
+    - name: port
+      type: number
+
+fallback_tool: shodan
+tags: [projectdiscovery, naabu, ports, scan, security]

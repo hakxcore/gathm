@@ -1,0 +1,36 @@
+name: certinfo
+version: "3.0.0"
+description: "TLS certificate inspector (issuer, expiry, SAN, fingerprint)"
+category: security
+
+dependencies:
+  system: [openssl, python3]
+
+input_schema:
+  arguments:
+    - name: host
+      type: string
+      required: true
+      description: "Host or host:port to inspect"
+  flags:
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Certificate status, subject, issuer, validity dates, serial, SAN, and SHA256 fingerprint"
+  json_fields:
+    - name: server
+      type: string
+    - name: certificate_status
+      type: string
+    - name: days_until_expiry
+      type: number
+    - name: issuer
+      type: string
+    - name: san
+      type: string
+
+fallback_tool: siteciphers
+tags: [security, tls, ssl, certificate, x509, expiry]

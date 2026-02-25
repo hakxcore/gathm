@@ -1,33 +1,59 @@
-#!/usr/bin/python3
-# EASY-INSTALL-ENTRY-SCRIPT: 'shodan==1.25.0','console_scripts','shodan'
-import re
-import sys
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Shodan CLI wrapper with dependency checks.
 
-# for compatibility with easy_install; see #2198
-__requires__ = 'shodan==1.25.0'
+source "$(dirname "$0")/../../lib/utils.bash"
 
-try:
-    from importlib.metadata import distribution
-except ImportError:
-    try:
-        from importlib_metadata import distribution
-    except ImportError:
-        from pkg_resources import load_entry_point
+currentVersion="3.0.0"
 
+usage() {
+  cat <<EOF
+Shodan (v$currentVersion)
+Description: Shodan search engine for network device scanning and research.
 
-def importlib_load_entry_point(spec, group, name):
-    dist_name, _, _ = spec.partition('==')
-    matches = (
-        entry_point
-        for entry_point in distribution(dist_name).entry_points
-        if entry_point.group == group and entry_point.name == name
-    )
-    return next(matches).load()
+Usage: shodan [flags] [arguments...]
+  -h  Show the help
+  -v  Get the tool version
 
+Examples:
+  shodan info
+  shodan host 8.8.8.8
+  shodan search apache country:US
+EOF
+}
 
-globals().setdefault('load_entry_point', importlib_load_entry_point)
+find_python() {
+  for cmd in python3 python; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      echo "$cmd"
+      return 0
+    fi
+  done
+  return 1
+}
 
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
 
-if __name__ == '__main__':
-    sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0])
-    sys.exit(load_entry_point('shodan==1.25.0', 'console_scripts', 'shodan')())
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+PYTHON_CMD=$(find_python) || {
+  echo "Error: python is required to run the shodan tool." >&2
+  exit 1
+}
+
+if ! "$PYTHON_CMD" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('shodan') else 1)" >/dev/null 2>&1; then
+  echo "Error: Missing Python package 'shodan'. Install with: pip install shodan" >&2
+  exit 1
+fi
+
+exec "$PYTHON_CMD" -m shodan "$@"

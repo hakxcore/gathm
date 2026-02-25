@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Wrapper for local strix command-line tool.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+TOOL_BIN="strix"
+
+usage() {
+  cat <<USAGE
+Strix (v$currentVersion)
+Description: Generic wrapper for local 'strix' binary.
+
+Usage: strix [arguments...]
+  -h        Show this help
+  -v        Show wrapper version
+
+Examples:
+  strix --help
+  strix <your-args>
+USAGE
+}
+
+ensure_tool() {
+  if ! command -v "$TOOL_BIN" >/dev/null 2>&1; then
+    echo "Error: '$TOOL_BIN' is not installed or not in PATH." >&2
+    return 1
+  fi
+}
+
+while getopts "vh" opt; do
+  case "$opt" in
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+ensure_tool || exit 1
+exec "$TOOL_BIN" "$@"

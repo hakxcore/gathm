@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: Maltego integration helpers for entities and enrichment bundles.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+output_file=""
+
+usage() {
+  cat <<USAGE
+Maltego (v$currentVersion)
+Description: Generate Maltego-friendly CSV entities, build enrichment bundles, or open Maltego.
+
+Usage: maltego [flags] <command> [args]
+
+Commands:
+  entities <Type> <value...>   Emit CSV: Type,Value (values can be comma-separated)
+  enrich <target>              Build JSON enrichment bundle using rdap/dns/tipcheck
+  open [file]                  Open Maltego application (with optional graph file)
+
+Flags:
+  -o FILE      Write command output to FILE
+  -h           Show this help
+  -v           Show tool version
+
+Examples:
+  maltego entities Domain openai.com,github.com
+  maltego -o openai-enrich.json enrich openai.com
+  maltego open
+USAGE
+}
+
+emit_or_write() {
+  local content="$1"
+  if [[ -n "$output_file" ]]; then
+    printf '%s\n' "$content" > "$output_file"
+    echo "Wrote output to: $output_file"
+  else
+    printf '%s\n' "$content"
+  fi
+}
+
+emit_entities_csv() {
+  local entity_type="$1"
+  shift
+
+  python3 - "$entity_type" "$@" <<'PY'
+import csv
+import sys
+
+entity_type = sys.argv[1].strip()
+raw_values = sys.argv[2:]
+values = []
+for item in raw_values:
+    for split_value in item.split(","):
+        v = split_value.strip()
+        if v:
+            values.append(v)
+
+if not entity_type:
+    print("Error: entity type is required.", file=sys.stderr)
+    sys.exit(1)
+if not values:
+    print("Error: at least one entity value is required.", file=sys.stderr)
+    sys.exit(1)
+
+writer = csv.writer(sys.stdout)
+writer.writerow(["Type", "Value"])
+for value in values:
+    writer.writerow([entity_type, value])
+PY
+}
+
+open_maltego_app() {
+  local graph_file="${1:-}"
+  local platform
+  platform=$(detect_platform)
+
+  if [[ "$platform" == "darwin" && $(command -v open >/dev/null 2>&1; echo $?) -eq 0 ]]; then
+    if [[ -n "$graph_file" ]]; then
+      open -a "Maltego" "$graph_file"
+    else
+      open -a "Maltego"
+    fi
+    return $?
+  fi
+
+  if command -v maltego >/dev/null 2>&1; then
+    if [[ -n "$graph_file" ]]; then
+      exec maltego "$graph_file"
+    fi
+    exec maltego
+  fi
+
+  echo "Error: Maltego app/command not found. Install Maltego and retry." >&2
+  return 1
+}
+
+run_optional_tool() {
+  local tool_name="$1"
+  shift
+  local tool_path="$GATHM_ROOT/tools/$tool_name/$tool_name"
+  if [[ -x "$tool_path" ]]; then
+    "$tool_path" "$@" 2>&1 || true
+  else
+    echo "Tool '$tool_name' is not available."
+  fi
+}
+
+emit_enrichment_bundle() {
+  local target="$1"
+  local is_domain="0"
+  if [[ "$target" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    is_domain="1"
+  fi
+
+  local rdap_out dns_out tip_out
+  rdap_out=$(run_optional_tool rdap "$target")
+  if [[ "$is_domain" == "1" ]]; then
+    dns_out=$(run_optional_tool dns "$target")
+  else
+    dns_out="Skipped: target is not domain-like."
+  fi
+  tip_out=$(run_optional_tool tipcheck "$target")
+
+  RDAP_OUT="$rdap_out" DNS_OUT="$dns_out" TIP_OUT="$tip_out" python3 - "$target" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+target = sys.argv[1]
+payload = {
+    "entity": target,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "sources": {
+        "rdap": os.environ.get("RDAP_OUT", ""),
+        "dns": os.environ.get("DNS_OUT", ""),
+        "tipcheck": os.environ.get("TIP_OUT", ""),
+    },
+}
+print(json.dumps(payload, indent=2))
+PY
+}
+
+while getopts "o:vh" opt; do
+  case "$opt" in
+    o) output_file="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+command_name="$1"
+shift
+
+case "$command_name" in
+  entities|csv)
+    if [[ $# -lt 2 ]]; then
+      echo "Error: entities requires <Type> and at least one value." >&2
+      usage
+      exit 1
+    fi
+    check_dependencies python3
+    csv_output=$(emit_entities_csv "$@") || exit 1
+    emit_or_write "$csv_output"
+    ;;
+  enrich)
+    if [[ $# -ne 1 ]]; then
+      echo "Error: enrich requires exactly one target." >&2
+      usage
+      exit 1
+    fi
+    check_dependencies python3
+    enrich_output=$(emit_enrichment_bundle "$1")
+    emit_or_write "$enrich_output"
+    ;;
+  open)
+    if [[ -n "$output_file" ]]; then
+      echo "Warning: -o is ignored for open command." >&2
+    fi
+    open_maltego_app "${1:-}"
+    ;;
+  *)
+    echo "Error: Unknown command '$command_name'." >&2
+    usage
+    exit 1
+    ;;
+esac
+
+exit $?

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Author: Gathm maintainers
+# Description: robots.txt analysis and endpoint exposure audit.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+timeout_seconds=12
+insecure=0
+
+usage() {
+  cat <<EOF
+RobotsAudit (v$currentVersion)
+Description: Fetch and analyze robots.txt for crawl directives and sensitive paths.
+
+Usage: robotsaudit [flags] [url-or-host]
+  [url-or-host]  URL or host to inspect (default scheme: https://)
+  -k             Skip TLS certificate verification
+  -t <seconds>   Max request time (default: $timeout_seconds)
+  -h             Show the help
+  -v             Get the tool version
+
+Examples:
+  robotsaudit example.com
+  robotsaudit https://example.com
+  robotsaudit -k -t 8 https://self-signed.badssl.com
+EOF
+}
+
+normalize_target() {
+  local value="$1"
+  if [[ "$value" =~ ^https?:// ]]; then
+    echo "$value"
+  else
+    echo "https://$value"
+  fi
+}
+
+fetch_robots() {
+  local input="$1"
+  local target
+  target=$(normalize_target "$input")
+  target="${target%/}"
+  local robots_url="${target}/robots.txt"
+
+  local curl_args=(-sS -L --max-time "$timeout_seconds")
+  if [[ "$insecure" -eq 1 ]]; then
+    curl_args+=(-k)
+  fi
+
+  local response
+  response=$(curl "${curl_args[@]}" -D - "$robots_url" 2>&1)
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    echo "Error: Could not fetch robots.txt from $robots_url"
+    echo "$response" | tail -n 1
+    return 1
+  fi
+
+  local headers body status_line status_code
+  headers=$(echo "$response" | sed '/^\r\{0,1\}$/q' | tr -d '\r')
+  body=$(echo "$response" | sed '1,/^\r\{0,1\}$/d')
+  status_line=$(echo "$headers" | head -n 1)
+  status_code=$(echo "$status_line" | awk '{print $2}')
+
+  echo "Target: $target"
+  echo "Robots URL: $robots_url"
+  echo "HTTP Status: ${status_code:-N/A}"
+
+  if [[ "$status_code" == "404" || -z "$body" ]]; then
+    echo "robots.txt: not found or empty"
+    return 0
+  fi
+
+  ROBOTS_BODY="$body" python3 - <<'PY'
+import os
+import re
+
+raw = os.environ.get("ROBOTS_BODY", "")
+lines = raw.splitlines()
+
+entries = []
+for line in lines:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    line = re.sub(r"\s+#.*$", "", line).strip()
+    if ":" not in line:
+        continue
+    k, v = line.split(":", 1)
+    entries.append((k.strip().lower(), v.strip()))
+
+user_agents = [v for k, v in entries if k == "user-agent"]
+allows = [v for k, v in entries if k == "allow"]
+disallows = [v for k, v in entries if k == "disallow"]
+sitemaps = [v for k, v in entries if k == "sitemap"]
+crawl_delay = [v for k, v in entries if k == "crawl-delay"]
+
+interesting = []
+keywords = ("admin", "private", "backup", "internal", "staging", "dev", "test", "secret", "api")
+for path in disallows:
+    lower = path.lower()
+    if any(k in lower for k in keywords):
+        interesting.append(path)
+
+print(f"User-Agent Entries: {len(user_agents)}")
+print(f"Allow Rules: {len(allows)}")
+print(f"Disallow Rules: {len(disallows)}")
+print(f"Sitemap Entries: {len(sitemaps)}")
+if crawl_delay:
+    print(f"Crawl-Delay: {', '.join(crawl_delay[:5])}")
+if sitemaps:
+    print("Sitemaps:")
+    for sm in sitemaps[:10]:
+        print(f"  - {sm}")
+if interesting:
+    print("Interesting Disallowed Paths:")
+    for path in interesting[:20]:
+        print(f"  - {path}")
+PY
+}
+
+while getopts "kt:vh" opt; do
+  case "$opt" in
+    k) insecure=1 ;;
+    t) timeout_seconds="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "Error: -t expects an integer number of seconds."
+  exit 1
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 1
+fi
+
+check_dependencies curl python3
+fetch_robots "$1"
+exit $?
