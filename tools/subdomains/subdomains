@@ -54,6 +54,7 @@ enumerate_subdomains() {
 
   local tmp_json
   tmp_json=$(mktemp 2>/dev/null || echo "/tmp/gathm-subdomains-$$.json")
+  trap 'rm -f "$tmp_json"' EXIT
   printf '%s' "$response" > "$tmp_json"
 
   ROOT_DOMAIN="$root_domain" LIMIT="$limit" python3 - "$tmp_json" <<'PY'

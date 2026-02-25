@@ -47,9 +47,12 @@ run_native_whois() {
 
 run_rdap_fallback() {
   local target="$1"
-  local rdap_tool="$GATHM_ROOT/tools/rdap/rdap"
+  local tool_dir
+  tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+  local rdap_tool="$tool_dir/../rdap/rdap"
   if [[ ! -x "$rdap_tool" ]]; then
-    echo "Error: RDAP fallback tool is unavailable at $rdap_tool" >&2
+    echo "Error: RDAP fallback tool is unavailable." >&2
+    echo "Hint: Ensure the rdap tool is installed at tools/rdap/rdap" >&2
     return 1
   fi
   "$rdap_tool" "$target"

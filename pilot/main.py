@@ -119,7 +119,7 @@ def _normalize_tool_invocation(parts: List[str]) -> List[str]:
     # gif only accepts a single keyword argument; normalize multi-word variants.
     if tool_name == "gif":
         if args and args[0].lower() in {"show", "search"}:
-            args = [args[1:]]
+            args = args[1:]
         if len(args) > 1:
             args = ["_".join(args)]
 

@@ -21,3 +21,8 @@ __pycache__/
 
 # Gathm specific
 *.enc
+.gathm/
+
+# OS files
+Thumbs.db
+*.DS_Store
