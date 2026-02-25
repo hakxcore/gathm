@@ -75,7 +75,7 @@ categories:
 
 # API keys and secrets (use environment variables in production)
 secrets:
-  omdb_api_key: "${OMDB_API_KEY:-946f500a}"
+  omdb_api_key: "${OMDB_API_KEY:-}"
   shodan_api_key: "${SHODAN_API_KEY:-}"
   # Add more API keys as needed
 

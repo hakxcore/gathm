@@ -45,7 +45,7 @@ GATHM_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
 AGENT_SCRIPT = GATHM_ROOT / "agent" / "orchestrator.sh"
 DEFAULT_PORT = 8080
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 
 
 def _find_bash() -> str:

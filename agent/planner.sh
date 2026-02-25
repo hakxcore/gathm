@@ -347,6 +347,7 @@ cmd_execute_plan() {
         echo -e "${CYAN}[Step $step]${RESETBG} $desc"
         echo -e "  Running: ${BOLD}$tool $args${RESETBG}"
 
+        # shellcheck disable=SC2086
         execute_with_recovery "$tool" $args
         local exit_code=$?
 
@@ -354,6 +355,7 @@ cmd_execute_plan() {
             echo -e "${RED}Step $step failed!${RESETBG}"
             echo -e "${ORANGE}Attempting self-heal and retry...${RESETBG}"
             self_heal "$tool"
+            # shellcheck disable=SC2086
             execute_with_recovery "$tool" $args
             exit_code=$?
             if [[ $exit_code -ne 0 ]]; then

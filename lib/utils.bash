@@ -118,7 +118,7 @@ print_header() {
 \____/\__,_|\__|_| |_|_| |_| |_|
 EOF
     echo -e "${RESETBG}"
-    echo -e "${BLUE}        Gathm Framework ${WHITE}v${currentVersion}${RESETBG}"
+    echo -e "${BLUE}        Gathm Framework ${WHITE}v${currentVersion:-1.0.0}${RESETBG}"
     echo
 }
 

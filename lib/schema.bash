@@ -104,7 +104,7 @@ json_response() {
         fi
     else
         printf '{"tool":"%s","status":"error","error":"%s","timestamp":"%s"}\n' \
-            "$tool" "$(echo "$error_msg" | sed 's/"/\\"/g')" "$timestamp"
+            "$tool" "${error_msg//\"/\\\"}" "$timestamp"
     fi
 }
 

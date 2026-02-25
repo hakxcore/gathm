@@ -12,7 +12,7 @@ services:
       - GATHM_OUTPUT_MODE=json
       - GATHM_MAX_RETRIES=3
       # API keys (set these in .env file or environment)
-      - OMDB_API_KEY=${OMDB_API_KEY:-946f500a}
+      - OMDB_API_KEY=${OMDB_API_KEY:-}
       - SHODAN_API_KEY=${SHODAN_API_KEY:-}
     volumes:
       - gathm-data:/root/.gathm

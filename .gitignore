@@ -1,0 +1,23 @@
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and log files
+*.log
+.DS_Store
+*.swp
+*.tmp
+
+# IDEs
+.vscode/
+.idea/
+
+# Gathm specific
+*.enc

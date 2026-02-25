@@ -84,7 +84,7 @@ cmd_list() {
 
         echo ""
         local total
-        total=$(ls -d "$GATHM_ROOT"/tools/*/ 2>/dev/null | wc -l)
+        total=$(find "$GATHM_ROOT"/tools/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
         echo -e "${GREEN}Total: $total tools available${RESETBG}"
     fi
 }
@@ -454,6 +454,7 @@ cmd_chain() {
             return 1
         fi
 
+        # shellcheck disable=SC2086
         prev_output=$(execute_with_recovery "$tool_name" $tool_args 2>&1)
         local exit_code=$?
 
@@ -477,7 +478,7 @@ cmd_chain() {
 cmd_status() {
     if [[ "$GATHM_OUTPUT_MODE" == "json" ]]; then
         local tools_count
-        tools_count=$(ls -d "$GATHM_ROOT"/tools/*/ 2>/dev/null | wc -l)
+        tools_count=$(find "$GATHM_ROOT"/tools/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
         json_object \
             "agent" "$AGENT_NAME" \
             "version" "$AGENT_VERSION" \
@@ -491,7 +492,7 @@ cmd_status() {
         echo -e "  Agent:     ${CYAN}$AGENT_NAME v$AGENT_VERSION${RESETBG}"
         echo -e "  Platform:  $(detect_platform) ($(uname -s 2>/dev/null || echo unknown))"
         echo -e "  Shell:     ${BASH_VERSION:-unknown}"
-        echo -e "  Tools:     $(ls -d "$GATHM_ROOT"/tools/*/ 2>/dev/null | wc -l) available"
+        echo -e "  Tools:     $(find "$GATHM_ROOT"/tools/ -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) available"
         echo -e "  State Dir: $AGENT_STATE_DIR"
         echo -e "  Log Dir:   $GATHM_LOG_DIR"
         echo ""

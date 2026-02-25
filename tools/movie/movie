@@ -11,7 +11,11 @@ detail=false
 ## This function grabs information about a movie and using python parses the
 getMovieInfo()
 {
-  apiKey=946f500a
+  apiKey="${OMDB_API_KEY:-}"
+  if [[ -z "$apiKey" ]]; then
+    echo "Error: OMDB_API_KEY is not set." >&2
+    exit 1
+  fi
   movie=$(echo "$@" | tr " " + )
   export PYTHONIOENCODING=utf8
   movieInfo=$(httpGet "http://www.omdbapi.com/?t=$movie&apikey=$apiKey")

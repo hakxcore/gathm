@@ -9,7 +9,7 @@ dependencies:
 apis:
   - name: omdbapi
     base_url: http://www.omdbapi.com
-    health_endpoint: http://www.omdbapi.com/?apikey=946f500a&t=test
+    health_endpoint: http://www.omdbapi.com/
     auth_required: true
     auth_type: api_key
 
