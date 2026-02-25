@@ -47,6 +47,16 @@ AGENT_SCRIPT = GATHM_ROOT / "agent" / "orchestrator.sh"
 DEFAULT_PORT = 8080
 DEFAULT_HOST = "127.0.0.1"
 
+# API Authentication
+# Set GATHM_API_KEY environment variable to enable API key authentication.
+# When set, all requests must include: Authorization: Bearer <key>
+# Health and root endpoints are exempt.
+GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
+PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health"}
+
+import hashlib
+import secrets
+
 
 def _find_bash() -> str:
     """Find bash executable cross-platform (Linux/macOS/Termux/Windows)."""
@@ -202,12 +212,32 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _check_auth(self) -> bool:
+        """Verify API key if GATHM_API_KEY is configured."""
+        if not GATHM_API_KEY:
+            return True  # No auth required
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if path in PUBLIC_PATHS:
+            return True  # Public endpoints
+
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            # Constant-time comparison
+            return secrets.compare_digest(token, GATHM_API_KEY)
+        return False
+
     def do_OPTIONS(self):
         """Handle CORS preflight."""
         self._send_json({})
 
     def do_GET(self):
         """Handle GET requests."""
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
 
@@ -245,17 +275,19 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
         elif path in ("", "/", "/api", "/api/v1"):
             self._send_json({
                 "name": "Gathm Enterprise API",
-                "version": "1.0.0",
+                "version": "2.0.0",
+                "auth": "Set GATHM_API_KEY env var to enable Bearer token auth",
                 "endpoints": {
                     "GET /api/v1/tools": "List all tools",
                     "GET /api/v1/tools/{name}": "Get tool metadata",
                     "POST /api/v1/tools/{name}/execute": "Execute a tool",
-                    "GET /api/v1/health": "System health check",
+                    "GET /api/v1/health": "System health check (public)",
                     "GET /api/v1/health/{tool}": "Tool health check",
                     "POST /api/v1/agent/ask": "Natural language query",
                     "POST /api/v1/agent/plan": "Create execution plan",
                     "POST /api/v1/agent/engineer": "Engineering agent task",
                     "POST /api/v1/agent/chain": "Execute tool pipeline",
+                    "POST /api/v1/agent/parallel": "Execute tools in parallel",
                     "GET /api/v1/agent/status": "Agent status",
                     "POST /api/v1/agent/heal": "Self-heal tools",
                 }
@@ -266,6 +298,9 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests."""
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
         body = self._read_body()
@@ -318,6 +353,15 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "Missing 'pipeline' field"}, 400)
                 return
             result = run_agent_command("chain", pipeline)
+            self._send_json(result)
+
+        # POST /api/v1/agent/parallel
+        elif path == "/api/v1/agent/parallel":
+            tools = body.get("tools", "")
+            if not tools:
+                self._send_json({"error": "Missing 'tools' field"}, 400)
+                return
+            result = run_agent_command("parallel", tools)
             self._send_json(result)
 
         # POST /api/v1/agent/heal

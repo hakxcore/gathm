@@ -50,7 +50,7 @@ json_object() {
             result+="\"$key\":$value"
         else
             # Escape special characters in strings
-            value=$(echo "$value" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+            value=$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ' | sed 's/ $//')
             result+="\"$key\":\"$value\""
         fi
     done

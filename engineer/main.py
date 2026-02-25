@@ -32,11 +32,20 @@ OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 def get_model_client():
-    # TEMPORARY: Reverting to Ollama because Anthropic credits are low.
-    # To switch back to Claude, uncomment the Anthropic block below.
-    
+    """Smart model selection: Claude when API key is available, Ollama as fallback."""
+    if ANTHROPIC_API_KEY:
+        try:
+            from autogen_ext.models.anthropic import AnthropicChatCompletionClient
+            print("[*] Engineer using Claude API (Anthropic)")
+            return AnthropicChatCompletionClient(
+                model="claude-sonnet-4-6",
+                api_key=ANTHROPIC_API_KEY,
+            )
+        except Exception as e:
+            print(f"[!] Claude init failed ({e}), falling back to Ollama")
+
     from autogen_ext.models.openai import OpenAIChatCompletionClient
-    print(f"[*] Engineer using local model ({OLLAMA_MODEL}) via Ollama (Anthropic fallback active)")
+    print(f"[*] Engineer using local model ({OLLAMA_MODEL}) via Ollama")
     return OpenAIChatCompletionClient(
         model=OLLAMA_MODEL,
         base_url=OLLAMA_BASE_URL,
@@ -50,14 +59,6 @@ def get_model_client():
             "multiple_system_messages": True,
         }
     )
-    
-    # if ANTHROPIC_API_KEY:
-    #     from autogen_ext.models.anthropic import AnthropicChatCompletionClient
-    #     print("[*] Engineer using Claude API (Anthropic)")
-    #     return AnthropicChatCompletionClient(
-    #         model="claude-3-7-sonnet-latest",
-    #         api_key=ANTHROPIC_API_KEY,
-    #     )
 
 async def run_engineer_task(task: str):
     print(f"[*] Gathm AutoGen Engineer starting task: {task}")

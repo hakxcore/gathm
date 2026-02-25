@@ -25,8 +25,10 @@ source "$GATHM_ROOT/lib/logging.bash"
 source "$GATHM_ROOT/lib/health.bash"
 source "$GATHM_ROOT/lib/recovery.bash"
 source "$GATHM_ROOT/lib/schema.bash"
+source "$GATHM_ROOT/lib/cache.bash"
+source "$GATHM_ROOT/lib/ratelimit.bash"
 
-AGENT_VERSION="1.0.0"
+AGENT_VERSION="2.0.0"
 AGENT_NAME="gathm-agent"
 AGENT_STATE_DIR="${HOME}/.gathm/agent"
 AGENT_MEMORY_FILE="${AGENT_STATE_DIR}/memory.json"
@@ -89,6 +91,31 @@ cmd_list() {
     fi
 }
 
+# --- Input Sanitization ---
+# Validates input against blocked patterns from policies.yaml
+_sanitize_input() {
+    local input="$*"
+    # Block command injection patterns
+    if [[ "$input" == *'$('* || "$input" == *'`'* || "$input" == *'&&'* || "$input" == *'||'* || "$input" == *';'* ]]; then
+        log_warn "$AGENT_NAME" "Blocked potentially dangerous input: $input"
+        echo "Error: Input contains blocked characters." >&2
+        return 1
+    fi
+    # Block path traversal
+    if [[ "$input" == *'../'* ]]; then
+        log_warn "$AGENT_NAME" "Blocked path traversal attempt: $input"
+        echo "Error: Path traversal not allowed." >&2
+        return 1
+    fi
+    # Check argument length
+    if [[ ${#input} -gt 1024 ]]; then
+        log_warn "$AGENT_NAME" "Input exceeds max argument length: ${#input}"
+        echo "Error: Input too long (max 1024 characters)." >&2
+        return 1
+    fi
+    return 0
+}
+
 # --- Tool Execution with Recovery ---
 cmd_run() {
     local tool_name="$1"
@@ -97,6 +124,11 @@ cmd_run() {
 
     if [[ -z "$tool_name" ]]; then
         echo "Usage: $0 run <tool_name> [args...]" >&2
+        return 1
+    fi
+
+    # Input sanitization
+    if ! _sanitize_input "${tool_args[@]+"${tool_args[@]}"}"; then
         return 1
     fi
 
@@ -118,11 +150,48 @@ cmd_run() {
         return 1
     fi
 
+    # Rate limiting
+    if ! ratelimit_check "$tool_name"; then
+        local rl_status
+        rl_status=$(ratelimit_status "$tool_name")
+        if [[ "$GATHM_OUTPUT_MODE" == "json" ]]; then
+            json_response "$tool_name" "error" "" "Rate limit exceeded"
+        else
+            echo -e "${RED}Rate limit exceeded for '$tool_name'.${RESETBG}" >&2
+            echo "Status: $rl_status" >&2
+        fi
+        return 1
+    fi
+
     audit_log "tool_execute" "agent" "$tool_name" "args=${tool_args[*]}"
 
+    # Check cache first (skip for tools that modify state)
+    local skip_cache=false
+    case "$tool_name" in
+        todo|transfer|crypt) skip_cache=true ;;
+    esac
+
+    if [[ "$skip_cache" == "false" ]]; then
+        local cached_output
+        if cached_output=$(cache_get "$tool_name" "${tool_args[@]+"${tool_args[@]}"}"); then
+            log_info "$AGENT_NAME" "Cache hit for $tool_name"
+            echo "$cached_output"
+            _update_memory "$tool_name" 0
+            return 0
+        fi
+    fi
+
     # Execute with full recovery pipeline
-    execute_with_recovery "$tool_name" "${tool_args[@]}"
+    local output
+    output=$(execute_with_recovery "$tool_name" "${tool_args[@]}")
     local exit_code=$?
+
+    # Cache successful results
+    if [[ $exit_code -eq 0 && "$skip_cache" == "false" && -n "$output" ]]; then
+        echo "$output" | cache_set "$tool_name" "${tool_args[@]+"${tool_args[@]}"}"
+    fi
+
+    echo "$output"
 
     # Update agent memory
     _update_memory "$tool_name" "$exit_code"
@@ -535,6 +604,20 @@ cmd_status() {
         if [ "$open_circuits" -eq 0 ]; then
             echo -e "  ${GREEN}All circuits closed (healthy)${RESETBG}"
         fi
+
+        echo ""
+
+        # Show cache stats
+        local cache_data
+        cache_data=$(cache_stats 2>/dev/null)
+        if [[ -n "$cache_data" ]]; then
+            echo -e "  ${BOLD}Cache:${RESETBG}"
+            local active expired
+            active=$(echo "$cache_data" | grep -o '"active":[0-9]*' | cut -d: -f2)
+            expired=$(echo "$cache_data" | grep -o '"expired":[0-9]*' | cut -d: -f2)
+            echo -e "    Active entries: ${GREEN}${active:-0}${RESETBG}"
+            echo -e "    Expired entries: ${ORANGE}${expired:-0}${RESETBG}"
+        fi
     fi
 }
 
@@ -576,6 +659,278 @@ cmd_monitor() {
     done
 }
 
+# --- Tool Scaffolding ---
+cmd_new_tool() {
+    local tool_name="$1"
+
+    if [[ -z "$tool_name" ]]; then
+        echo "Usage: $0 new-tool <tool_name> [--category <cat>] [--description <desc>]" >&2
+        return 1
+    fi
+
+    # Parse optional flags
+    shift
+    local category="utility" description="A new gathm tool"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --category) category="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    local tool_dir="$GATHM_ROOT/tools/$tool_name"
+    if [[ -d "$tool_dir" ]]; then
+        echo "Error: Tool '$tool_name' already exists at $tool_dir" >&2
+        return 1
+    fi
+
+    mkdir -p "$tool_dir"
+
+    # Create the tool executable
+    cat > "$tool_dir/$tool_name" << 'TOOL_TEMPLATE'
+#!/usr/bin/env bash
+# Gathm Tool: TOOL_NAME_PLACEHOLDER
+# Description: DESCRIPTION_PLACEHOLDER
+
+TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+source "$TOOL_DIR/../../lib/utils.bash"
+getConfiguredClient
+
+TOOL_VERSION="1.0.0"
+
+show_help() {
+    echo "Usage: TOOL_NAME_PLACEHOLDER [options] <arguments>"
+    echo ""
+    echo "DESCRIPTION_PLACEHOLDER"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help     Show this help"
+    echo "  -v, --version  Show version"
+    echo "  --json         Output in JSON format"
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help) show_help; return 0 ;;
+        -v|--version) echo "TOOL_NAME_PLACEHOLDER $TOOL_VERSION"; return 0 ;;
+    esac
+
+    # Parse --json flag
+    local output_mode="text"
+    local args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --json) output_mode="json" ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+
+    # TODO: Implement your tool logic here
+    local result="Hello from TOOL_NAME_PLACEHOLDER!"
+
+    if [[ "$output_mode" == "json" ]]; then
+        gathm_output "TOOL_NAME_PLACEHOLDER" "" "$(json_object "result" "$result")"
+    else
+        echo "$result"
+    fi
+}
+
+main "$@"
+TOOL_TEMPLATE
+
+    # Replace placeholders
+    sed -i "s/TOOL_NAME_PLACEHOLDER/$tool_name/g" "$tool_dir/$tool_name" 2>/dev/null || \
+        sed -i '' "s/TOOL_NAME_PLACEHOLDER/$tool_name/g" "$tool_dir/$tool_name"
+    sed -i "s/DESCRIPTION_PLACEHOLDER/$description/g" "$tool_dir/$tool_name" 2>/dev/null || \
+        sed -i '' "s/DESCRIPTION_PLACEHOLDER/$description/g" "$tool_dir/$tool_name"
+
+    chmod +x "$tool_dir/$tool_name"
+
+    # Create tool.yaml manifest
+    cat > "$tool_dir/tool.yaml" << YAML_TEMPLATE
+name: $tool_name
+version: "1.0.0"
+description: "$description"
+category: $category
+
+dependencies:
+  system: [curl]
+
+input_schema:
+  arguments:
+    - name: input
+      type: string
+      required: true
+      description: "Primary input for $tool_name"
+  flags:
+    - flag: json
+      description: "Output in JSON format"
+
+output_schema:
+  text: "Human-readable output"
+  json_fields:
+    - name: result
+      type: string
+
+fallback_tool: null
+tags: [$category, $tool_name]
+YAML_TEMPLATE
+
+    echo -e "${GREEN}Tool '$tool_name' created successfully!${RESETBG}"
+    echo -e "  Directory:  $tool_dir"
+    echo -e "  Executable: $tool_dir/$tool_name"
+    echo -e "  Manifest:   $tool_dir/tool.yaml"
+    echo ""
+    echo -e "Next steps:"
+    echo -e "  1. Edit ${CYAN}$tool_dir/$tool_name${RESETBG} to implement your logic"
+    echo -e "  2. Update ${CYAN}$tool_dir/tool.yaml${RESETBG} with correct dependencies"
+    echo -e "  3. Test: ${BOLD}gathm-agent run $tool_name --help${RESETBG}"
+
+    log_info "$AGENT_NAME" "Created new tool: $tool_name (category: $category)"
+    audit_log "tool_create" "agent" "$tool_name" "category=$category"
+}
+
+# --- Parallel Tool Execution ---
+cmd_parallel() {
+    local tools_spec="$*"
+
+    if [[ -z "$tools_spec" ]]; then
+        echo "Usage: $0 parallel '<tool1> [args], <tool2> [args], ...'" >&2
+        echo "Example: $0 parallel 'weather Paris, news, cryptocurrency'" >&2
+        return 1
+    fi
+
+    log_info "$AGENT_NAME" "Parallel execution: $tools_spec"
+    audit_log "parallel_execute" "agent" "orchestrator" "tools=$tools_spec"
+
+    # Split by comma
+    local IFS_OLD="$IFS"
+    IFS=','
+    local tool_cmds=()
+    # shellcheck disable=SC2086
+    for cmd in $tools_spec; do
+        cmd=$(echo "$cmd" | sed 's/^ *//;s/ *$//')
+        [[ -n "$cmd" ]] && tool_cmds+=("$cmd")
+    done
+    IFS="$IFS_OLD"
+
+    local total=${#tool_cmds[@]}
+    echo -e "${BOLD}${GREEN}Parallel Execution ($total tools)${RESETBG}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
+
+    # Launch all tools in background
+    local tmpdir
+    tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t gathm_parallel)
+    local pids=()
+
+    for i in "${!tool_cmds[@]}"; do
+        local cmd="${tool_cmds[$i]}"
+        local tool_name
+        tool_name=$(echo "$cmd" | awk '{print $1}')
+        local tool_args
+        tool_args=$(echo "$cmd" | sed "s/^$tool_name//;s/^ *//")
+
+        local tool_path="$GATHM_ROOT/tools/$tool_name/$tool_name"
+        if [[ ! -f "$tool_path" ]]; then
+            echo "Error: Tool '$tool_name' not found" > "$tmpdir/result_$i"
+            continue
+        fi
+
+        (
+            # shellcheck disable=SC2086
+            execute_with_recovery "$tool_name" $tool_args > "$tmpdir/result_$i" 2>&1
+            echo $? > "$tmpdir/exit_$i"
+        ) &
+        pids+=($!)
+        echo -e "  ${CYAN}Started:${RESETBG} $tool_name $tool_args (PID: $!)"
+    done
+
+    # Wait for all to complete
+    local failed=0
+    for i in "${!pids[@]}"; do
+        wait "${pids[$i]}" 2>/dev/null || true
+    done
+
+    echo ""
+
+    # Display results
+    for i in "${!tool_cmds[@]}"; do
+        local cmd="${tool_cmds[$i]}"
+        local tool_name
+        tool_name=$(echo "$cmd" | awk '{print $1}')
+        local exit_code=0
+        [[ -f "$tmpdir/exit_$i" ]] && exit_code=$(cat "$tmpdir/exit_$i")
+
+        local status_icon="${GREEN}[OK]${RESETBG}"
+        if [[ "$exit_code" -ne 0 ]]; then
+            status_icon="${RED}[FAIL]${RESETBG}"
+            failed=$((failed + 1))
+        fi
+
+        echo -e "\n$status_icon ${BOLD}$tool_name${RESETBG}"
+        echo "────────────────────────────────────"
+        [[ -f "$tmpdir/result_$i" ]] && cat "$tmpdir/result_$i"
+    done
+
+    # Cleanup
+    rm -rf "$tmpdir" 2>/dev/null
+
+    echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
+    echo -e "${GREEN}Parallel execution completed: $total tools, $failed failed${RESETBG}"
+
+    log_info "$AGENT_NAME" "Parallel execution: $total tools, $failed failed"
+    [[ $failed -gt 0 ]] && return 1
+    return 0
+}
+
+# --- Cache Management ---
+cmd_cache() {
+    local subcmd="${1:-stats}"
+
+    case "$subcmd" in
+        stats)
+            local stats
+            stats=$(cache_stats)
+            if [[ "$GATHM_OUTPUT_MODE" == "json" ]]; then
+                echo "$stats"
+            else
+                echo -e "${BOLD}${GREEN}Cache Statistics${RESETBG}"
+                echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
+                local py
+                py=$(_find_python)
+                if [[ -n "$py" ]]; then
+                    echo "$stats" | "$py" -m json.tool 2>/dev/null || echo "$stats"
+                else
+                    echo "$stats"
+                fi
+            fi
+            ;;
+        clear)
+            local cleaned
+            cleaned=$(cache_cleanup)
+            echo -e "${GREEN}Cleaned $cleaned expired cache entries.${RESETBG}"
+            ;;
+        purge)
+            rm -rf "$GATHM_CACHE_DIR"/* 2>/dev/null
+            echo -e "${GREEN}Cache purged.${RESETBG}"
+            ;;
+        invalidate)
+            local tool="${2:-}"
+            if [[ -z "$tool" ]]; then
+                echo "Usage: $0 cache invalidate <tool_name>" >&2
+                return 1
+            fi
+            cache_invalidate_tool "$tool"
+            echo -e "${GREEN}Cache invalidated for '$tool'.${RESETBG}"
+            ;;
+        *)
+            echo "Usage: $0 cache [stats|clear|purge|invalidate <tool>]" >&2
+            return 1
+            ;;
+    esac
+}
+
 # --- Agent Memory ---
 _update_memory() {
     local tool="$1"
@@ -597,21 +952,24 @@ ${BOLD}Gathm AI Agent Orchestrator v$AGENT_VERSION${RESETBG}
 ${GREEN}Usage:${RESETBG} gathm-agent <command> [options]
 
 ${BOLD}Commands:${RESETBG}
-  run <tool> [args]       Execute a tool with auto-recovery and circuit breaking
-  ask <query>             Natural language tool selection and execution
-  plan <description>      Decompose a task into a tool execution plan
-  engineer <task>         AI engineering agent for code and tool development
+  run <tool> [args]        Execute a tool with recovery, caching, and rate limiting
+  ask <query>              Natural language tool selection and execution
+  plan <description>       Decompose a task into a tool execution plan
+  engineer <task>          AI engineering agent for code and tool development
   chain '<t1 | t2 | t3>'  Execute a tool pipeline (pipe output between tools)
-  list [--json]           List all available tools with metadata
-  health [tool|all]       Run health checks on tools
-  heal [tool|all]         Self-heal broken tools (fix deps, permissions, etc.)
-  status                  Show agent status, metrics, and circuit breaker states
-  monitor [interval]      Continuous health monitoring with auto-heal
+  parallel '<t1, t2, t3>'  Execute multiple tools in parallel
+  new-tool <name> [opts]   Scaffold a new tool with boilerplate and manifest
+  list [--json]            List all available tools with metadata
+  health [tool|all]        Run health checks on tools
+  heal [tool|all]          Self-heal broken tools (fix deps, permissions, etc.)
+  cache [stats|clear|purge|invalidate <tool>]  Manage output cache
+  status                   Show agent status, metrics, and circuit breaker states
+  monitor [interval]       Continuous health monitoring with auto-heal
 
 ${BOLD}Options:${RESETBG}
-  --json                  Output in JSON format (for programmatic access)
-  -h, --help              Show this help message
-  -v, --version           Show agent version
+  --json                   Output in JSON format (for programmatic access)
+  -h, --help               Show this help message
+  -v, --version            Show agent version
 
 ${BOLD}Platforms:${RESETBG}
   Linux (all distros), macOS, Termux (Android), Windows (WSL/Git Bash/MSYS2)
@@ -620,8 +978,11 @@ ${BOLD}Examples:${RESETBG}
   gathm-agent run weather Paris
   gathm-agent ask "what's the weather in Tokyo?"
   gathm-agent chain 'geo -w | ipinfo'
+  gathm-agent parallel 'weather Paris, news, cryptocurrency'
+  gathm-agent new-tool mytool --category security --description "My custom tool"
   gathm-agent health all
   gathm-agent heal weather
+  gathm-agent cache stats
   gathm-agent list --json
   gathm-agent monitor 60
 
@@ -629,6 +990,8 @@ ${BOLD}Environment:${RESETBG}
   GATHM_LOG_LEVEL       Log level (DEBUG|INFO|WARN|ERROR) [default: INFO]
   GATHM_OUTPUT_MODE     Output mode (text|json) [default: text]
   GATHM_MAX_RETRIES     Max retry attempts [default: 3]
+  GATHM_CACHE_ENABLED   Enable output caching [default: true]
+  GATHM_CACHE_DEFAULT_TTL  Cache TTL in seconds [default: 300]
 EOF
 }
 
@@ -655,16 +1018,19 @@ command="${1:-help}"
 shift 2>/dev/null || true
 
 case "$command" in
-    run)      cmd_run "$@" ;;
-    ask)      cmd_ask "$@" ;;
-    plan)     source "$AGENT_DIR/planner.sh"; cmd_plan "$@" ;;
-    engineer) cmd_engineer "$@" ;;
-    chain)    cmd_chain "$@" ;;
-    list)     cmd_list "$@" ;;
-    health)   cmd_health "$@" ;;
-    heal)     cmd_heal "$@" ;;
-    status)   cmd_status ;;
-    monitor)  cmd_monitor "$@" ;;
+    run)       cmd_run "$@" ;;
+    ask)       cmd_ask "$@" ;;
+    plan)      source "$AGENT_DIR/planner.sh"; cmd_plan "$@" ;;
+    engineer)  cmd_engineer "$@" ;;
+    chain)     cmd_chain "$@" ;;
+    parallel)  cmd_parallel "$@" ;;
+    new-tool)  cmd_new_tool "$@" ;;
+    list)      cmd_list "$@" ;;
+    health)    cmd_health "$@" ;;
+    heal)      cmd_heal "$@" ;;
+    cache)     cmd_cache "$@" ;;
+    status)    cmd_status ;;
+    monitor)   cmd_monitor "$@" ;;
     -h|--help|help) show_help ;;
     -v|--version)   echo "gathm-agent v$AGENT_VERSION" ;;
     *)
