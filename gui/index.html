@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gathm AI Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="chat-container">
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <div class="time" id="clock">9:41</div>
+            <div class="status-icons">
+                <i data-lucide="signal" class="icon-small"></i>
+                <i data-lucide="wifi" class="icon-small"></i>
+                <i data-lucide="battery-full" class="icon-medium"></i>
+            </div>
+        </div>
+
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <i data-lucide="chevron-left" class="icon"></i>
+                <h1 class="header-title">Gathm AI</h1>
+                <div class="online-dot"></div>
+            </div>
+            <div class="header-right">
+                <i data-lucide="phone" class="icon-secondary"></i>
+                <i data-lucide="ellipsis-vertical" class="icon-secondary"></i>
+            </div>
+        </header>
+
+        <!-- Main Content (Scrollable) -->
+        <div class="scroll-area" id="chatScroll">
+            <!-- Avatar Section -->
+            <div class="avatar-section">
+                <div class="glow-bg"></div>
+                <div class="avatar">
+                    <i data-lucide="bot" class="avatar-icon"></i>
+                </div>
+                <h2 class="bot-name">Gathm AI Agent</h2>
+                <div class="bot-status">Online · Voice & Text</div>
+            </div>
+
+            <!-- Chat Area -->
+            <div class="chat-area" id="chatArea">
+                <!-- Bot Voice Message -->
+                <div class="message-wrapper bot">
+                    <div class="message bot-voice">
+                        <button class="play-btn accent-blue">
+                            <i data-lucide="play" class="play-icon"></i>
+                        </button>
+                        <div class="wave" id="wave1">
+                            <div class="bar bar-1"></div>
+                            <div class="bar bar-2"></div>
+                            <div class="bar bar-3"></div>
+                            <div class="bar bar-4"></div>
+                            <div class="bar bar-5"></div>
+                            <div class="bar bar-6"></div>
+                            <div class="bar bar-7"></div>
+                            <div class="bar bar-8"></div>
+                            <div class="bar bar-9"></div>
+                            <div class="bar bar-10"></div>
+                            <div class="bar bar-11"></div>
+                            <div class="bar bar-12"></div>
+                        </div>
+                        <span class="duration">0:42</span>
+                    </div>
+                </div>
+                <div class="message-time bot-time">10:32 AM</div>
+
+                <!-- User Text Message -->
+                <div class="message-wrapper user">
+                    <div class="message user-text">
+                        <p>Can you explain how neural networks learn?</p>
+                    </div>
+                </div>
+                <div class="message-time user-time">10:33 AM</div>
+
+                <!-- Bot Text Message -->
+                <div class="message-wrapper bot">
+                    <div class="message bot-text">
+                        <p>Neural networks learn through a process called backpropagation. They adjust connection weights based on prediction errors, gradually improving accuracy over many training iterations.</p>
+                    </div>
+                </div>
+                <div class="message-time bot-time">10:33 AM</div>
+
+                <!-- User Voice Message -->
+                <div class="message-wrapper user">
+                    <div class="message user-voice">
+                        <span class="duration">0:15</span>
+                        <div class="wave" id="wave2">
+                            <div class="bar purple bar-1"></div>
+                            <div class="bar purple bar-2"></div>
+                            <div class="bar purple bar-3"></div>
+                            <div class="bar purple bar-4"></div>
+                            <div class="bar purple bar-5"></div>
+                            <div class="bar purple bar-6"></div>
+                            <div class="bar purple bar-7"></div>
+                            <div class="bar purple bar-8"></div>
+                            <div class="bar purple bar-9"></div>
+                            <div class="bar purple bar-10"></div>
+                        </div>
+                        <button class="play-btn accent-purple">
+                            <i data-lucide="play" class="play-icon"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="message-time user-time">10:35 AM</div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-area">
+            <div class="input-row">
+                <button class="icon-btn" aria-label="Attach file">
+                    <i data-lucide="paperclip" class="icon-secondary"></i>
+                </button>
+                <div class="text-input-wrapper">
+                    <input type="text" id="messageInput" placeholder="Type a message..." aria-label="Type a message">
+                    <i data-lucide="mic" class="icon-secondary inside-input"></i>
+                </div>
+                <button class="send-btn" id="sendBtn" aria-label="Send message">
+                    <i data-lucide="send" class="icon-white"></i>
+                </button>
+            </div>
+            <div class="mic-section">
+                <button class="mic-btn-outer" aria-label="Tap to speak">
+                    <i data-lucide="mic" class="mic-icon-large"></i>
+                </button>
+                <span class="mic-label">Tap to speak</span>
+            </div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
