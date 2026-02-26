@@ -1,11 +1,11 @@
 # Engineer Interface (`engineer/`)
 
-The Engineer interface is an AI-assisted code and tooling workflow, callable through `gathm-agent engineer`.
+The Engineer interface is an AI-assisted code and tooling workflow, callable through `gathm engineer`.
 
 ## Run via Orchestrator
 
 ```bash
-gathm-agent engineer "create a new tool called mytool"
+gathm engineer "create a new tool called mytool"
 ```
 
 Direct entry:

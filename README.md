@@ -5,7 +5,7 @@ Formerly **Termux-Snippets**.
 Gathm is a modular, local-first command intelligence framework for security, networking, and operator workflows. It combines:
 
 - A large tool catalog (53 tools in this branch)
-- An orchestration layer (`gathm-agent`) with planning, health, retry, recovery, and caching
+- An orchestration layer (`gathm`) with planning, health, retry, recovery, and caching
 - Multiple user interfaces (CLI, TUI, API server, GUI)
 - Cross-platform support (Linux, macOS, Termux, WSL/Git Bash/MSYS2)
 
@@ -76,11 +76,11 @@ After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc
 ## Quick Start
 
 ```bash
-gathm-agent status
-gathm-agent list
-gathm-agent ask "weather in Tokyo"
-gathm-agent run dns -t MX gmail.com
-gathm-agent health all
+gathm status
+gathm list
+gathm ask "weather in Tokyo"
+gathm run dns -t MX gmail.com
+gathm health all
 ```
 
 ## Main Interfaces
@@ -88,7 +88,7 @@ gathm-agent health all
 ### 1) Agent Orchestrator (primary interface)
 
 ```bash
-gathm-agent --help
+gathm --help
 ```
 
 Core commands:
@@ -252,8 +252,8 @@ python3 -m unittest discover -s tests -v
 ### Scaffold a new tool
 
 ```bash
-gathm-agent new-tool mytool --category utility --description "My custom tool"
-gathm-agent run mytool --help
+gathm new-tool mytool --category utility --description "My custom tool"
+gathm run mytool --help
 ```
 
 Generated files:

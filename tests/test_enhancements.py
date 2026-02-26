@@ -78,7 +78,7 @@ class TestInputSanitization(_HomeSandboxTestCase):
 
     def test_allows_normal_input(self):
         # Normal arguments should pass sanitization (tool may still fail but not due to sanitization)
-        result = self._run_agent("run", "weather", "London")
+        result = self._run_agent("run", "weather", "London", expect_success=False)
         # We only check it doesn't fail on sanitization - tool may fail for other reasons
         self.assertNotIn("blocked", result.stderr.lower())
         self.assertNotIn("traversal", result.stderr.lower())
@@ -159,7 +159,7 @@ class TestAgentVersion(_HomeSandboxTestCase):
         result = self._run_agent("status")
         output = result.stdout.strip()
         data = json.loads(output)
-        self.assertEqual(data["agent"].strip(), "gathm-agent")
+        self.assertEqual(data["agent"].strip(), "gathm")
         self.assertEqual(data["version"].strip(), "2.0.0")
 
 

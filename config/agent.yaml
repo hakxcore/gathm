@@ -2,7 +2,7 @@
 # This file controls the AI agent's behavior and capabilities
 
 agent:
-  name: "gathm-agent"
+  name: "gathm"
   version: "1.0.0"
   description: "Gathm AI Agent - Autonomous tool management and execution"
 

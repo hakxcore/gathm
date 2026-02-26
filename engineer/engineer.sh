@@ -27,8 +27,8 @@ _find_python() {
 cmd_engineer() {
     local task="$*"
     if [[ -z "$task" ]]; then
-        echo "Usage: gathm-agent engineer <task_description>" >&2
-        echo "Example: gathm-agent engineer 'create a new tool called portscan that uses nmap'" >&2
+        echo "Usage: gathm engineer <task_description>" >&2
+        echo "Example: gathm engineer 'create a new tool called portscan that uses nmap'" >&2
         return 1
     fi
 

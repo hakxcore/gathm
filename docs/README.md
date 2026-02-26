@@ -5,7 +5,7 @@ This directory contains task-focused documentation for each interface, plus runn
 ## Interfaces
 
 - [Interfaces Overview](./interfaces/README.md)
-- [Agent Orchestrator (`gathm-agent`)](./interfaces/agent/README.md)
+- [Agent Orchestrator (`gathm`)](./interfaces/agent/README.md)
 - [Classic Launcher (`gathm`)](./interfaces/classic-cli/README.md)
 - [Pilot TUI (`pilot/main.py`)](./interfaces/pilot/README.md)
 - [REST API (`api/server.py`)](./interfaces/api/README.md)
@@ -16,7 +16,6 @@ This directory contains task-focused documentation for each interface, plus runn
 
 - [Examples](./examples/README.md)
 - [Use Cases](./use-cases/README.md)
-- [Installation Guides](./install/README.md)
 
 ## Related Root Docs
 

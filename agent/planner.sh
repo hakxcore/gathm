@@ -62,13 +62,13 @@ cmd_plan() {
     local task_description="$*"
 
     if [[ -z "$task_description" ]]; then
-        echo "Usage: gathm-agent plan <task description>" >&2
+        echo "Usage: gathm plan <task description>" >&2
         echo "" >&2
         echo "Examples:" >&2
-        echo "  gathm-agent plan 'run a security audit on my network'" >&2
-        echo "  gathm-agent plan 'get my daily briefing'" >&2
-        echo "  gathm-agent plan 'investigate IP 8.8.8.8'" >&2
-        echo "  gathm-agent plan 'encrypt and share file secret.txt'" >&2
+        echo "  gathm plan 'run a security audit on my network'" >&2
+        echo "  gathm plan 'get my daily briefing'" >&2
+        echo "  gathm plan 'investigate IP 8.8.8.8'" >&2
+        echo "  gathm plan 'encrypt and share file secret.txt'" >&2
         return 1
     fi
 
@@ -174,8 +174,8 @@ _display_plan() {
 
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
         echo ""
-        echo -e "Execute this plan: ${BOLD}gathm-agent execute-plan $plan_id${RESETBG}"
-        echo -e "Or run step by step with: ${BOLD}gathm-agent run <tool> <args>${RESETBG}"
+        echo -e "Execute this plan: ${BOLD}gathm execute-plan $plan_id${RESETBG}"
+        echo -e "Or run step by step with: ${BOLD}gathm run <tool> <args>${RESETBG}"
     fi
 }
 
@@ -303,7 +303,7 @@ covid:covidinfo
 
             echo ""
             echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESETBG}"
-            echo -e "Execute: ${BOLD}gathm-agent execute-plan $plan_id${RESETBG}"
+            echo -e "Execute: ${BOLD}gathm execute-plan $plan_id${RESETBG}"
         fi
     }
 }

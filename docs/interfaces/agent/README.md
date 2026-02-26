@@ -1,6 +1,6 @@
-# Agent Orchestrator (`gathm-agent`)
+# Agent Orchestrator (`gathm`)
 
-`gathm-agent` is the main control plane for Gathm. It adds orchestration features on top of the raw tool scripts:
+`gathm` is the main control plane for Gathm. It adds orchestration features on top of the raw tool scripts:
 
 - Intent routing (`ask`)
 - Task decomposition (`plan`)
@@ -11,10 +11,10 @@
 ## Run
 
 ```bash
-gathm-agent --help
+gathm --help
 ```
 
-If `gathm-agent` is not on `PATH`:
+If `gathm` is not on `PATH`:
 
 ```bash
 bash agent/orchestrator.sh --help
@@ -39,13 +39,13 @@ bash agent/orchestrator.sh --help
 ## Common Examples
 
 ```bash
-gathm-agent run weather "New York"
-gathm-agent ask "check tls cert expiry for github.com"
-gathm-agent chain 'geo -w | ipinfo'
-gathm-agent parallel 'weather London, news, cryptocurrency'
-gathm-agent health all
-gathm-agent cache stats
-gathm-agent list --json
+gathm run weather "New York"
+gathm ask "check tls cert expiry for github.com"
+gathm chain 'geo -w | ipinfo'
+gathm parallel 'weather London, news, cryptocurrency'
+gathm health all
+gathm cache stats
+gathm list --json
 ```
 
 ## JSON Output
@@ -53,7 +53,7 @@ gathm-agent list --json
 Use `--json` (or `GATHM_OUTPUT_MODE=json`) for machine-readable output:
 
 ```bash
-gathm-agent ask "dns mx for gmail.com" --json
+gathm ask "dns mx for gmail.com" --json
 ```
 
 ## Useful Environment Variables

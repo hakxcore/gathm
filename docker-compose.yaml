@@ -19,7 +19,7 @@ services:
       - gathm-logs:/root/.gathm/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "gathm-agent health all --json"]
+      test: ["CMD", "bash", "-c", "gathm health all --json"]
       interval: 30s
       timeout: 10s
       retries: 3

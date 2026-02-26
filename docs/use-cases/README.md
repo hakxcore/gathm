@@ -7,18 +7,18 @@ Practical workflows showing where Gathm fits in real operations.
 Goal: quick first-pass view of domain exposure.
 
 ```bash
-gathm-agent run subdomains example.com
-gathm-agent run dns -t A example.com
-gathm-agent run httpprobe example.com
-gathm-agent run headersaudit example.com
-gathm-agent run robotsaudit example.com
-gathm-agent run wafdetect example.com
+gathm run subdomains example.com
+gathm run dns -t A example.com
+gathm run httpprobe example.com
+gathm run headersaudit example.com
+gathm run robotsaudit example.com
+gathm run wafdetect example.com
 ```
 
 When ProjectDiscovery binaries are available:
 
 ```bash
-gathm-agent run pdchain -m passive example.com
+gathm run pdchain -m passive example.com
 ```
 
 ## 2) IP Intelligence Enrichment
@@ -26,10 +26,10 @@ gathm-agent run pdchain -m passive example.com
 Goal: enrich an IP with ownership, network, and reputation context.
 
 ```bash
-gathm-agent run rdns 8.8.8.8
-gathm-agent run rdap 8.8.8.8
-gathm-agent run asn 8.8.8.8
-gathm-agent run tipcheck -s all 8.8.8.8
+gathm run rdns 8.8.8.8
+gathm run rdap 8.8.8.8
+gathm run asn 8.8.8.8
+gathm run tipcheck -s all 8.8.8.8
 ```
 
 ## 3) Web App Security Header Baseline
@@ -37,10 +37,10 @@ gathm-agent run tipcheck -s all 8.8.8.8
 Goal: collect and compare baseline security posture for web endpoints.
 
 ```bash
-gathm-agent run httpprobe https://example.com
-gathm-agent run headersaudit https://example.com
-gathm-agent run certinfo example.com
-gathm-agent run dnssec example.com
+gathm run httpprobe https://example.com
+gathm run headersaudit https://example.com
+gathm run certinfo example.com
+gathm run dnssec example.com
 ```
 
 ## 4) Daily Operator Briefing
@@ -48,8 +48,8 @@ gathm-agent run dnssec example.com
 Goal: quick operational context in one command.
 
 ```bash
-gathm-agent plan "daily briefing"
-gathm-agent parallel 'weather, news, stocks AAPL'
+gathm plan "daily briefing"
+gathm parallel 'weather, news, stocks AAPL'
 ```
 
 ## 5) Incident Notes + Action Tracking
@@ -57,9 +57,9 @@ gathm-agent parallel 'weather, news, stocks AAPL'
 Goal: keep local checklist while investigating.
 
 ```bash
-gathm-agent run todo add "Investigate suspicious host"
-gathm-agent run todo add "Check IP reputation in VT/AbuseIPDB"
-gathm-agent run todo list
+gathm run todo add "Investigate suspicious host"
+gathm run todo add "Check IP reputation in VT/AbuseIPDB"
+gathm run todo list
 ```
 
 ## 6) Programmatic Integration via API

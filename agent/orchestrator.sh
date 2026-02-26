@@ -29,7 +29,7 @@ source "$GATHM_ROOT/lib/cache.bash"
 source "$GATHM_ROOT/lib/ratelimit.bash"
 
 AGENT_VERSION="2.0.0"
-AGENT_NAME="gathm-agent"
+AGENT_NAME="gathm"
 AGENT_STATE_DIR="${HOME}/.gathm/agent"
 AGENT_MEMORY_FILE="${AGENT_STATE_DIR}/memory.json"
 
@@ -334,13 +334,13 @@ cmd_ask() {
                 "matched_tool" "$best_match" \
                 "confidence" "$best_score" \
                 "description" "$tool_desc" \
-                "action" "Use: gathm-agent run $best_match"
+                "action" "Use: gathm run $best_match"
         else
             echo -e "${GREEN}Matched Tool:${RESETBG} $best_match"
             echo -e "${BLUE}Description:${RESETBG} $tool_desc"
             echo -e "${BLUE}Confidence:${RESETBG} $best_score match(es)"
             echo ""
-            echo -e "Run: ${BOLD}gathm-agent run $best_match${RESETBG}"
+            echo -e "Run: ${BOLD}gathm run $best_match${RESETBG}"
             echo ""
 
             # Extract potential arguments from query
@@ -371,28 +371,28 @@ _suggest_args() {
             local location
             location=$(echo "$query" | sed -E 's/.*(weather|forecast|temperature) (in |for |at )?//i' | sed 's/[?.!]$//')
             if [[ -n "$location" && "$location" != "$query" ]]; then
-                echo -e "${CYAN}Suggested command:${RESETBG} gathm-agent run weather $location"
+                echo -e "${CYAN}Suggested command:${RESETBG} gathm run weather $location"
             fi
             ;;
         define)
             local word
             word=$(echo "$query" | sed -E 's/.*(define|meaning of|definition of) //i' | sed 's/[?.!]$//' | awk '{print $1}')
             if [[ -n "$word" ]]; then
-                echo -e "${CYAN}Suggested command:${RESETBG} gathm-agent run define $word"
+                echo -e "${CYAN}Suggested command:${RESETBG} gathm run define $word"
             fi
             ;;
         movie)
             local title
             title=$(echo "$query" | sed -E 's/.*(movie|film|about) //i' | sed 's/[?.!]$//')
             if [[ -n "$title" && "$title" != "$query" ]]; then
-                echo -e "${CYAN}Suggested command:${RESETBG} gathm-agent run movie $title"
+                echo -e "${CYAN}Suggested command:${RESETBG} gathm run movie $title"
             fi
             ;;
         pwned)
             local email
             email=$(echo "$query" | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
             if [[ -n "$email" ]]; then
-                echo -e "${CYAN}Suggested command:${RESETBG} gathm-agent run pwned $email"
+                echo -e "${CYAN}Suggested command:${RESETBG} gathm run pwned $email"
             fi
             ;;
     esac
@@ -589,9 +589,11 @@ cmd_status() {
             local total_invocations
             total_invocations=$(wc -l < "$GATHM_METRICS_FILE" 2>/dev/null || echo 0)
             local successes
-            successes=$(grep -c '"status":"success"' "$GATHM_METRICS_FILE" 2>/dev/null || echo 0)
+            successes=$(grep -c '"status":"success"' "$GATHM_METRICS_FILE" 2>/dev/null || true)
+            successes=${successes:-0}
             local failures
-            failures=$(grep -c '"status":"failure"' "$GATHM_METRICS_FILE" 2>/dev/null || echo 0)
+            failures=$(grep -c '"status":"failure"' "$GATHM_METRICS_FILE" 2>/dev/null || true)
+            failures=${failures:-0}
 
             echo -e "  ${BOLD}Metrics:${RESETBG}"
             echo -e "    Total Invocations: $total_invocations"
@@ -803,7 +805,7 @@ YAML_TEMPLATE
     echo -e "Next steps:"
     echo -e "  1. Edit ${CYAN}$tool_dir/$tool_name${RESETBG} to implement your logic"
     echo -e "  2. Update ${CYAN}$tool_dir/tool.yaml${RESETBG} with correct dependencies"
-    echo -e "  3. Test: ${BOLD}gathm-agent run $tool_name --help${RESETBG}"
+    echo -e "  3. Test: ${BOLD}gathm run $tool_name --help${RESETBG}"
 
     log_info "$AGENT_NAME" "Created new tool: $tool_name (category: $category)"
     audit_log "tool_create" "agent" "$tool_name" "category=$category"
@@ -967,7 +969,7 @@ show_help() {
     cat << EOF
 ${BOLD}Gathm AI Agent Orchestrator v$AGENT_VERSION${RESETBG}
 
-${GREEN}Usage:${RESETBG} gathm-agent <command> [options]
+${GREEN}Usage:${RESETBG} gathm <command> [options]
 
 ${BOLD}Commands:${RESETBG}
   run <tool> [args]        Execute a tool with recovery, caching, and rate limiting
@@ -993,16 +995,16 @@ ${BOLD}Platforms:${RESETBG}
   Linux (all distros), macOS, Termux (Android), Windows (WSL/Git Bash/MSYS2)
 
 ${BOLD}Examples:${RESETBG}
-  gathm-agent run weather Paris
-  gathm-agent ask "what's the weather in Tokyo?"
-  gathm-agent chain 'geo -w | ipinfo'
-  gathm-agent parallel 'weather Paris, news, cryptocurrency'
-  gathm-agent new-tool mytool --category security --description "My custom tool"
-  gathm-agent health all
-  gathm-agent heal weather
-  gathm-agent cache stats
-  gathm-agent list --json
-  gathm-agent monitor 60
+  gathm run weather Paris
+  gathm ask "what's the weather in Tokyo?"
+  gathm chain 'geo -w | ipinfo'
+  gathm parallel 'weather Paris, news, cryptocurrency'
+  gathm new-tool mytool --category security --description "My custom tool"
+  gathm health all
+  gathm heal weather
+  gathm cache stats
+  gathm list --json
+  gathm monitor 60
 
 ${BOLD}Environment:${RESETBG}
   GATHM_LOG_LEVEL       Log level (DEBUG|INFO|WARN|ERROR) [default: INFO]
@@ -1050,10 +1052,10 @@ case "$command" in
     status)    cmd_status ;;
     monitor)   cmd_monitor "$@" ;;
     -h|--help|help) show_help ;;
-    -v|--version)   echo "gathm-agent v$AGENT_VERSION" ;;
+    -v|--version)   echo "gathm v$AGENT_VERSION" ;;
     *)
         echo "Unknown command: $command" >&2
-        echo "Run 'gathm-agent --help' for usage." >&2
+        echo "Run 'gathm --help' for usage." >&2
         exit 1
         ;;
 esac

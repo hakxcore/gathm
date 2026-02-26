@@ -114,7 +114,7 @@ def report_to_engineer(error_msg: str, task: str):
     print(f"{WHITE_BOLD}[*] Don't worry, our Engineer will take care of this! It will be resolved shortly.{RESET}")
     
     # In a real system, we'd trigger the background engineer here:
-    # subprocess.run(["bash", "-c", f"gathm-agent engineer 'Fix the following error in task \"{task}\": {error_msg}'"], is_background=True)
+    # subprocess.run(["bash", "-c", f"gathm engineer 'Fix the following error in task \"{task}\": {error_msg}'"], is_background=True)
     # For now, we simulate the hand-off.
     log_file = Path.home() / ".gathm" / "agent" / "engineer_tasks.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)

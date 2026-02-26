@@ -3,7 +3,8 @@
 # Gathm - A modular tool framework
 
 currentVersion="3.0.0"
-INSTALL_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+AGENT_SCRIPT="$INSTALL_DIR/agent/orchestrator.sh"
 source "$INSTALL_DIR/lib/utils.bash"
 
 # --- Graceful shutdown ---
@@ -16,7 +17,7 @@ _gathm_cleanup() {
 trap _gathm_cleanup INT TERM
 
 # Ensure dependencies
-check_dependencies() {
+check_menu_dependencies() {
     local deps=("dialog" "pv")
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" &>/dev/null; then
@@ -47,8 +48,59 @@ scan_tools() {
     done
 }
 
+# Unified command help
+show_help() {
+    cat <<EOF
+Gathm v$currentVersion
+
+Usage:
+  gathm                          Open interactive menu
+  gathm menu                     Open interactive menu
+  gathm <agent-command> [...]    Run orchestrator command (run/ask/plan/...)
+  gathm <tool> [args...]         Shortcut for: gathm run <tool> [args...]
+
+Examples:
+  gathm
+  gathm menu
+  gathm ask "weather in Tokyo"
+  gathm run dns -t MX gmail.com
+  gathm weather "Paris"
+  gathm status
+
+Notes:
+  - 'gathm-agent' remains available as a compatibility alias.
+  - Run 'gathm help-agent' to display full orchestrator help.
+EOF
+}
+
+is_agent_subcommand() {
+    case "${1:-}" in
+        run|ask|plan|engineer|chain|parallel|new-tool|list|health|heal|cache|status|monitor|help|--help|-h|--version|-v|--json)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+run_agent() {
+    if [[ ! -f "$AGENT_SCRIPT" ]]; then
+        echo "${RED}Error: Agent script not found at $AGENT_SCRIPT${RESETBG}" >&2
+        exit 1
+    fi
+    exec bash "$AGENT_SCRIPT" "$@"
+}
+
+tool_exists() {
+    local tool_name="$1"
+    [[ -f "$INSTALL_DIR/tools/$tool_name/$tool_name" && -x "$INSTALL_DIR/tools/$tool_name/$tool_name" ]]
+}
+
 # Main Menu
 main_menu() {
+    check_menu_dependencies
+
     while true; do
         scan_tools
         
@@ -113,6 +165,39 @@ run_tool() {
     pause
 }
 
-# Initialization
-check_dependencies
-main_menu
+main() {
+    local first_arg="${1:-}"
+
+    if [[ -z "$first_arg" || "$first_arg" == "menu" ]]; then
+        main_menu
+        return 0
+    fi
+
+    case "$first_arg" in
+        help|-h|--help)
+            show_help
+            return 0
+            ;;
+        help-agent)
+            run_agent --help
+            ;;
+        -v|--version)
+            echo "gathm v$currentVersion"
+            return 0
+            ;;
+    esac
+
+    if is_agent_subcommand "$first_arg"; then
+        run_agent "$@"
+    fi
+
+    if tool_exists "$first_arg"; then
+        run_agent run "$@"
+    fi
+
+    echo "${RED}Unknown command or tool: $first_arg${RESETBG}" >&2
+    echo "Use 'gathm --help' to see usage." >&2
+    exit 1
+}
+
+main "$@"

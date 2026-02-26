@@ -37,4 +37,4 @@ bash install.sh
 ## Notes
 
 - This interface is best for manual exploration.
-- For automation and structured workflows, use [`gathm-agent`](../agent/README.md).
+- For automation and structured workflows, use [`gathm`](../agent/README.md).

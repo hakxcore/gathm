@@ -7,37 +7,37 @@ This page collects runnable examples across interfaces.
 ### 1) Quick tool execution
 
 ```bash
-gathm-agent run weather "San Francisco"
-gathm-agent run dns -t MX gmail.com
-gathm-agent run headersaudit example.com
+gathm run weather "San Francisco"
+gathm run dns -t MX gmail.com
+gathm run headersaudit example.com
 ```
 
 ### 2) Natural-language routing
 
 ```bash
-gathm-agent ask "check reverse dns for 8.8.8.8"
-gathm-agent ask "find CVE details for CVE-2024-3094"
-gathm-agent ask "show latest tech headlines"
+gathm ask "check reverse dns for 8.8.8.8"
+gathm ask "find CVE details for CVE-2024-3094"
+gathm ask "show latest tech headlines"
 ```
 
 ### 3) Chaining
 
 ```bash
-gathm-agent chain 'geo -w | ipinfo'
+gathm chain 'geo -w | ipinfo'
 ```
 
 ### 4) Parallel execution
 
 ```bash
-gathm-agent parallel 'weather Tokyo, news, cryptocurrency'
+gathm parallel 'weather Tokyo, news, cryptocurrency'
 ```
 
 ### 5) JSON mode for scripts
 
 ```bash
-gathm-agent ask "dns txt openai.com" --json
-gathm-agent list --json
-gathm-agent health all --json
+gathm ask "dns txt openai.com" --json
+gathm list --json
+gathm health all --json
 ```
 
 ## API Examples

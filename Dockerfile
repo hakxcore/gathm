@@ -56,8 +56,8 @@ RUN chmod +x gathm agent/*.sh && \
     done
 
 # Create symlinks for easy access
-RUN ln -sf /opt/gathm/agent/orchestrator.sh /usr/local/bin/gathm-agent && \
-    ln -sf /opt/gathm/gathm /usr/local/bin/gathm
+RUN ln -sf /opt/gathm/gathm /usr/local/bin/gathm && \
+    ln -sf /opt/gathm/agent/orchestrator.sh /usr/local/bin/gathm-agent
 
 # Create data directories owned by the non-root user
 RUN mkdir -p /home/${GATHM_USER}/.gathm/{logs,health,agent/plans} && \
@@ -77,7 +77,7 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD bash -c "gathm-agent health all --json" || exit 1
+    CMD bash -c "gathm health all --json" || exit 1
 
 # Default: run the API server
 CMD ["python3", "/opt/gathm/api/server.py", "--port", "8080"]

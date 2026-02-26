@@ -360,7 +360,7 @@ exec "$SCRIPT_DIR/gathm" "\$@"
 SCRIPT
     chmod +x "$bin_dir/gathm"
 
-    # gathm-agent
+    # compatibility alias: gathm-agent
     cat > "$bin_dir/gathm-agent" << SCRIPT
 $shebang
 exec bash "$SCRIPT_DIR/agent/orchestrator.sh" "\$@"
@@ -390,7 +390,7 @@ SCRIPT
         info "Added ~/.local/bin to PATH in $rc_file"
     fi
 
-    ok "Commands: gathm, gathm-agent, gathm-api"
+    ok "Commands: gathm, gathm-api"
 }
 
 # --- Verify everything ---
@@ -521,12 +521,12 @@ main() {
     echo -e "    ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
     echo ""
     echo "  Quick start:"
-    echo -e "    ${CYAN}gathm-agent status${RESET}              # Check agent"
-    echo -e "    ${CYAN}gathm-agent list${RESET}                # List tools"
-    echo -e "    ${CYAN}gathm-agent ask \"weather NYC\"${RESET}    # NLP query"
-    echo -e "    ${CYAN}gathm-agent run weather Paris${RESET}   # Run tool"
-    echo -e "    ${CYAN}gathm-agent health all${RESET}          # Health check"
-    echo -e "    ${CYAN}gathm-agent plan \"daily briefing\"${RESET} # Task plan"
+    echo -e "    ${CYAN}gathm status${RESET}                    # Check agent"
+    echo -e "    ${CYAN}gathm list${RESET}                      # List tools"
+    echo -e "    ${CYAN}gathm ask \"weather NYC\"${RESET}          # NLP query"
+    echo -e "    ${CYAN}gathm run weather Paris${RESET}         # Run tool"
+    echo -e "    ${CYAN}gathm health all${RESET}                # Health check"
+    echo -e "    ${CYAN}gathm plan \"daily briefing\"${RESET}       # Task plan"
     echo -e "    ${CYAN}gathm-api --port 8080${RESET}           # REST API"
     echo -e "    ${CYAN}gathm${RESET}                           # Interactive menu"
     echo ""
