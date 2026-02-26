@@ -84,7 +84,7 @@ def render_welcome(model_name: str, tool_count: int, platform: str) -> str:
 
     # ── title ──
     lines.append(empty())
-    lines.append(box_line(f"\U0001F531 Gathm Pilot v{PILOT_VERSION}", WHITE_BOLD))
+    lines.append(box_line(f"\U0001F41A Gathm Pilot v{PILOT_VERSION}", WHITE_BOLD))
     lines.append(empty())
 
     # ── ASCII art (green) ──
@@ -123,7 +123,7 @@ def render_welcome(model_name: str, tool_count: int, platform: str) -> str:
 # ── Chat prompt ─────────────────────────────────────────────────────
 
 def print_prompt() -> None:
-    sys.stdout.write(f"\n{SAFFRON}\U0001F531{RESET} {BOLD}\u203a{RESET} ")
+    sys.stdout.write(f"\n{SAFFRON}\U0001F41A{RESET} {BOLD}\u203a{RESET} ")
     sys.stdout.flush()
 
 
@@ -148,7 +148,7 @@ def render_response(text: str) -> str:
     lines: list[str] = []
 
     # ── header ──
-    header = f" \U0001F531 Pilot "
+    header = f" \U0001F41A Pilot "
     header_vis_len = _visible_len(header)
     remaining = inner_w - header_vis_len - 1
     lines.append(f"  {SAFFRON}{RTL}{RESET}{SAFFRON}{header}{RESET}{SAFFRON}{RH * max(remaining, 0)}{RTR}{RESET}")
@@ -218,7 +218,7 @@ def render_tools_list(tools: list[tuple[str, str]]) -> str:
     inner_w = min(_term_width() - 4, 72)
     lines: list[str] = []
 
-    lines.append(f"\n  {SAFFRON}{BOLD}\U0001F531 Available Tools ({len(tools)}){RESET}")
+    lines.append(f"\n  {SAFFRON}{BOLD}\U0001F41A Available Tools ({len(tools)}){RESET}")
     lines.append(f"  {DIM}{'─' * (inner_w - 2)}{RESET}")
 
     # Tricolor rotation for rows
@@ -244,4 +244,4 @@ def render_error(message: str) -> str:
 # ── Goodbye ─────────────────────────────────────────────────────────
 
 def render_goodbye() -> str:
-    return f"\n{INDIAN_GREEN}\U0001F531 Jai Hind! Gathm Pilot signing off.{RESET}\n"
+    return f"\n{INDIAN_GREEN}\U0001F41A Jai Hind! Gathm Pilot signing off.{RESET}\n"
