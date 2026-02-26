@@ -482,6 +482,16 @@ uninstall() {
     ok "Uninstalled. Source directory not removed: $SCRIPT_DIR"
 }
 
+# --- Reload shell config (best effort) ---
+reload_shell_config() {
+    # This can refresh PATH for the installer process.
+    # Parent shell still may require a manual `source ~/.bashrc`.
+    source "$HOME/.bashrc" 2>/dev/null || true
+    source "$HOME/.zshrc" 2>/dev/null || true
+    source "$HOME/.bash_profile" 2>/dev/null || true
+    source "$HOME/.profile" 2>/dev/null || true
+}
+
 # --- Main ---
 main() {
     echo ""
@@ -520,6 +530,7 @@ main() {
     install_ollama "$platform"
     install_llmfit_and_select_model
 
+    reload_shell_config
     verify
 
     echo ""
