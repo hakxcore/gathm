@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import re
 import shlex
@@ -38,12 +39,27 @@ TOOLS_DIR = GATHM_ROOT / "tools"
 OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
 PILOT_MAX_HISTORY = int(os.getenv("PILOT_MAX_HISTORY", "12"))
 
-# Colors for tricolor beautification
+# Colors (kept for non-TUI code paths)
 SAFFRON = "\033[38;5;208m"
 WHITE_BOLD = "\033[1;37m"
 INDIAN_GREEN = "\033[38;5;28m"
 ASHOKA_BLUE = "\033[38;5;20m"
 RESET = "\033[0m"
+
+# TUI module
+try:
+    from pilot.tui import (
+        render_welcome, print_prompt, render_response, print_tool_exec,
+        print_status_bar, render_help, render_tools_list, render_error,
+        render_goodbye,
+    )
+except ImportError:
+    from tui import (  # type: ignore[no-redef]
+        render_welcome, print_prompt, render_response, print_tool_exec,
+        print_status_bar, render_help, render_tools_list, render_error,
+        render_goodbye,
+    )
+
 
 TOOL_ALIASES = {
     "movies": "movie",
@@ -59,10 +75,26 @@ HIGH_RISK_QUERY_PATTERNS = (
 
 # --- 1. Tool Discovery & Execution ---
 
+def _detect_platform() -> str:
+    """Detect platform for the welcome box."""
+    import platform
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macOS"
+    if system == "linux":
+        if shutil.which("termux-setup-storage"):
+            return "Termux"
+        return "Linux"
+    return system
+
 def print_tricolor_banner():
-    print(f"{SAFFRON}=========================================={RESET}")
-    print(f"{WHITE_BOLD}      Gathm Pilot AI - India Edition      {RESET}")
-    print(f"{INDIAN_GREEN}=========================================={RESET}")
+    """Print the full tricolor TUI welcome screen."""
+    tool_count = len(discover_tools())
+    plat = _detect_platform()
+    model_label = OLLAMA_MODEL
+    os.system("clear" if os.name != "nt" else "cls")
+    print(render_welcome(model_label, tool_count, plat))
+    print_status_bar()
 
 def report_to_engineer(error_msg: str, task: str):
     """Notify the user and trigger the AutoGen Engineer."""
@@ -295,7 +327,7 @@ def tool_node(state: AgentState):
             normalized_input = normalize_tool_command(tool_input)
         except Exception:
             normalized_input = tool_input
-        print(f"[*] Executing gathm tool: {normalized_input}")
+        print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
         return {"messages": [HumanMessage(content=f"Observation: {result}")]}
     return {"messages": [HumanMessage(content="Error: Could not parse tool input.")]}
@@ -318,24 +350,63 @@ else:
     workflow = None
     app = None
 
+def _handle_slash_command(cmd: str) -> bool:
+    """Handle slash commands. Returns True if a command was handled."""
+    cmd_lower = cmd.strip().lower()
+
+    if cmd_lower in ("/help", "?"):
+        print(render_help())
+        return True
+
+    if cmd_lower == "/tools":
+        tools = discover_tools()
+        tool_info = [(t, get_tool_description(t)) for t in tools]
+        print(render_tools_list(tool_info))
+        return True
+
+    if cmd_lower == "/clear":
+        print_tricolor_banner()
+        return True
+
+    if cmd_lower == "/model":
+        print(f"\n  {SAFFRON}Model:{RESET} {OLLAMA_MODEL}")
+        return True
+
+    if cmd_lower in ("/quit", "/exit"):
+        return False  # signal to exit handled in main loop
+
+    return False
+
+
 def main():
     if app is None:
         _require_langchain_runtime()
 
     print_tricolor_banner()
-    print(f"{WHITE_BOLD}Pilot AI Agent activated. Type 'exit' to quit.{RESET}")
     conversation_history: List[BaseMessage] = []
+
     while True:
         try:
-            print(f"\n{INDIAN_GREEN}You:{RESET} ", end="")
+            print_prompt()
             user_input = input().strip()
-            if not user_input: continue
-            if user_input.lower() in ["exit", "quit"]: break
+            if not user_input:
+                continue
 
+            # ── Exit ──
+            if user_input.lower() in ("exit", "quit", "/quit", "/exit"):
+                print(render_goodbye())
+                break
+
+            # ── Slash commands ──
+            if user_input.startswith("/") or user_input == "?":
+                _handle_slash_command(user_input)
+                continue
+
+            # ── Safety check ──
             risk_category = classify_high_risk_query(user_input)
             if risk_category:
                 refusal = safety_refusal_message()
-                print(f"{SAFFRON}Pilot:{RESET} {refusal}")
+                print(render_response(refusal))
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=refusal),
@@ -343,6 +414,7 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
                 continue
 
+            # ── AI reasoning loop ──
             state = {"messages": conversation_history + [HumanMessage(content=user_input)]}
             final_agent_reply: Optional[str] = None
             try:
@@ -350,10 +422,11 @@ def main():
                     for key, value in output.items():
                         if key == "agent" and value.get("next_step") == "end":
                             final_agent_reply = value["messages"][-1].content  # type: ignore[index]
-                            print(f"{SAFFRON}Pilot:{RESET} {final_agent_reply}")
+                            print(render_response(final_agent_reply))
             except Exception as e:
                 report_to_engineer(str(e), user_input)
-                final_agent_reply = "I encountered an error while processing your request. Don't worry, the engineer is working on it!"
+                print(render_error(str(e)))
+                final_agent_reply = "I encountered an error. The Engineer is on it."
 
             if final_agent_reply:
                 conversation_history.extend([
@@ -361,11 +434,13 @@ def main():
                     AIMessage(content=final_agent_reply),
                 ])
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
-        except EOFError:
+
+        except (EOFError, KeyboardInterrupt):
+            print(render_goodbye())
             break
         except Exception as e:
-            print(f"{SAFFRON}Pilot encountered an error:{RESET} {e}")
-            print(f"{WHITE_BOLD}[*] This issue will be resolved by our Engineer shortly.{RESET}")
+            print(render_error(str(e)))
+
 
 if __name__ == "__main__":
     main()
