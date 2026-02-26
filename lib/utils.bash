@@ -94,6 +94,15 @@ checkInternet() {
     httpGet github.com > /dev/null 2>&1 || return 1
 }
 
+# Returns "online" or "offline" on stdout (never fails)
+get_connectivity_status() {
+    if checkInternet 2>/dev/null; then
+        echo "online"
+    else
+        echo "offline"
+    fi
+}
+
 # UI Helpers
 is_interactive() {
     # Returns 0 (true) if connected to a terminal and GATHM_NON_INTERACTIVE is not set
@@ -111,14 +120,21 @@ print_header() {
     clear
     echo -e "${BOLD}${GREEN}"
     cat << "EOF"
-   ___      _   _ 
-  / _ \__ _| |_| |__  _ __ ___ 
+   ___      _   _
+  / _ \__ _| |_| |__  _ __ ___
  / /_\/ _` | __| '_ \| '_ ` _ \
 / /_\\ (_| | |_| | | | | | | | |
 \____/\__,_|\__|_| |_|_| |_| |_|
 EOF
     echo -e "${RESETBG}"
     echo -e "${BLUE}        Gathm Framework ${WHITE}v${currentVersion:-1.0.0}${RESETBG}"
+    local net_status
+    net_status=$(get_connectivity_status)
+    if [[ "$net_status" == "online" ]]; then
+        echo -e "        ${GREEN}● Online${RESETBG}"
+    else
+        echo -e "        ${RED}● Offline${RESETBG}"
+    fi
     echo
 }
 

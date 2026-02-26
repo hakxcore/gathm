@@ -51,13 +51,13 @@ try:
     from pilot.tui import (
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
-        render_goodbye,
+        render_goodbye, check_connectivity,
     )
 except ImportError:
     from tui import (  # type: ignore[no-redef]
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
-        render_goodbye,
+        render_goodbye, check_connectivity,
     )
 
 
@@ -92,8 +92,9 @@ def print_tricolor_banner():
     tool_count = len(discover_tools())
     plat = _detect_platform()
     model_label = OLLAMA_MODEL
+    connectivity = check_connectivity()
     os.system("clear" if os.name != "nt" else "cls")
-    print(render_welcome(model_label, tool_count, plat))
+    print(render_welcome(model_label, tool_count, plat, connectivity=connectivity))
     print_status_bar()
 
 def report_to_engineer(error_msg: str, task: str):
@@ -379,6 +380,21 @@ def _handle_slash_command(cmd: str) -> bool:
 
 
 def main():
+    import signal
+
+    # Graceful shutdown on SIGTERM (e.g. kill, docker stop)
+    def _handle_sigterm(_sig, _frame):
+        print(render_goodbye())
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Ignore SIGPIPE (broken pipe) to avoid crashes when piping output
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except AttributeError:
+        pass  # SIGPIPE not available on Windows
+
     if app is None:
         _require_langchain_runtime()
 
@@ -423,6 +439,10 @@ def main():
                         if key == "agent" and value.get("next_step") == "end":
                             final_agent_reply = value["messages"][-1].content  # type: ignore[index]
                             print(render_response(final_agent_reply))
+            except KeyboardInterrupt:
+                # Ctrl+C during AI processing — cancel the current query, not the app
+                print(f"\n  {SAFFRON}[*]{RESET} Query cancelled.")
+                continue
             except Exception as e:
                 report_to_engineer(str(e), user_input)
                 print(render_error(str(e)))
@@ -443,4 +463,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(render_goodbye())
+        sys.exit(0)
+    except BrokenPipeError:
+        sys.exit(0)

@@ -33,6 +33,24 @@ AGENT_NAME="gathm-agent"
 AGENT_STATE_DIR="${HOME}/.gathm/agent"
 AGENT_MEMORY_FILE="${AGENT_STATE_DIR}/memory.json"
 
+# --- Graceful signal handling ---
+_agent_interrupted=false
+
+_agent_cleanup() {
+    _agent_interrupted=true
+    log_warn "$AGENT_NAME" "Agent interrupted by signal"
+    # Kill any background child processes
+    local children
+    children=$(jobs -p 2>/dev/null) || true
+    if [[ -n "$children" ]]; then
+        kill $children 2>/dev/null || true
+        wait $children 2>/dev/null || true
+    fi
+    exit 130
+}
+
+trap _agent_cleanup INT TERM
+
 # --- Cross-Platform Python Detection ---
 _find_python() {
     local cmd

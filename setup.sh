@@ -27,6 +27,31 @@ ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
 warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
 fail()  { echo -e "${RED}[-]${RESET} $1"; }
 
+# --- Cleanup on interrupt ---
+_setup_cleanup() {
+    echo ""
+    warn "Setup interrupted. Partial installation may exist."
+    warn "Re-run 'bash setup.sh' to resume, or 'bash setup.sh --uninstall' to clean up."
+    exit 130
+}
+trap _setup_cleanup INT TERM
+
+# --- Internet connectivity check ---
+GATHM_ONLINE="false"
+check_internet() {
+    info "Checking internet connectivity..."
+    if curl -s --connect-timeout 5 --max-time 10 https://github.com > /dev/null 2>&1; then
+        GATHM_ONLINE="true"
+        ok "Network: ${GREEN}Online${RESET}"
+    elif wget -q --spider --timeout=5 https://github.com 2>/dev/null; then
+        GATHM_ONLINE="true"
+        ok "Network: ${GREEN}Online${RESET}"
+    else
+        GATHM_ONLINE="false"
+        warn "Network: ${RED}Offline${RESET} — skipping online-only steps (Ollama, llmfit)"
+    fi
+}
+
 # --- Platform detection ---
 detect_platform() {
     local kernel
@@ -124,6 +149,152 @@ install_deps() {
     esac
 
     ok "Dependencies installed"
+}
+
+# --- Install Ollama (local LLM runtime) ---
+install_ollama() {
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        warn "Skipping Ollama install (offline)"
+        return 0
+    fi
+
+    if command -v ollama &>/dev/null; then
+        ok "Ollama already installed ($(ollama --version 2>&1 | head -1))"
+        return 0
+    fi
+
+    info "Installing Ollama (local LLM runtime)..."
+    local platform="$1"
+
+    case "$platform" in
+        macos)
+            if command -v brew &>/dev/null; then
+                brew install ollama 2>/dev/null || true
+            else
+                curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || true
+            fi
+            ;;
+        termux)
+            warn "Ollama is not yet supported on Termux natively."
+            warn "Consider using a remote Ollama instance (set OLLAMA_HOST)."
+            return 0
+            ;;
+        windows)
+            warn "On Windows, install Ollama from https://ollama.com/download"
+            return 0
+            ;;
+        *)
+            # Linux (all distros), WSL
+            curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || true
+            ;;
+    esac
+
+    if command -v ollama &>/dev/null; then
+        ok "Ollama installed"
+    else
+        warn "Ollama installation failed — install manually from https://ollama.com"
+    fi
+}
+
+# --- Install llmfit and select best model ---
+install_llmfit_and_select_model() {
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        warn "Skipping llmfit (offline) — using default model: gemma3:4b"
+        _save_model_config "gemma3:4b"
+        return 0
+    fi
+
+    if ! command -v ollama &>/dev/null; then
+        warn "Ollama not available — skipping model selection"
+        _save_model_config "gemma3:4b"
+        return 0
+    fi
+
+    info "Installing llmfit (hardware-aware LLM recommender)..."
+
+    # Try to install llmfit
+    local llmfit_installed=false
+    if command -v llmfit &>/dev/null; then
+        llmfit_installed=true
+        ok "llmfit already installed"
+    elif command -v cargo &>/dev/null; then
+        cargo install llmfit 2>/dev/null && llmfit_installed=true
+    else
+        # Use the quick-install script
+        curl -fsSL https://llmfit.axjns.dev/install.sh | sh 2>/dev/null && llmfit_installed=true
+    fi
+
+    if [[ "$llmfit_installed" == "true" ]] && command -v llmfit &>/dev/null; then
+        ok "llmfit installed"
+        info "Analyzing hardware to find the best local model..."
+
+        local recommended=""
+        # Get the top recommendation in JSON, extract the model name
+        local llmfit_output
+        llmfit_output=$(llmfit recommend --json --limit 5 2>/dev/null) || true
+
+        if [[ -n "$llmfit_output" ]]; then
+            # Try to find an ollama-compatible model from recommendations
+            # llmfit outputs JSON array; parse with python or jq
+            if command -v jq &>/dev/null; then
+                recommended=$(echo "$llmfit_output" | jq -r '.[0].name // empty' 2>/dev/null)
+            elif command -v python3 &>/dev/null; then
+                recommended=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    if data and len(data) > 0:
+        print(data[0].get('name', ''))
+except Exception:
+    pass
+" <<< "$llmfit_output" 2>/dev/null)
+            fi
+        fi
+
+        if [[ -n "$recommended" ]]; then
+            ok "Best model for your hardware: $recommended"
+            info "Pulling model via Ollama (this may take a while)..."
+            ollama pull "$recommended" 2>/dev/null || {
+                warn "Failed to pull '$recommended', falling back to gemma3:4b"
+                recommended="gemma3:4b"
+                ollama pull "$recommended" 2>/dev/null || true
+            }
+            _save_model_config "$recommended"
+        else
+            warn "Could not determine best model — using default: gemma3:4b"
+            info "Pulling default model..."
+            ollama pull "gemma3:4b" 2>/dev/null || true
+            _save_model_config "gemma3:4b"
+        fi
+    else
+        warn "llmfit not available — using default model: gemma3:4b"
+        info "Pulling default model..."
+        ollama pull "gemma3:4b" 2>/dev/null || true
+        _save_model_config "gemma3:4b"
+    fi
+}
+
+# Save selected model to config
+_save_model_config() {
+    local model="$1"
+    local config_dir="$HOME/.gathm"
+    mkdir -p "$config_dir" 2>/dev/null || true
+    echo "$model" > "$config_dir/model"
+    ok "Model config saved: $model"
+
+    # Also write to .env for Pilot to pick up
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        # Update existing GATHM_OLLAMA_MODEL line or append
+        if grep -q '^GATHM_OLLAMA_MODEL=' "$env_file" 2>/dev/null; then
+            sed -i "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || \
+                sed -i '' "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file"
+        else
+            echo "GATHM_OLLAMA_MODEL=$model" >> "$env_file"
+        fi
+    else
+        echo "GATHM_OLLAMA_MODEL=$model" > "$env_file"
+    fi
 }
 
 # --- Setup files and permissions ---
@@ -236,6 +407,25 @@ verify() {
     done
     ok "$tc tools available"
 
+    # Connectivity
+    if [[ "$GATHM_ONLINE" == "true" ]]; then
+        ok "Network: Online"
+    else
+        warn "Network: Offline"
+    fi
+
+    # Ollama
+    if command -v ollama &>/dev/null; then
+        ok "Ollama ($(ollama --version 2>&1 | head -1))"
+    else
+        warn "Ollama not installed (optional — needed for Pilot AI)"
+    fi
+
+    # Configured model
+    if [[ -f "$HOME/.gathm/model" ]]; then
+        ok "LLM model: $(cat "$HOME/.gathm/model")"
+    fi
+
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
         ok "Agent orchestrator"
@@ -287,6 +477,9 @@ main() {
     local platform
     platform=$(detect_platform)
 
+    # Check internet first — determines what we can install
+    check_internet
+
     # Redirect to Termux-specific installer if on Termux
     if [[ "$platform" == "termux" && -f "$SCRIPT_DIR/setup-termux.sh" ]]; then
         info "Termux detected, using Termux-optimized setup..."
@@ -296,6 +489,11 @@ main() {
     install_deps "$platform"
     setup_files
     setup_shortcuts "$platform"
+
+    # Install Ollama + best-fit model (requires internet)
+    install_ollama "$platform"
+    install_llmfit_and_select_model
+
     verify
 
     echo ""

@@ -67,7 +67,19 @@ def _pad_line(text: str, width: int) -> str:
 
 # ── Welcome box ─────────────────────────────────────────────────────
 
-def render_welcome(model_name: str, tool_count: int, platform: str) -> str:
+def check_connectivity() -> str:
+    """Check internet connectivity. Returns 'online' or 'offline'."""
+    import socket
+    try:
+        socket.setdefaulttimeout(3)
+        socket.create_connection(("github.com", 443))
+        return "online"
+    except OSError:
+        return "offline"
+
+
+def render_welcome(model_name: str, tool_count: int, platform: str,
+                   connectivity: str = "") -> str:
     """Build the tricolor welcome box and return it as a string."""
     inner_w = min(_term_width() - 2, 62)  # inside the border
     lines: list[str] = []
@@ -92,11 +104,23 @@ def render_welcome(model_name: str, tool_count: int, platform: str) -> str:
         lines.append(box_line(art_line, INDIAN_GREEN))
     lines.append(empty())
 
+    # ── detect connectivity if not passed ──
+    if not connectivity:
+        connectivity = check_connectivity()
+
+    if connectivity == "online":
+        net_color = INDIAN_GREEN
+        net_label = "\u25cf Online"
+    else:
+        net_color = "\033[31m"  # red
+        net_label = "\u25cf Offline"
+
     # ── info rows (tricolor rotation) ──
     info_rows = [
         (SAFFRON, "Model", model_name),
         (WHITE_BOLD, "Tools", f"{tool_count} available"),
         (INDIAN_GREEN, "Platform", platform),
+        (net_color, "Network", net_label),
     ]
     for color, label, value in info_rows:
         lines.append(box_line(f"{color}{label:<10}{RESET}: {value}"))
