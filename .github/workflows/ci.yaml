@@ -123,6 +123,24 @@ jobs:
       - name: Test task planning
         run: bash agent/orchestrator.sh plan "daily briefing" --json
 
+  test-python:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pyyaml
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
   docker-build:
     name: Docker Build Test
     runs-on: ubuntu-latest

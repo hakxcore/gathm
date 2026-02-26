@@ -35,8 +35,19 @@ load_dotenv()
 PILOT_DIR = Path(__file__).resolve().parent
 GATHM_ROOT = PILOT_DIR.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
-# Default to local Gemma on Ollama; override with GATHM_OLLAMA_MODEL or OLLAMA_MODEL.
-OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
+# Model priority: env var > ~/.gathm/model (setup.sh) > hardcoded default
+def _resolve_model() -> str:
+    env_model = os.getenv("GATHM_OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL")
+    if env_model:
+        return env_model
+    model_file = Path.home() / ".gathm" / "model"
+    if model_file.is_file():
+        stored = model_file.read_text().strip()
+        if stored:
+            return stored
+    return "gemma3:12b"
+
+OLLAMA_MODEL = _resolve_model()
 PILOT_MAX_HISTORY = int(os.getenv("PILOT_MAX_HISTORY", "12"))
 
 # Colors (kept for non-TUI code paths)
