@@ -35,7 +35,7 @@ load_dotenv()
 PILOT_DIR = Path(__file__).resolve().parent
 GATHM_ROOT = PILOT_DIR.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
-# Model priority: env var > ~/.gathm/model (setup.sh) > hardcoded default
+# Model priority: env var > ~/.gathm/model (install.sh) > hardcoded default
 def _resolve_model() -> str:
     env_model = os.getenv("GATHM_OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL")
     if env_model:

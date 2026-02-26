@@ -16,6 +16,6 @@ Use the single cross-platform installer:
 bash install.sh
 ```
 
-## Legacy Installers
+## Installer Policy
 
-`setup.sh`, `setup-termux.sh`, `./install`, and `./installation` are compatibility wrappers and now redirect to `install.sh`.
+Gathm now uses a single installer entrypoint: `install.sh`.

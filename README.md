@@ -12,8 +12,6 @@ Gathm is a modular, local-first command intelligence framework for security, net
 ## Documentation
 
 - [Documentation Index](./docs/README.md)
-- [Installation Guides](./docs/install/README.md)
-- [Termux Installation](./docs/install/termux.md)
 - [Interfaces Overview](./docs/interfaces/README.md)
 - [Examples](./docs/examples/README.md)
 - [Use Cases](./docs/use-cases/README.md)
@@ -51,9 +49,9 @@ gathm/
 └── tests/                     # Python regression and integration tests
 ```
 
-## Quick Start
+## Installation
 
-### Recommended setup
+Installation is intentionally unified. `install.sh` detects the environment and applies the correct setup internally.
 
 ```bash
 git clone https://github.com/hakxcore/gathm.git
@@ -61,9 +59,21 @@ cd gathm
 bash install.sh
 ```
 
+### Verify Install
+
+```bash
+bash install.sh --check
+```
+
+### Uninstall
+
+```bash
+bash install.sh --uninstall
+```
+
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
 
-### First commands
+## Quick Start
 
 ```bash
 gathm-agent status
@@ -72,14 +82,6 @@ gathm-agent ask "weather in Tokyo"
 gathm-agent run dns -t MX gmail.com
 gathm-agent health all
 ```
-
-### Termux
-
-```bash
-bash install.sh
-```
-
-Detailed guide: [docs/install/termux.md](./docs/install/termux.md)
 
 ## Main Interfaces
 
