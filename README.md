@@ -12,6 +12,8 @@ Gathm is a modular, local-first command intelligence framework for security, net
 ## Documentation
 
 - [Documentation Index](./docs/README.md)
+- [Installation Guides](./docs/install/README.md)
+- [Termux Installation](./docs/install/termux.md)
 - [Interfaces Overview](./docs/interfaces/README.md)
 - [Examples](./docs/examples/README.md)
 - [Use Cases](./docs/use-cases/README.md)
@@ -56,7 +58,7 @@ gathm/
 ```bash
 git clone https://github.com/hakxcore/gathm.git
 cd gathm
-bash setup.sh
+bash install.sh
 ```
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
@@ -74,8 +76,10 @@ gathm-agent health all
 ### Termux
 
 ```bash
-bash setup-termux.sh
+bash install.sh
 ```
+
+Detailed guide: [docs/install/termux.md](./docs/install/termux.md)
 
 ## Main Interfaces
 
