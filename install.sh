@@ -13,6 +13,9 @@ set -euo pipefail
 
 VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+export PATH="$LOCAL_BIN:$PATH"
 
 # --- Colors (skip on dumb terminals) ---
 if [[ "${TERM:-dumb}" != "dumb" ]]; then
@@ -378,11 +381,16 @@ SCRIPT
 
     # Add to PATH if needed
     local rc_file=""
-    if [[ -f "$HOME/.zshrc" ]]; then rc_file="$HOME/.zshrc"
+    if [[ "$platform" == "termux" ]]; then
+        rc_file="$HOME/.bashrc"
+    elif [[ -f "$HOME/.zshrc" ]]; then rc_file="$HOME/.zshrc"
     elif [[ -f "$HOME/.bashrc" ]]; then rc_file="$HOME/.bashrc"
     elif [[ -f "$HOME/.bash_profile" ]]; then rc_file="$HOME/.bash_profile"
+    elif [[ -f "$HOME/.profile" ]]; then rc_file="$HOME/.profile"
+    else rc_file="$HOME/.bashrc"
     fi
 
+    [[ -f "$rc_file" ]] || touch "$rc_file"
     if [[ -n "$rc_file" ]] && ! grep -q '.local/bin' "$rc_file" 2>/dev/null; then
         echo '' >> "$rc_file"
         echo '# Gathm Framework' >> "$rc_file"
