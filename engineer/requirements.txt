@@ -1,4 +1,4 @@
-pyautogen
+autogen-agentchat
 autogen-ext[openai,anthropic]
 python-dotenv
 pyyaml

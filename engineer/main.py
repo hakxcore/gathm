@@ -106,7 +106,8 @@ def main():
     task = sys.argv[1]
 
     if not AUTOGEN_AVAILABLE:
-        print("Error: Required autogen-ext[anthropic] library is not properly installed.")
+        print("Error: Required libraries are not installed.")
+        print("Run: pip install -r engineer/requirements.txt")
         sys.exit(1)
 
     asyncio.run(run_engineer_task(task))

@@ -342,6 +342,38 @@ setup_files() {
     ok "Files ready"
 }
 
+# --- Install engineer Python requirements (optional) ---
+install_engineer_deps() {
+    local req_file="$SCRIPT_DIR/engineer/requirements.txt"
+    if [[ ! -f "$req_file" ]]; then
+        return 0
+    fi
+
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+
+    if [[ -z "$python_cmd" ]]; then
+        warn "Python not found — skipping engineer dependencies"
+        return 0
+    fi
+
+    local pip_cmd=""
+    command -v pip3 &>/dev/null && pip_cmd="pip3"
+    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
+
+    if [[ -z "$pip_cmd" ]]; then
+        warn "pip not found — skipping engineer dependencies"
+        warn "To enable the engineer agent, run: pip install -r engineer/requirements.txt"
+        return 0
+    fi
+
+    info "Installing engineer AI dependencies (autogen-agentchat, autogen-ext)..."
+    "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
+        ok "Engineer dependencies installed" || \
+        warn "Engineer dependency install failed — run manually: $pip_cmd install -r engineer/requirements.txt"
+}
+
 # --- Create command shortcuts ---
 setup_shortcuts() {
     local platform="$1"
@@ -524,6 +556,7 @@ main() {
     setup_termux_storage "$platform"
     install_deps "$platform"
     setup_files
+    install_engineer_deps
     setup_shortcuts "$platform"
 
     # Install Ollama + best-fit model (requires internet)
