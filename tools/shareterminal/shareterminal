@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# Author: hakxcore
+# Description: Share your terminal session instantly with others via tmate or upterm.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+Shareterminal (v$currentVersion)
+
+Description: Instantly share your terminal session with others.
+             Uses tmate (SSH + web) or upterm as a fallback.
+
+Usage: shareterminal [flags]
+
+  -s              Start a new shared session (read/write)
+  -r              Start a new shared session (read-only)
+  -i              Show URLs for the current active session
+  -k              Kill / stop the current shared session
+  -b <backend>    Force a specific backend: tmate | upterm
+  -h              Show this help message
+  -v              Show version
+
+Examples:
+  shareterminal -s          # share your terminal (read/write)
+  shareterminal -r          # share read-only
+  shareterminal -i          # print the session URLs again
+  shareterminal -k          # stop sharing
+  shareterminal -b upterm -s
+EOF
+  exit 0
+}
+
+version() {
+  echo "Shareterminal v$currentVersion"
+  exit 0
+}
+
+# ── dependency helpers ───────────────────────────────────────────────────────
+
+install_tmate() {
+  local platform
+  platform=$(detect_platform)
+  echo "${BLUE}tmate not found — attempting to install...${RESETBG}"
+
+  case "$platform" in
+    ubuntu|debian)
+      $SUDO apt-get install -y tmate &>/dev/null && return 0 ;;
+    termux)
+      pkg install -y tmate &>/dev/null && return 0 ;;
+    darwin)
+      brew install tmate &>/dev/null && return 0 ;;
+    arch)
+      $SUDO pacman -S --noconfirm tmate &>/dev/null && return 0 ;;
+    fedora)
+      $SUDO dnf install -y tmate &>/dev/null && return 0 ;;
+    alpine)
+      $SUDO apk add --no-cache tmate &>/dev/null && return 0 ;;
+  esac
+
+  # Generic: download tmate binary from GitHub releases
+  echo "${BLUE}Trying binary download from GitHub...${RESETBG}"
+  local arch
+  arch=$(uname -m)
+  local tmate_url
+  case "$arch" in
+    x86_64)  tmate_url="https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz" ;;
+    aarch64) tmate_url="https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz" ;;
+    armv7l)  tmate_url="https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm32v7.tar.xz" ;;
+    *)
+      echo "${RED}Unsupported architecture: $arch${RESETBG}" >&2
+      return 1
+      ;;
+  esac
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  curl -sL "$tmate_url" | tar -xJ -C "$tmpdir" --strip-components=1 || {
+    rm -rf "$tmpdir"
+    echo "${RED}Failed to download tmate.${RESETBG}" >&2
+    return 1
+  }
+  $SUDO mv "$tmpdir/tmate" /usr/local/bin/tmate
+  chmod +x /usr/local/bin/tmate
+  rm -rf "$tmpdir"
+  command -v tmate &>/dev/null && { echo "${GREEN}tmate installed.${RESETBG}"; return 0; }
+
+  echo "${RED}Could not install tmate automatically.${RESETBG}" >&2
+  echo "Install manually: https://tmate.io/" >&2
+  return 1
+}
+
+install_upterm() {
+  local arch
+  arch=$(uname -m)
+  local upterm_url
+  case "$arch" in
+    x86_64)  upterm_url="https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_amd64.tar.gz" ;;
+    aarch64) upterm_url="https://github.com/owenthereal/upterm/releases/latest/download/upterm_linux_arm64.tar.gz" ;;
+    *)
+      echo "${RED}Unsupported architecture for upterm: $arch${RESETBG}" >&2
+      return 1
+      ;;
+  esac
+  echo "${BLUE}upterm not found — downloading binary...${RESETBG}"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  curl -sL "$upterm_url" | tar -xz -C "$tmpdir" || {
+    rm -rf "$tmpdir"
+    echo "${RED}Failed to download upterm.${RESETBG}" >&2
+    return 1
+  }
+  $SUDO mv "$tmpdir/upterm" /usr/local/bin/upterm
+  chmod +x /usr/local/bin/upterm
+  rm -rf "$tmpdir"
+  command -v upterm &>/dev/null && { echo "${GREEN}upterm installed.${RESETBG}"; return 0; }
+  echo "${RED}Could not install upterm.${RESETBG}" >&2
+  return 1
+}
+
+# ── backend: tmate ───────────────────────────────────────────────────────────
+
+TMATE_SOCKET="/tmp/gathm-tmate.sock"
+
+tmate_start() {
+  local readonly_mode="$1"
+
+  if [[ -S "$TMATE_SOCKET" ]]; then
+    echo "${ORANGE}A tmate session is already running.${RESETBG}"
+    tmate_info
+    return 0
+  fi
+
+  echo "${BLUE}Starting shared terminal session via tmate...${RESETBG}"
+  tmate -S "$TMATE_SOCKET" new-session -d -s gathm 2>/dev/null
+
+  # Wait for tmate to establish the connection (max 15 s)
+  local retries=0
+  while ! tmate -S "$TMATE_SOCKET" display-message -p "#{tmate_ssh}" 2>/dev/null | grep -q "ssh"; do
+    sleep 1
+    retries=$((retries + 1))
+    if [[ $retries -ge 15 ]]; then
+      echo "${RED}Timed out waiting for tmate to connect.${RESETBG}" >&2
+      return 1
+    fi
+    echo -n "."
+  done
+  echo
+
+  tmate_info "$readonly_mode"
+}
+
+tmate_info() {
+  local readonly_mode="$1"
+
+  if [[ ! -S "$TMATE_SOCKET" ]]; then
+    echo "${RED}No active tmate session found.${RESETBG}" >&2
+    return 1
+  fi
+
+  local ssh_rw ssh_ro web_rw web_ro
+  ssh_rw=$(tmate -S "$TMATE_SOCKET" display-message -p "#{tmate_ssh}"         2>/dev/null)
+  ssh_ro=$(tmate -S "$TMATE_SOCKET" display-message -p "#{tmate_ssh_ro}"      2>/dev/null)
+  web_rw=$(tmate -S "$TMATE_SOCKET" display-message -p "#{tmate_web}"         2>/dev/null)
+  web_ro=$(tmate -S "$TMATE_SOCKET" display-message -p "#{tmate_web_ro}"      2>/dev/null)
+
+  echo
+  echo "${BOLD}${GREEN}Terminal session is live!${RESETBG}"
+  print_divider
+  if [[ "$readonly_mode" == "ro" ]]; then
+    echo "${CYAN}  [Read-only] SSH  :${RESETBG} $ssh_ro"
+    echo "${CYAN}  [Read-only] Web  :${RESETBG} $web_ro"
+  else
+    echo "${GREEN}  [Read/Write] SSH :${RESETBG} $ssh_rw"
+    echo "${GREEN}  [Read/Write] Web :${RESETBG} $web_rw"
+    echo
+    echo "${CYAN}  [Read-only] SSH  :${RESETBG} $ssh_ro"
+    echo "${CYAN}  [Read-only] Web  :${RESETBG} $web_ro"
+  fi
+  print_divider
+  echo "${ORANGE}  Stop sharing     :${RESETBG} shareterminal -k"
+  echo
+}
+
+tmate_stop() {
+  if [[ ! -S "$TMATE_SOCKET" ]]; then
+    echo "${ORANGE}No active tmate session to stop.${RESETBG}"
+    return 0
+  fi
+  tmate -S "$TMATE_SOCKET" kill-server 2>/dev/null
+  rm -f "$TMATE_SOCKET"
+  echo "${GREEN}Shared session stopped.${RESETBG}"
+}
+
+# ── backend: upterm ──────────────────────────────────────────────────────────
+
+UPTERM_PIDFILE="/tmp/gathm-upterm.pid"
+
+upterm_start() {
+  local readonly_mode="$1"
+
+  if [[ -f "$UPTERM_PIDFILE" ]] && kill -0 "$(cat "$UPTERM_PIDFILE")" 2>/dev/null; then
+    echo "${ORANGE}An upterm session is already running.${RESETBG}"
+    upterm_info
+    return 0
+  fi
+
+  local shell_cmd="${SHELL:-/bin/bash}"
+  local extra_flags=""
+  [[ "$readonly_mode" == "ro" ]] && extra_flags="--force-command 'cat'"
+
+  echo "${BLUE}Starting shared terminal session via upterm...${RESETBG}"
+  # upterm host runs in the foreground; run it detached then capture info
+  nohup bash -c "upterm host $extra_flags -- $shell_cmd" > /tmp/gathm-upterm.log 2>&1 &
+  echo $! > "$UPTERM_PIDFILE"
+
+  # Wait for upterm to print the connection string
+  local retries=0
+  while ! grep -q "ssh" /tmp/gathm-upterm.log 2>/dev/null; do
+    sleep 1
+    retries=$((retries + 1))
+    if [[ $retries -ge 20 ]]; then
+      echo "${RED}Timed out waiting for upterm to connect.${RESETBG}" >&2
+      return 1
+    fi
+    echo -n "."
+  done
+  echo
+
+  upterm_info
+}
+
+upterm_info() {
+  if [[ ! -f "$UPTERM_PIDFILE" ]] || ! kill -0 "$(cat "$UPTERM_PIDFILE")" 2>/dev/null; then
+    echo "${RED}No active upterm session found.${RESETBG}" >&2
+    return 1
+  fi
+
+  local ssh_line
+  ssh_line=$(grep "ssh" /tmp/gathm-upterm.log 2>/dev/null | tail -1)
+
+  echo
+  echo "${BOLD}${GREEN}Terminal session is live!${RESETBG}"
+  print_divider
+  echo "${GREEN}  SSH connection   :${RESETBG} $ssh_line"
+  print_divider
+  echo "${ORANGE}  Stop sharing     :${RESETBG} shareterminal -k"
+  echo
+}
+
+upterm_stop() {
+  if [[ ! -f "$UPTERM_PIDFILE" ]]; then
+    echo "${ORANGE}No active upterm session to stop.${RESETBG}"
+    return 0
+  fi
+  local pid
+  pid=$(cat "$UPTERM_PIDFILE")
+  kill "$pid" 2>/dev/null
+  rm -f "$UPTERM_PIDFILE" /tmp/gathm-upterm.log
+  echo "${GREEN}Shared session stopped.${RESETBG}"
+}
+
+# ── backend selection ────────────────────────────────────────────────────────
+
+# Returns the best available (or installable) backend
+pick_backend() {
+  local forced="$1"
+  if [[ -n "$forced" ]]; then
+    echo "$forced"
+    return
+  fi
+  if command -v tmate &>/dev/null; then
+    echo "tmate"
+  elif command -v upterm &>/dev/null; then
+    echo "upterm"
+  else
+    # Default preference: try to install tmate first
+    echo "tmate"
+  fi
+}
+
+ensure_backend() {
+  local backend="$1"
+  case "$backend" in
+    tmate)
+      command -v tmate &>/dev/null && return 0
+      install_tmate || exit 1
+      ;;
+    upterm)
+      command -v upterm &>/dev/null && return 0
+      install_upterm || exit 1
+      ;;
+    *)
+      echo "${RED}Unknown backend: $backend. Choose tmate or upterm.${RESETBG}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+
+ACTION=""
+READONLY_MODE=""
+FORCED_BACKEND=""
+
+if [[ $# -eq 0 ]]; then
+  usage
+fi
+
+while getopts "srikb:vh" opt; do
+  case "$opt" in
+    s) ACTION="start"    ;;
+    r) ACTION="start"; READONLY_MODE="ro" ;;
+    i) ACTION="info"     ;;
+    k) ACTION="stop"     ;;
+    b) FORCED_BACKEND="$OPTARG" ;;
+    v) version           ;;
+    h) usage             ;;
+    *) usage             ;;
+  esac
+done
+
+if [[ -z "$ACTION" ]]; then
+  usage
+fi
+
+checkInternet || { echo "${RED}Error: no active internet connection.${RESETBG}" >&2; exit 1; }
+
+BACKEND=$(pick_backend "$FORCED_BACKEND")
+ensure_backend "$BACKEND"
+
+case "$ACTION" in
+  start)
+    case "$BACKEND" in
+      tmate)  tmate_start  "$READONLY_MODE" ;;
+      upterm) upterm_start "$READONLY_MODE" ;;
+    esac
+    ;;
+  info)
+    case "$BACKEND" in
+      tmate)  tmate_info  ;;
+      upterm) upterm_info ;;
+    esac
+    ;;
+  stop)
+    case "$BACKEND" in
+      tmate)  tmate_stop  ;;
+      upterm) upterm_stop ;;
+    esac
+    ;;
+esac
