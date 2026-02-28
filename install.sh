@@ -463,6 +463,122 @@ setup_gemini_fallback() {
     ok "Gemini configured! Model: gemini-2.0-flash-lite (free tier)"
 }
 
+# --- Install llmfit binary ---
+# Tries in order:
+#   1. Already on PATH                      (instant)
+#   2. Homebrew tap  (macOS / Linux brew)   (recommended for macOS)
+#   3. Pre-built GitHub release binary      (no Rust needed, ~2 MB)
+#      → copied to $LOCAL_BIN  AND  $SCRIPT_DIR/llmfit for offline use
+#   4. cargo install                        (last resort, needs Rust)
+_install_llmfit() {
+    local platform="$1"
+
+    # ── 1. Already installed ──────────────────────────────────────────
+    if command -v llmfit &>/dev/null; then
+        ok "llmfit already installed ($(llmfit --version 2>/dev/null | head -1))"
+        return 0
+    fi
+
+    # ── 2. Homebrew (macOS primary; also works on Linux with brew) ────
+    if command -v brew &>/dev/null; then
+        info "Installing llmfit via Homebrew..."
+        brew tap AlexsJones/llmfit 2>/dev/null || true
+        if brew install llmfit 2>/dev/null; then
+            ok "llmfit installed via Homebrew"
+            return 0
+        fi
+    fi
+
+    # ── 3. Pre-built GitHub release binary ───────────────────────────
+    local arch; arch=$(uname -m 2>/dev/null || echo "x86_64")
+    case "$arch" in
+        arm64|aarch64) arch="aarch64" ;;
+        *)             arch="x86_64"  ;;
+    esac
+
+    # Map platform → Rust target triple
+    local target
+    case "$platform" in
+        macos)   target="${arch}-apple-darwin"       ;;
+        alpine)  target="${arch}-unknown-linux-musl" ;;  # musl, not gnu
+        windows) target="${arch}-pc-windows-msvc"    ;;
+        *)       target="${arch}-unknown-linux-gnu"  ;;  # Debian/Fedora/Arch/WSL/Termux
+    esac
+
+    # Resolve the latest release tag from GitHub API
+    local version=""
+    version=$(curl -fsSL \
+        "https://api.github.com/repos/AlexsJones/llmfit/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4) || true
+
+    if [[ -n "$version" ]]; then
+        local ext="tar.gz"; [[ "$platform" == "windows" ]] && ext="zip"
+        local fname="llmfit-${version}-${target}.${ext}"
+        local url="https://github.com/AlexsJones/llmfit/releases/download/${version}/${fname}"
+        local tmp_dir; tmp_dir=$(mktemp -d)
+
+        info "Downloading llmfit ${version} for ${target}..."
+        if curl -fsSL "$url" -o "$tmp_dir/$fname"; then
+            if [[ "$ext" == "zip" ]]; then
+                unzip -q "$tmp_dir/$fname" -d "$tmp_dir" 2>/dev/null || true
+            else
+                tar -xzf "$tmp_dir/$fname" -C "$tmp_dir" 2>/dev/null || true
+            fi
+
+            local bin_name="llmfit"; [[ "$platform" == "windows" ]] && bin_name="llmfit.exe"
+            local extracted; extracted=$(find "$tmp_dir" -name "$bin_name" -type f 2>/dev/null | head -1)
+            if [[ -n "$extracted" ]]; then
+                mkdir -p "$LOCAL_BIN"
+                cp "$extracted" "$LOCAL_BIN/$bin_name"
+                chmod +x "$LOCAL_BIN/$bin_name" 2>/dev/null || true
+                # Also copy into the gathm source dir so it's available for offline runs
+                cp "$LOCAL_BIN/$bin_name" "$SCRIPT_DIR/$bin_name" 2>/dev/null || true
+                rm -rf "$tmp_dir"
+                ok "llmfit ${version} installed → $LOCAL_BIN/$bin_name"
+                return 0
+            fi
+        fi
+        rm -rf "$tmp_dir"
+        warn "Pre-built binary download failed for target: ${target}"
+    else
+        warn "Could not resolve latest llmfit release (GitHub API unreachable?)"
+    fi
+
+    # ── 4. cargo install (requires Rust toolchain) ────────────────────
+    if command -v cargo &>/dev/null; then
+        info "Installing llmfit via cargo (this may take a few minutes)..."
+        if cargo install llmfit 2>/dev/null; then
+            ok "llmfit installed via cargo"
+            return 0
+        fi
+    fi
+
+    return 1  # all methods failed
+}
+
+# Pull an ollama model; on failure falls back to gemma3:4b
+_pull_ollama_model() {
+    local model="$1"
+    local is_fallback="${2:-false}"
+
+    if [[ "$is_fallback" == "true" ]]; then
+        model="gemma3:4b"
+        info "Pulling default model gemma3:4b (this may take a few minutes)..."
+    else
+        info "Pulling model via Ollama: $model (this may take a few minutes)..."
+    fi
+
+    if ollama pull "$model"; then
+        _save_model_config "$model"
+    elif [[ "$is_fallback" == "false" ]]; then
+        warn "Failed to pull '$model' — falling back to gemma3:4b"
+        _pull_ollama_model "gemma3:4b" true
+    else
+        warn "Model pull failed — run manually: ollama pull gemma3:4b"
+        _save_model_config "gemma3:4b"
+    fi
+}
+
 # --- Install llmfit and select best model ---
 install_llmfit_and_select_model() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
@@ -478,80 +594,42 @@ install_llmfit_and_select_model() {
     fi
 
     info "Installing llmfit (hardware-aware LLM recommender)..."
+    local platform="${_GATHM_PLATFORM:-linux}"
 
-    # Try to install llmfit
-    local llmfit_installed=false
-    if command -v llmfit &>/dev/null; then
-        llmfit_installed=true
-        ok "llmfit already installed"
-    elif command -v cargo &>/dev/null; then
-        cargo install llmfit 2>/dev/null && llmfit_installed=true
-    else
-        # Use the quick-install script
-        curl -fsSL https://llmfit.axjns.dev/install.sh | sh 2>/dev/null && llmfit_installed=true
-    fi
-
-    if [[ "$llmfit_installed" == "true" ]] && command -v llmfit &>/dev/null; then
-        ok "llmfit installed"
+    if _install_llmfit "$platform" && command -v llmfit &>/dev/null; then
         info "Analyzing hardware to find the best local model..."
 
-        local recommended=""
-        # Get the top recommendation in JSON, extract the model name
-        local llmfit_output
+        local llmfit_output="" recommended=""
         llmfit_output=$(llmfit recommend --json --limit 5 2>/dev/null) || true
 
         if [[ -n "$llmfit_output" ]]; then
-            # Try to find an ollama-compatible model from recommendations
-            # llmfit outputs JSON array; parse with python or jq
             if command -v jq &>/dev/null; then
                 recommended=$(echo "$llmfit_output" | jq -r '.[0].name // empty' 2>/dev/null)
-            elif command -v python3 &>/dev/null; then
-                recommended=$(python3 -c "
+            else
+                local pcmd; pcmd=$(_python_cmd)
+                if [[ -n "$pcmd" ]]; then
+                    recommended=$("$pcmd" -c "
 import json, sys
 try:
-    data = json.loads(sys.stdin.read())
-    if data and len(data) > 0:
-        print(data[0].get('name', ''))
+    d = json.loads(sys.stdin.read())
+    print(d[0].get('name', '') if d else '')
 except Exception:
     pass
 " <<< "$llmfit_output" 2>/dev/null)
+                fi
             fi
         fi
 
         if [[ -n "$recommended" ]]; then
             ok "Best model for your hardware: $recommended"
-            info "Pulling model via Ollama (this may take a few minutes)..."
-            if ollama pull "$recommended"; then
-                _save_model_config "$recommended"
-            else
-                warn "Failed to pull '$recommended', falling back to gemma3:4b"
-                info "Pulling default model gemma3:4b (this may take a few minutes)..."
-                if ollama pull "gemma3:4b"; then
-                    _save_model_config "gemma3:4b"
-                else
-                    warn "Model pull failed — run manually: ollama pull gemma3:4b"
-                    _save_model_config "gemma3:4b"
-                fi
-            fi
+            _pull_ollama_model "$recommended"
         else
             warn "Could not determine best model — using default: gemma3:4b"
-            info "Pulling default model gemma3:4b (this may take a few minutes)..."
-            if ollama pull "gemma3:4b"; then
-                _save_model_config "gemma3:4b"
-            else
-                warn "Model pull failed — run manually: ollama pull gemma3:4b"
-                _save_model_config "gemma3:4b"
-            fi
+            _pull_ollama_model "gemma3:4b" true
         fi
     else
         warn "llmfit not available — using default model: gemma3:4b"
-        info "Pulling default model gemma3:4b (this may take a few minutes)..."
-        if ollama pull "gemma3:4b"; then
-            _save_model_config "gemma3:4b"
-        else
-            warn "Model pull failed — run manually: ollama pull gemma3:4b"
-            _save_model_config "gemma3:4b"
-        fi
+        _pull_ollama_model "gemma3:4b" true
     fi
 }
 
