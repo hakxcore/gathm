@@ -91,7 +91,7 @@ _WAITING_PHRASES = [
     "connecting the dots",
 ]
 
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER = "◜◠◝◞◡◟"
 
 # ── Console ──────────────────────────────────────────────────────
 console = Console(highlight=False, markup=True)
