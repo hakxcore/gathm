@@ -602,13 +602,24 @@ install_llmfit_and_select_model() {
         # llmfit recommend --json outputs: {"system": {...}, "models": [...]}
         # Each model has: "name" (HuggingFace), "runtime" ("ollama"/"mlx"/etc.),
         # "runtime_label" (Ollama pull tag, e.g. "llama3.1:8b")
+        #
+        # IMPORTANT: llmfit uses a TUI framework that can corrupt terminal state
+        # even when running non-interactively.  We work around this by:
+        #   1. Feeding /dev/null as stdin — prevents TUI from detecting a TTY
+        #   2. Writing output to a temp file — avoids $() subshell issues
+        #   3. Calling stty sane — restores terminal settings afterwards
         local llmfit_output="" recommended=""
-        llmfit_output=$(timeout 30 llmfit recommend --json -n 5 2>/dev/null) || true
+        local _llmfit_tmp; _llmfit_tmp=$(mktemp 2>/dev/null || echo "/tmp/llmfit_out_$$")
+        # -n defaults to 5 in llmfit; json is the default output for recommend
+        ( llmfit recommend -n 5 </dev/null >"$_llmfit_tmp" 2>/dev/null ) || true
+        stty sane 2>/dev/null || true   # restore terminal after llmfit
+        llmfit_output=$(cat "$_llmfit_tmp" 2>/dev/null) || true
+        rm -f "$_llmfit_tmp" 2>/dev/null || true
 
         if [[ -n "$llmfit_output" ]]; then
             if command -v jq &>/dev/null; then
-                # Prefer the runtime_label (Ollama tag) for the first Ollama-compatible model;
-                # fall back to checking .models as top-level array (older llmfit versions)
+                # Prefer runtime_label (Ollama tag) for the first Ollama-compatible model;
+                # fall back to .models as top-level array (older llmfit versions)
                 recommended=$(echo "$llmfit_output" | jq -r '
                     (
                         (.models // .) | map(select(.runtime == "ollama" or .runtime == null))
