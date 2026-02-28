@@ -220,6 +220,36 @@ install_ollama() {
     fi
 }
 
+# --- Ensure ollama serve is running in the background ---
+start_ollama_serve() {
+    if ! command -v ollama &>/dev/null; then
+        return 0
+    fi
+
+    # Check if already serving (port 11434)
+    if curl -s --max-time 2 http://127.0.0.1:11434/ &>/dev/null; then
+        ok "Ollama server already running"
+        return 0
+    fi
+
+    info "Starting Ollama server (ollama serve)..."
+    nohup ollama serve &>/tmp/ollama-serve.log &
+    disown $! 2>/dev/null || true
+
+    # Wait up to 10 s for it to come up
+    local i=0
+    while (( i < 10 )); do
+        sleep 1
+        if curl -s --max-time 2 http://127.0.0.1:11434/ &>/dev/null; then
+            ok "Ollama server started"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    warn "Ollama server did not respond in time — it may still be starting up"
+}
+
 # --- Open URL in default browser (best-effort) ---
 open_url() {
     local url="$1"
@@ -376,6 +406,9 @@ except Exception:
         ollama pull "gemma3:4b" 2>/dev/null || true
         _save_model_config "gemma3:4b"
     fi
+
+    # Start serving immediately after the model is ready
+    start_ollama_serve
 }
 
 # Save selected model to config
@@ -460,6 +493,28 @@ install_engineer_deps() {
         warn "Engineer dependency install failed — run manually: $pip_cmd install -r engineer/requirements.txt"
 }
 
+# --- Install Pilot Python requirements ---
+install_pilot_deps() {
+    local req_file="$SCRIPT_DIR/pilot/requirements.txt"
+    if [[ ! -f "$req_file" ]]; then
+        return 0
+    fi
+
+    local pip_cmd=""
+    command -v pip3 &>/dev/null && pip_cmd="pip3"
+    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
+
+    if [[ -z "$pip_cmd" ]]; then
+        warn "pip not found — skipping Pilot dependencies"
+        return 0
+    fi
+
+    info "Installing Pilot AI dependencies..."
+    "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
+        ok "Pilot dependencies installed" || \
+        warn "Pilot dependency install failed — run manually: $pip_cmd install -r pilot/requirements.txt"
+}
+
 # --- Create command shortcuts ---
 setup_shortcuts() {
     local platform="$1"
@@ -517,6 +572,93 @@ SCRIPT
     fi
 
     ok "Commands: gathm, gathm-api"
+}
+
+# --- Start the GUI API server in the background ---
+# Sets global GUI_PORT and GUI_URL
+GUI_PORT=8080
+GUI_URL="http://127.0.0.1:${GUI_PORT}"
+
+start_gui_server() {
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+
+    if [[ -z "$python_cmd" ]]; then
+        warn "Python not found — cannot start GUI server"
+        return 1
+    fi
+
+    local server_script="$SCRIPT_DIR/api/server.py"
+    if [[ ! -f "$server_script" ]]; then
+        warn "API server not found at $server_script — skipping GUI"
+        return 1
+    fi
+
+    # Check if something is already on the port
+    if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
+        ok "GUI server already running at $GUI_URL"
+        return 0
+    fi
+
+    info "Starting GUI server on port $GUI_PORT..."
+    nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>/tmp/gathm-gui.log &
+    disown $! 2>/dev/null || true
+
+    # Wait up to 8 s for the server to respond
+    local i=0
+    while (( i < 8 )); do
+        sleep 1
+        if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
+            ok "GUI server started at ${CYAN}${GUI_URL}${RESET}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    warn "GUI server did not respond in time — check /tmp/gathm-gui.log"
+    return 1
+}
+
+# --- Launch Pilot and open GUI browser after install ---
+launch_post_install() {
+    local platform="${1:-linux}"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${BOLD}${GREEN}Launching Gathm...${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # 1. Start GUI server in background
+    if start_gui_server; then
+        # 2. Open GUI in default browser
+        info "Opening GUI in browser..."
+        open_url "$GUI_URL" "$platform"
+        echo -e "  ${CYAN}GUI:${RESET} $GUI_URL"
+    fi
+
+    echo ""
+
+    # 3. Determine how to launch Pilot
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+
+    local pilot_main="$SCRIPT_DIR/pilot/main.py"
+
+    if [[ -z "$python_cmd" ]] || [[ ! -f "$pilot_main" ]]; then
+        warn "Pilot not available — start it manually: python3 pilot/main.py"
+        return 0
+    fi
+
+    echo -e "${BOLD}Starting Pilot AI...${RESET}"
+    echo -e "  ${YELLOW}(Press Ctrl+C or type /exit to quit Pilot)${RESET}"
+    echo ""
+
+    # Hand off to Pilot in the current terminal
+    cd "$SCRIPT_DIR"
+    exec "$python_cmd" "$pilot_main"
 }
 
 # --- Verify everything ---
@@ -665,6 +807,7 @@ main() {
     install_deps "$platform"
     setup_files
     install_engineer_deps
+    install_pilot_deps
     setup_shortcuts "$platform"
 
     # Install Ollama + best-fit model (requires internet)
@@ -678,19 +821,9 @@ main() {
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
     echo ""
-    echo "  Restart your shell or run:"
-    echo -e "    ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
-    echo ""
-    echo "  Quick start:"
-    echo -e "    ${CYAN}gathm status${RESET}                    # Check agent"
-    echo -e "    ${CYAN}gathm list${RESET}                      # List tools"
-    echo -e "    ${CYAN}gathm ask \"weather NYC\"${RESET}          # NLP query"
-    echo -e "    ${CYAN}gathm run weather Paris${RESET}         # Run tool"
-    echo -e "    ${CYAN}gathm health all${RESET}                # Health check"
-    echo -e "    ${CYAN}gathm plan \"daily briefing\"${RESET}       # Task plan"
-    echo -e "    ${CYAN}gathm-api --port 8080${RESET}           # REST API"
-    echo -e "    ${CYAN}gathm${RESET}                           # Interactive menu"
-    echo ""
+
+    # Start GUI + hand off to Pilot in the current terminal
+    launch_post_install "$platform"
 }
 
 main "$@"
