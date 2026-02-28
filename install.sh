@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Gathm Enterprise - Universal Installer
-#  Works on: Linux (all distros), macOS, Termux, WSL, Git Bash
+#  Works on: Linux (all distros), macOS, WSL, Git Bash
 #
 #  Usage:
 #    bash install.sh              # Auto-detect platform & install
@@ -186,6 +186,7 @@ install_ollama() {
 
     if command -v ollama &>/dev/null; then
         ok "Ollama already installed ($(ollama --version 2>&1 | head -1))"
+        start_ollama_serve
         return 0
     fi
 
@@ -201,9 +202,7 @@ install_ollama() {
             fi
             ;;
         termux)
-            warn "Ollama is not yet supported on Termux natively."
-            warn "Consider using a remote Ollama instance (set OLLAMA_HOST)."
-            return 0
+            pkg install -y ollama 2>/dev/null || true
             ;;
         windows)
             warn "On Windows, install Ollama from https://ollama.com/download"
@@ -217,9 +216,120 @@ install_ollama() {
 
     if command -v ollama &>/dev/null; then
         ok "Ollama installed"
+        start_ollama_serve
     else
         warn "Ollama installation failed — install manually from https://ollama.com"
     fi
+}
+
+# --- Ensure ollama serve is running in the background ---
+start_ollama_serve() {
+    if ! command -v ollama &>/dev/null; then
+        return 0
+    fi
+
+    # Check if already serving (port 11434)
+    if curl -s --max-time 2 http://127.0.0.1:11434/ &>/dev/null; then
+        ok "Ollama server already running"
+        return 0
+    fi
+
+    info "Starting Ollama server (ollama serve)..."
+    nohup ollama serve &>/tmp/ollama-serve.log &
+    disown $! 2>/dev/null || true
+
+    # Wait up to 10 s for it to come up
+    local i=0
+    while (( i < 10 )); do
+        sleep 1
+        if curl -s --max-time 2 http://127.0.0.1:11434/ &>/dev/null; then
+            ok "Ollama server started"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    warn "Ollama server did not respond in time — it may still be starting up"
+}
+
+# --- Open URL in default browser (best-effort) ---
+open_url() {
+    local url="$1"
+    local platform="${2:-linux}"
+    case "$platform" in
+        macos)   open "$url" 2>/dev/null || true ;;
+        termux)  termux-open-url "$url" 2>/dev/null || true ;;
+        wsl)     cmd.exe /c start "" "$url" 2>/dev/null || xdg-open "$url" 2>/dev/null || true ;;
+        *)       xdg-open "$url" 2>/dev/null || sensible-browser "$url" 2>/dev/null || true ;;
+    esac
+}
+
+# --- Google Gemini free-tier fallback (when Ollama is unavailable) ---
+setup_gemini_fallback() {
+    local platform="${1:-linux}"
+
+    echo ""
+    info "Setting up Google Gemini (free tier) as the Pilot AI backend."
+    echo ""
+    echo -e "  ${CYAN}Google Gemini${RESET} gives you free access to powerful LLMs."
+    echo "  You only need a Google account — no credit card required."
+    echo ""
+    echo "  Steps:"
+    echo "    1. We'll open Google AI Studio in your browser."
+    echo "    2. Sign in with your Google account."
+    echo "    3. Click 'Create API key' and copy it."
+    echo "    4. Paste it here."
+    echo ""
+    read -r -p "  Press [Enter] to open AI Studio (or Ctrl+C to skip): " _dummy </dev/tty || true
+    open_url "https://aistudio.google.com/apikey" "$platform"
+    echo ""
+    echo "  (If the browser didn't open, visit: https://aistudio.google.com/apikey)"
+    echo ""
+
+    local gemini_key=""
+    while [[ -z "$gemini_key" ]]; do
+        read -r -p "  Paste your Gemini API key: " gemini_key </dev/tty || true
+        if [[ -z "$gemini_key" ]]; then
+            local skip_ans=""
+            read -r -p "  No key entered. Skip Gemini setup? [y/N]: " skip_ans </dev/tty || true
+            if [[ "$skip_ans" =~ ^[Yy]$ ]]; then
+                warn "Gemini setup skipped — Pilot AI will not be available."
+                return 0
+            fi
+        fi
+    done
+
+    # Write API key + backend config to .env (preserving other vars)
+    local env_file="$SCRIPT_DIR/.env"
+    local preserved=""
+    if [[ -f "$env_file" ]]; then
+        preserved=$(grep -v '^GOOGLE_API_KEY=\|^GEMINI_API_KEY=\|^GATHM_LLM_BACKEND=\|^GATHM_GEMINI_MODEL=' "$env_file" 2>/dev/null || true)
+    fi
+    {
+        [[ -n "$preserved" ]] && echo "$preserved"
+        echo "GOOGLE_API_KEY=$gemini_key"
+        echo "GATHM_LLM_BACKEND=gemini"
+        echo "GATHM_GEMINI_MODEL=gemini-2.0-flash-lite"
+    } > "$env_file"
+    chmod 600 "$env_file" 2>/dev/null || true
+
+    # Save backend + model to ~/.gathm/
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "gemini" > "$HOME/.gathm/llm_backend"
+    _save_model_config "gemini-2.0-flash-lite"
+
+    # Install the Python SDK for Gemini
+    local pip_cmd=""
+    command -v pip3 &>/dev/null && pip_cmd="pip3"
+    command -v pip  &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
+    if [[ -n "$pip_cmd" ]]; then
+        info "Installing langchain-google-genai..."
+        "$pip_cmd" install -q langchain-google-genai 2>/dev/null && \
+            ok "langchain-google-genai installed" || \
+            warn "Run manually: $pip_cmd install langchain-google-genai"
+    fi
+
+    ok "Gemini configured! Model: gemini-2.0-flash-lite (free tier)"
 }
 
 # --- Install llmfit and select best model ---
@@ -231,8 +341,8 @@ install_llmfit_and_select_model() {
     fi
 
     if ! command -v ollama &>/dev/null; then
-        warn "Ollama not available — skipping model selection"
-        _save_model_config "gemma3:4b"
+        warn "Ollama not available — attempting Gemini fallback"
+        setup_gemini_fallback "${_GATHM_PLATFORM:-linux}"
         return 0
     fi
 
@@ -301,25 +411,33 @@ except Exception:
 }
 
 # Save selected model to config
+# Usage: _save_model_config <model> [backend]   backend defaults to "ollama"
 _save_model_config() {
     local model="$1"
+    local backend="${2:-ollama}"
     local config_dir="$HOME/.gathm"
     mkdir -p "$config_dir" 2>/dev/null || true
-    echo "$model" > "$config_dir/model"
-    ok "Model config saved: $model"
+    echo "$model"   > "$config_dir/model"
+    echo "$backend" > "$config_dir/llm_backend"
+    ok "LLM config saved: backend=$backend model=$model"
 
     # Also write to .env for Pilot to pick up
     local env_file="$SCRIPT_DIR/.env"
     if [[ -f "$env_file" ]]; then
-        # Update existing GATHM_OLLAMA_MODEL line or append
         if grep -q '^GATHM_OLLAMA_MODEL=' "$env_file" 2>/dev/null; then
             sed -i "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || \
                 sed -i '' "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file"
         else
             echo "GATHM_OLLAMA_MODEL=$model" >> "$env_file"
         fi
+        if grep -q '^GATHM_LLM_BACKEND=' "$env_file" 2>/dev/null; then
+            sed -i "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file" 2>/dev/null || \
+                sed -i '' "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file"
+        else
+            echo "GATHM_LLM_BACKEND=$backend" >> "$env_file"
+        fi
     else
-        echo "GATHM_OLLAMA_MODEL=$model" > "$env_file"
+        printf 'GATHM_OLLAMA_MODEL=%s\nGATHM_LLM_BACKEND=%s\n' "$model" "$backend" > "$env_file"
     fi
 }
 
@@ -372,6 +490,28 @@ install_engineer_deps() {
     "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
         ok "Engineer dependencies installed" || \
         warn "Engineer dependency install failed — run manually: $pip_cmd install -r engineer/requirements.txt"
+}
+
+# --- Install Pilot Python requirements ---
+install_pilot_deps() {
+    local req_file="$SCRIPT_DIR/pilot/requirements.txt"
+    if [[ ! -f "$req_file" ]]; then
+        return 0
+    fi
+
+    local pip_cmd=""
+    command -v pip3 &>/dev/null && pip_cmd="pip3"
+    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
+
+    if [[ -z "$pip_cmd" ]]; then
+        warn "pip not found — skipping Pilot dependencies"
+        return 0
+    fi
+
+    info "Installing Pilot AI dependencies..."
+    "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
+        ok "Pilot dependencies installed" || \
+        warn "Pilot dependency install failed — run manually: $pip_cmd install -r pilot/requirements.txt"
 }
 
 # --- Create command shortcuts ---
@@ -433,6 +573,93 @@ SCRIPT
     ok "Commands: gathm, gathm-api"
 }
 
+# --- Start the GUI API server in the background ---
+# Sets global GUI_PORT and GUI_URL
+GUI_PORT=8080
+GUI_URL="http://127.0.0.1:${GUI_PORT}"
+
+start_gui_server() {
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+
+    if [[ -z "$python_cmd" ]]; then
+        warn "Python not found — cannot start GUI server"
+        return 1
+    fi
+
+    local server_script="$SCRIPT_DIR/api/server.py"
+    if [[ ! -f "$server_script" ]]; then
+        warn "API server not found at $server_script — skipping GUI"
+        return 1
+    fi
+
+    # Check if something is already on the port
+    if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
+        ok "GUI server already running at $GUI_URL"
+        return 0
+    fi
+
+    info "Starting GUI server on port $GUI_PORT..."
+    nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>/tmp/gathm-gui.log &
+    disown $! 2>/dev/null || true
+
+    # Wait up to 8 s for the server to respond
+    local i=0
+    while (( i < 8 )); do
+        sleep 1
+        if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
+            ok "GUI server started at ${CYAN}${GUI_URL}${RESET}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    warn "GUI server did not respond in time — check /tmp/gathm-gui.log"
+    return 1
+}
+
+# --- Launch Pilot and open GUI browser after install ---
+launch_post_install() {
+    local platform="${1:-linux}"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${BOLD}${GREEN}Launching Gathm...${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # 1. Start GUI server in background
+    if start_gui_server; then
+        # 2. Open GUI in default browser
+        info "Opening GUI in browser..."
+        open_url "$GUI_URL" "$platform"
+        echo -e "  ${CYAN}GUI:${RESET} $GUI_URL"
+    fi
+
+    echo ""
+
+    # 3. Determine how to launch Pilot
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+
+    local pilot_main="$SCRIPT_DIR/pilot/main.py"
+
+    if [[ -z "$python_cmd" ]] || [[ ! -f "$pilot_main" ]]; then
+        warn "Pilot not available — start it manually: python3 pilot/main.py"
+        return 0
+    fi
+
+    echo -e "${BOLD}Starting Pilot AI...${RESET}"
+    echo -e "  ${YELLOW}(Press Ctrl+C or type /exit to quit Pilot)${RESET}"
+    echo ""
+
+    # Hand off to Pilot in the current terminal
+    cd "$SCRIPT_DIR"
+    exec "$python_cmd" "$pilot_main"
+}
+
 # --- Verify everything ---
 verify() {
     local errors=0
@@ -477,17 +704,30 @@ verify() {
         warn "Network: Offline"
     fi
 
-    # Ollama
-    if command -v ollama &>/dev/null; then
-        ok "Ollama ($(ollama --version 2>&1 | head -1))"
-    else
-        warn "Ollama not installed (optional — needed for Pilot AI)"
-    fi
-
-    # Configured model
-    if [[ -f "$HOME/.gathm/model" ]]; then
-        ok "LLM model: $(cat "$HOME/.gathm/model")"
-    fi
+    # LLM backend + model
+    local llm_backend="ollama"
+    [[ -f "$HOME/.gathm/llm_backend" ]] && llm_backend=$(cat "$HOME/.gathm/llm_backend")
+    case "$llm_backend" in
+        gemini)
+            ok "LLM backend: Google Gemini (free tier)"
+            if [[ -f "$HOME/.gathm/model" ]]; then
+                ok "LLM model: $(cat "$HOME/.gathm/model")"
+            fi
+            ;;
+        ollama)
+            if command -v ollama &>/dev/null; then
+                ok "LLM backend: Ollama ($(ollama --version 2>&1 | head -1))"
+            else
+                warn "LLM backend: Ollama not installed (optional — needed for Pilot AI)"
+            fi
+            if [[ -f "$HOME/.gathm/model" ]]; then
+                ok "LLM model: $(cat "$HOME/.gathm/model")"
+            fi
+            ;;
+        *)
+            warn "LLM backend: not configured (Pilot AI unavailable)"
+            ;;
+    esac
 
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
@@ -549,6 +789,15 @@ main() {
 
     local platform
     platform=$(detect_platform)
+    # Expose platform globally so sub-functions (e.g. Gemini fallback) can use it
+    _GATHM_PLATFORM="$platform"
+
+    if [[ "$platform" == "termux" ]]; then
+        echo -e "${BOLD}${RED}[!] Termux is not supported yet.${RESET}"
+        echo "    The AI Engineer component does not run on Termux at this time."
+        echo "    Please use a Linux machine, macOS, or WSL."
+        exit 1
+    fi
 
     # Check internet first — determines what we can install
     check_internet
@@ -557,9 +806,11 @@ main() {
     install_deps "$platform"
     setup_files
     install_engineer_deps
+    install_pilot_deps
     setup_shortcuts "$platform"
 
     # Install Ollama + best-fit model (requires internet)
+    # If Ollama cannot be installed, falls back to Google Gemini free tier
     install_ollama "$platform"
     install_llmfit_and_select_model
 
@@ -569,19 +820,9 @@ main() {
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
     echo ""
-    echo "  Restart your shell or run:"
-    echo -e "    ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
-    echo ""
-    echo "  Quick start:"
-    echo -e "    ${CYAN}gathm status${RESET}                    # Check agent"
-    echo -e "    ${CYAN}gathm list${RESET}                      # List tools"
-    echo -e "    ${CYAN}gathm ask \"weather NYC\"${RESET}          # NLP query"
-    echo -e "    ${CYAN}gathm run weather Paris${RESET}         # Run tool"
-    echo -e "    ${CYAN}gathm health all${RESET}                # Health check"
-    echo -e "    ${CYAN}gathm plan \"daily briefing\"${RESET}       # Task plan"
-    echo -e "    ${CYAN}gathm-api --port 8080${RESET}           # REST API"
-    echo -e "    ${CYAN}gathm${RESET}                           # Interactive menu"
-    echo ""
+
+    # Start GUI + hand off to Pilot in the current terminal
+    launch_post_install "$platform"
 }
 
 main "$@"

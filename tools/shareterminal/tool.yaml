@@ -1,0 +1,48 @@
+name: shareterminal
+version: "3.0.0"
+description: "Instantly share your terminal session with others via tmate (SSH + web browser) or upterm"
+category: networking
+
+dependencies:
+  system: [curl]
+  optional: [tmate, upterm]
+
+install_hints:
+  tmate: "https://tmate.io — auto-installed if missing"
+  upterm: "https://github.com/owenthereal/upterm — auto-installed if missing"
+
+input_schema:
+  arguments: []
+  flags:
+    - flag: "-s"
+      description: "Start a new shared session (read/write)"
+    - flag: "-r"
+      description: "Start a new shared session (read-only)"
+    - flag: "-i"
+      description: "Show URLs for the current active session"
+    - flag: "-k"
+      description: "Stop / kill the current shared session"
+    - flag: "-b"
+      description: "Force a specific backend: tmate or upterm"
+      has_argument: true
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Session sharing URLs (SSH and web)"
+  json_fields:
+    - name: ssh_rw
+      type: string
+    - name: ssh_ro
+      type: string
+    - name: web_rw
+      type: string
+    - name: web_ro
+      type: string
+    - name: backend
+      type: string
+
+fallback_tool: null
+tags: [networking, terminal, sharing, collaboration, tmate, upterm, ssh]
