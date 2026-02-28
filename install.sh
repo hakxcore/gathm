@@ -235,7 +235,7 @@ start_ollama_serve() {
     fi
 
     info "Starting Ollama server (ollama serve)..."
-    local _log_dir="${TMPDIR:-/tmp}"
+    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
     nohup ollama serve &>"$_log_dir/ollama-serve.log" &
     disown $! 2>/dev/null || true
 
@@ -609,7 +609,7 @@ start_gui_server() {
     fi
 
     info "Starting GUI server on port $GUI_PORT..."
-    local _log_dir="${TMPDIR:-/tmp}"
+    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
     nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
     disown $! 2>/dev/null || true
 
@@ -624,7 +624,7 @@ start_gui_server() {
         i=$((i + 1))
     done
 
-    warn "GUI server did not respond in time — check ${TMPDIR:-/tmp}/gathm-gui.log"
+    warn "GUI server did not respond in time — check $_log_dir/gathm-gui.log"
     return 1
 }
 
