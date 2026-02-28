@@ -30,6 +30,39 @@ ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
 warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
 fail()  { echo -e "${RED}[-]${RESET} $1"; }
 
+# ── Python venv (used for all Python package installs) ──────────────
+# pilot/run.sh already expects a venv at pilot/venv/; we create it here
+# so both the install and the runtime use the same isolated environment.
+GATHM_VENV=""  # set after SCRIPT_DIR is known (see _init_venv)
+
+_init_venv() {
+    GATHM_VENV="$SCRIPT_DIR/pilot/venv"
+}
+
+_ensure_venv() {
+    _init_venv
+    if [[ ! -d "$GATHM_VENV" ]]; then
+        local python_cmd="python3"
+        command -v python3 &>/dev/null || python_cmd="python"
+        info "Creating Python venv at $GATHM_VENV..."
+        "$python_cmd" -m venv "$GATHM_VENV" || {
+            warn "venv creation failed — falling back to system pip"
+            GATHM_VENV=""
+            return 1
+        }
+        ok "Python venv created"
+    fi
+}
+
+_venv_pip() {
+    _ensure_venv
+    if [[ -n "$GATHM_VENV" && -x "$GATHM_VENV/bin/pip" ]]; then
+        "$GATHM_VENV/bin/pip" install -q "$@"
+    else
+        pip3 install -q "$@" 2>/dev/null || pip install -q "$@" 2>/dev/null || return 1
+    fi
+}
+
 # --- Cleanup on interrupt ---
 _setup_cleanup() {
     echo ""
@@ -320,15 +353,10 @@ setup_gemini_fallback() {
     _save_model_config "gemini-2.0-flash-lite"
 
     # Install the Python SDK for Gemini
-    local pip_cmd=""
-    command -v pip3 &>/dev/null && pip_cmd="pip3"
-    command -v pip  &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
-    if [[ -n "$pip_cmd" ]]; then
-        info "Installing langchain-google-genai..."
-        "$pip_cmd" install -q langchain-google-genai 2>/dev/null && \
-            ok "langchain-google-genai installed" || \
-            warn "Run manually: $pip_cmd install langchain-google-genai"
-    fi
+    info "Installing langchain-google-genai..."
+    _venv_pip langchain-google-genai && \
+        ok "langchain-google-genai installed" || \
+        warn "Run manually: pip install langchain-google-genai"
 
     ok "Gemini configured! Model: gemini-2.0-flash-lite (free tier)"
 }
@@ -390,24 +418,38 @@ except Exception:
 
         if [[ -n "$recommended" ]]; then
             ok "Best model for your hardware: $recommended"
-            info "Pulling model via Ollama (this may take a while)..."
-            ollama pull "$recommended" 2>/dev/null || {
+            info "Pulling model via Ollama (this may take a few minutes)..."
+            if ollama pull "$recommended"; then
+                _save_model_config "$recommended"
+            else
                 warn "Failed to pull '$recommended', falling back to gemma3:4b"
-                recommended="gemma3:4b"
-                ollama pull "$recommended" 2>/dev/null || true
-            }
-            _save_model_config "$recommended"
+                info "Pulling default model gemma3:4b (this may take a few minutes)..."
+                if ollama pull "gemma3:4b"; then
+                    _save_model_config "gemma3:4b"
+                else
+                    warn "Model pull failed — run manually: ollama pull gemma3:4b"
+                    _save_model_config "gemma3:4b"
+                fi
+            fi
         else
             warn "Could not determine best model — using default: gemma3:4b"
-            info "Pulling default model..."
-            ollama pull "gemma3:4b" 2>/dev/null || true
-            _save_model_config "gemma3:4b"
+            info "Pulling default model gemma3:4b (this may take a few minutes)..."
+            if ollama pull "gemma3:4b"; then
+                _save_model_config "gemma3:4b"
+            else
+                warn "Model pull failed — run manually: ollama pull gemma3:4b"
+                _save_model_config "gemma3:4b"
+            fi
         fi
     else
         warn "llmfit not available — using default model: gemma3:4b"
-        info "Pulling default model..."
-        ollama pull "gemma3:4b" 2>/dev/null || true
-        _save_model_config "gemma3:4b"
+        info "Pulling default model gemma3:4b (this may take a few minutes)..."
+        if ollama pull "gemma3:4b"; then
+            _save_model_config "gemma3:4b"
+        else
+            warn "Model pull failed — run manually: ollama pull gemma3:4b"
+            _save_model_config "gemma3:4b"
+        fi
     fi
 }
 
@@ -473,29 +515,10 @@ install_engineer_deps() {
         return 0
     fi
 
-    local python_cmd=""
-    command -v python3 &>/dev/null && python_cmd="python3"
-    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
-
-    if [[ -z "$python_cmd" ]]; then
-        warn "Python not found — skipping engineer dependencies"
-        return 0
-    fi
-
-    local pip_cmd=""
-    command -v pip3 &>/dev/null && pip_cmd="pip3"
-    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
-
-    if [[ -z "$pip_cmd" ]]; then
-        warn "pip not found — skipping engineer dependencies"
-        warn "To enable the engineer agent, run: pip install -r engineer/requirements.txt"
-        return 0
-    fi
-
     info "Installing engineer AI dependencies (autogen-agentchat, autogen-ext)..."
-    "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
+    _venv_pip -r "$req_file" && \
         ok "Engineer dependencies installed" || \
-        warn "Engineer dependency install failed — run manually: $pip_cmd install -r engineer/requirements.txt"
+        warn "Engineer dependency install failed — run manually: pip install -r engineer/requirements.txt"
 }
 
 # --- Install Pilot Python requirements ---
@@ -505,20 +528,11 @@ install_pilot_deps() {
         return 0
     fi
 
-    local pip_cmd=""
-    command -v pip3 &>/dev/null && pip_cmd="pip3"
-    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
-
-    if [[ -z "$pip_cmd" ]]; then
-        warn "pip not found — skipping Pilot dependencies"
-        return 0
-    fi
-
     info "Installing Pilot AI dependencies..."
-    if "$pip_cmd" install -q -r "$req_file"; then
+    if _venv_pip -r "$req_file"; then
         ok "Pilot dependencies installed"
     else
-        warn "Pilot dependency install failed — run manually: $pip_cmd install -r pilot/requirements.txt"
+        warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
     fi
 }
 
@@ -550,12 +564,18 @@ exec bash "$SCRIPT_DIR/agent/orchestrator.sh" "\$@"
 SCRIPT
     chmod +x "$bin_dir/gathm-agent"
 
-    # gathm-api
-    local python_cmd="python3"
-    command -v python3 &>/dev/null || python_cmd="python"
+    # gathm-api — prefer venv python so deps are available
+    local api_python_cmd
+    if [[ -x "$GATHM_VENV/bin/python3" ]]; then
+        api_python_cmd="$GATHM_VENV/bin/python3"
+    elif command -v python3 &>/dev/null; then
+        api_python_cmd="python3"
+    else
+        api_python_cmd="python"
+    fi
     cat > "$bin_dir/gathm-api" << SCRIPT
 $shebang
-exec $python_cmd "$SCRIPT_DIR/api/server.py" "\$@"
+exec $api_python_cmd "$SCRIPT_DIR/api/server.py" "\$@"
 SCRIPT
     chmod +x "$bin_dir/gathm-api"
 
@@ -653,10 +673,11 @@ launch_post_install() {
     command -v python3 &>/dev/null && python_cmd="python3"
     command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
 
+    local pilot_run="$SCRIPT_DIR/pilot/run.sh"
     local pilot_main="$SCRIPT_DIR/pilot/main.py"
 
-    if [[ -z "$python_cmd" ]] || [[ ! -f "$pilot_main" ]]; then
-        warn "Pilot not available — start it manually: python3 pilot/main.py"
+    if [[ ! -f "$pilot_run" && ! -f "$pilot_main" ]]; then
+        warn "Pilot not available — start it manually: bash pilot/run.sh"
         return 0
     fi
 
@@ -664,9 +685,13 @@ launch_post_install() {
     echo -e "  ${YELLOW}(Press Ctrl+C or type /exit to quit Pilot)${RESET}"
     echo ""
 
-    # Hand off to Pilot in the current terminal
+    # Hand off to Pilot via run.sh (activates venv) or python directly as fallback
     cd "$SCRIPT_DIR"
-    exec "$python_cmd" "$pilot_main"
+    if [[ -f "$pilot_run" ]]; then
+        exec bash "$pilot_run"
+    else
+        exec "$python_cmd" "$pilot_main"
+    fi
 }
 
 # --- Verify everything ---
