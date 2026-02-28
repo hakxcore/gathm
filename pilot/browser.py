@@ -14,28 +14,27 @@ Commands (dispatched by run_browser_action):
   close                   — close the controlled session
 
 Platform support matrix (all actions available everywhere):
-  ┌──────────────┬────────┬───────┬──────────────┬──────────────────────────────┐
-  │ Action       │ Linux  │ macOS │ Win / WSL    │ Termux                       │
-  ├──────────────┼────────┼───────┼──────────────┼──────────────────────────────┤
-  │ open         │   ✓    │   ✓   │      ✓       │ ✓ termux-open-url            │
-  │ fetch        │   ✓    │   ✓   │      ✓       │ ✓ requests/curl              │
-  │ navigate     │   ✓    │   ✓   │      ✓       │ ✓ system Chromium (tur-repo) │
-  │ click        │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  │ type / fill  │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  │ read         │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  │ scroll       │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  │ screenshot   │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  │ search       │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
-  └──────────────┴────────┴───────┴──────────────┴──────────────────────────────┘
+  ┌──────────────┬────────┬───────┬──────────────┬────────────────────────────────┐
+  │ Action       │ Linux  │ macOS │ Win / WSL    │ Termux                         │
+  ├──────────────┼────────┼───────┼──────────────┼────────────────────────────────┤
+  │ open         │   ✓    │   ✓   │      ✓       │ ✓ termux-open-url              │
+  │ fetch        │   ✓    │   ✓   │      ✓       │ ✓ requests/curl                │
+  │ navigate     │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ click        │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ type / fill  │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ read         │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ scroll       │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ screenshot   │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  │ search       │   ✓    │   ✓   │      ✓       │ ✓ Selenium + pkg Chromium      │
+  └──────────────┴────────┴───────┴──────────────┴────────────────────────────────┘
 
-Termux note: `playwright install chromium` fails on Android ("unsupported platform").
-Instead, install Chromium via pkg:
-  pkg install tur-repo x11-repo && pkg install chromium
-Then this module locates the binary automatically and passes it to Playwright
-via `executable_path` with the required --no-sandbox / --disable-dev-shm-usage flags.
-
-Desktop: if playwright's bundled Chromium is absent, falls back to any system
-Chromium found on PATH before giving up.
+Backend selection:
+  Desktop  — Playwright (playwright Python package + playwright install chromium)
+             Falls back to any system Chrome/Chromium on PATH if bundled binary absent.
+  Termux   — Selenium (pip install selenium) + system Chromium from pkg:
+               pkg install tur-repo x11-repo && pkg install chromium
+             The playwright Python package has no PyPI wheel for Android/aarch64.
+             Selenium is pure Python and works everywhere pip works.
 """
 
 from __future__ import annotations
@@ -69,30 +68,35 @@ def _platform() -> str:
 
 
 def _find_system_chromium() -> Optional[str]:
-    """Locate an installed system Chromium/Chrome binary.
-
-    Checked in preference order so the best available binary is used.
-    On Termux $PREFIX expands to /data/data/com.termux/files/usr.
-    """
+    """Locate an installed system Chromium/Chrome binary."""
     prefix = os.environ.get("PREFIX", "")  # Termux sets this
-
     candidates = [
-        # Termux (tur-repo chromium)
         os.path.join(prefix, "bin", "chromium-browser") if prefix else "",
         os.path.join(prefix, "bin", "chromium") if prefix else "",
         "/data/data/com.termux/files/usr/bin/chromium-browser",
         "/data/data/com.termux/files/usr/bin/chromium",
-        # Standard Linux
         shutil.which("chromium-browser") or "",
         shutil.which("chromium") or "",
         shutil.which("google-chrome-stable") or "",
         shutil.which("google-chrome") or "",
-        # macOS
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        # Windows (common install paths)
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _find_chromedriver() -> Optional[str]:
+    """Locate the chromedriver binary (used by the Selenium backend on Termux)."""
+    prefix = os.environ.get("PREFIX", "")
+    candidates = [
+        os.path.join(prefix, "bin", "chromedriver") if prefix else "",
+        "/data/data/com.termux/files/usr/bin/chromedriver",
+        shutil.which("chromedriver") or "",
     ]
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
@@ -108,11 +112,23 @@ def _playwright_available() -> bool:
         return False
 
 
+def _selenium_available() -> bool:
+    try:
+        import selenium  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 _PLAYWRIGHT_HINT = (
     "playwright Python package is not installed.\n"
-    "Fix: pip install playwright\n"
-    "Then on desktop: playwright install chromium\n"
-    "On Termux:       pkg install tur-repo x11-repo && pkg install chromium"
+    "Fix: pip install playwright && playwright install chromium"
+)
+
+_SELENIUM_HINT = (
+    "selenium is not installed.\n"
+    "Fix: pip install selenium\n"
+    "Also ensure Chromium is installed: pkg install tur-repo x11-repo && pkg install chromium"
 )
 
 _CHROMIUM_HINT = (
@@ -123,72 +139,173 @@ _CHROMIUM_HINT = (
 
 
 # ---------------------------------------------------------------------------
-# Stateful Playwright session
-# One session shared across all Pilot commands in a conversation.
+# Selenium page wrapper
+# Presents the subset of Playwright's page API that browser.py uses,
+# so all action functions work unchanged against either backend.
+# ---------------------------------------------------------------------------
+
+class _SeleniumKeyboard:
+    def __init__(self, driver: Any) -> None:
+        self._d = driver
+
+    def press(self, key: str) -> None:
+        from selenium.webdriver.common.by import By      # type: ignore[import]
+        from selenium.webdriver.common.keys import Keys  # type: ignore[import]
+        key_map = {"PageDown": Keys.PAGE_DOWN, "PageUp": Keys.PAGE_UP}
+        self._d.find_element(By.TAG_NAME, "body").send_keys(key_map.get(key, key))
+
+
+class _SeleniumLocator:
+    """Minimal stand-in for Playwright's Locator (get_by_text().first.click())."""
+
+    def __init__(self, driver: Any, text: str) -> None:
+        self._d = driver
+        self._text = text
+        self.first = self  # caller does .first.click()
+
+    def click(self, timeout: int = 5_000) -> None:
+        from selenium.webdriver.common.by import By                    # type: ignore[import]
+        from selenium.webdriver.support.ui import WebDriverWait        # type: ignore[import]
+        from selenium.webdriver.support import expected_conditions as EC  # type: ignore[import]
+        loc = (By.XPATH,
+               f'//*[contains(normalize-space(.), "{self._text}")]')
+        WebDriverWait(self._d, timeout / 1000).until(
+            EC.element_to_be_clickable(loc)
+        ).click()
+
+
+class _SeleniumPage:
+    """Selenium WebDriver wrapped to match the Playwright page API used in browser.py."""
+
+    def __init__(self, driver: Any) -> None:
+        self._d = driver
+        self.keyboard = _SeleniumKeyboard(driver)
+
+    @property
+    def url(self) -> str:
+        return self._d.current_url
+
+    def goto(self, url: str, wait_until: str = "load", timeout: int = 30_000) -> None:
+        self._d.set_page_load_timeout(timeout / 1000)
+        self._d.get(url)
+
+    def title(self) -> str:
+        return self._d.title
+
+    def content(self) -> str:
+        return self._d.page_source
+
+    def inner_text(self, selector: str) -> str:
+        try:
+            from selenium.webdriver.common.by import By  # type: ignore[import]
+            return self._d.find_element(By.CSS_SELECTOR, selector).text
+        except Exception:
+            return ""
+
+    def click(self, selector: str, timeout: int = 5_000) -> None:
+        from selenium.webdriver.common.by import By                    # type: ignore[import]
+        from selenium.webdriver.support.ui import WebDriverWait        # type: ignore[import]
+        from selenium.webdriver.support import expected_conditions as EC  # type: ignore[import]
+        WebDriverWait(self._d, timeout / 1000).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+        ).click()
+
+    def get_by_text(self, text: str) -> _SeleniumLocator:
+        return _SeleniumLocator(self._d, text)
+
+    def fill(self, selector: str, text: str) -> None:
+        from selenium.webdriver.common.by import By  # type: ignore[import]
+        el = self._d.find_element(By.CSS_SELECTOR, selector)
+        el.clear()
+        el.send_keys(text)
+
+    def screenshot(self, path: str, full_page: bool = False) -> None:
+        self._d.save_screenshot(path)
+
+
+# ---------------------------------------------------------------------------
+# Browser session  (Playwright on desktop, Selenium on Termux)
 # ---------------------------------------------------------------------------
 
 class _Session:
-    """A single long-running Playwright browser + page."""
+    """A single long-running browser session shared across all Pilot commands."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pw: Any = None
-        self._browser: Any = None
-        self._page: Any = None
+        self._page: Any = None   # _SeleniumPage (Termux) or Playwright page (desktop)
+        self._pw: Any = None     # sync_playwright context (desktop only)
+        self._browser: Any = None  # Playwright browser (desktop only)
 
-    def _start(self) -> Optional[str]:
-        """Launch headless Chromium. Returns an error string on failure."""
+    # -- Termux path: Selenium + system Chromium ----------------------------
+
+    def _start_selenium(self) -> Optional[str]:
+        if not _selenium_available():
+            return _SELENIUM_HINT
+
+        chromium = _find_system_chromium()
+        if not chromium:
+            return (
+                "Chromium not found on Termux.\n"
+                "Install: pkg install tur-repo x11-repo && pkg install chromium"
+            )
+
+        chromedriver = _find_chromedriver()
+        if not chromedriver:
+            return (
+                "chromedriver not found.\n"
+                "It ships with Termux's chromium package: pkg install chromium"
+            )
+
+        try:
+            from selenium import webdriver                            # type: ignore[import]
+            from selenium.webdriver.chrome.service import Service    # type: ignore[import]
+            from selenium.webdriver.chrome.options import Options    # type: ignore[import]
+
+            opts = Options()
+            opts.binary_location = chromium
+            for arg in ("--headless", "--no-sandbox",
+                        "--disable-dev-shm-usage", "--disable-gpu"):
+                opts.add_argument(arg)
+
+            service = Service(executable_path=chromedriver)
+            driver = webdriver.Chrome(service=service, options=opts)
+            self._page = _SeleniumPage(driver)
+            return None
+        except Exception as exc:
+            self._page = None
+            return f"Could not start Selenium/Chromium session: {exc}\n{_SELENIUM_HINT}"
+
+    # -- Desktop path: Playwright -------------------------------------------
+
+    def _start_playwright(self) -> Optional[str]:
         if not _playwright_available():
             return _PLAYWRIGHT_HINT
 
-        plat = _platform()
-
-        # Extra flags for sandboxed/restricted environments
         extra_args: list[str] = []
         executable_path: Optional[str] = None
 
-        if plat == "termux":
-            # Playwright's bundled Chromium is x86_64 only — unusable on Android.
-            # Use the ARM64 Chromium installed via pkg instead.
-            executable_path = _find_system_chromium()
-            if not executable_path:
-                return (
-                    "Chromium not found on Termux.\n"
-                    "Install it: pkg install tur-repo x11-repo && pkg install chromium"
-                )
-            # Android kernel doesn't support the Chrome sandbox
-            extra_args = [
-                "--no-sandbox",
-                "--disable-dev-shm-usage",  # /dev/shm may be tiny on Android
-                "--disable-gpu",
-            ]
-        else:
-            # On other platforms try playwright's own Chromium first; fall back
-            # to any system binary if the bundled one is absent.
+        # Try playwright's bundled Chromium first; fall back to system binary.
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore[import]
+            _test_pw = sync_playwright().__enter__()
             try:
-                from playwright.sync_api import sync_playwright  # type: ignore[import]
-                _test_pw = sync_playwright().__enter__()
-                try:
-                    test_browser = _test_pw.chromium.launch(headless=True)
-                    test_browser.close()
-                    _test_pw.__exit__(None, None, None)
-                    # Built-in Chromium works — use it without executable_path
-                except Exception:
-                    _test_pw.__exit__(None, None, None)
-                    # Fall back to system binary
-                    executable_path = _find_system_chromium()
-                    if not executable_path:
-                        return _CHROMIUM_HINT
+                _test_pw.chromium.launch(headless=True).close()
+                _test_pw.__exit__(None, None, None)
             except Exception:
-                return _PLAYWRIGHT_HINT
+                _test_pw.__exit__(None, None, None)
+                executable_path = _find_system_chromium()
+                if not executable_path:
+                    return _CHROMIUM_HINT
+        except Exception:
+            return _PLAYWRIGHT_HINT
 
         try:
             from playwright.sync_api import sync_playwright  # type: ignore[import]
             self._pw = sync_playwright().__enter__()
-            launch_kwargs: dict[str, Any] = {"headless": True, "args": extra_args}
+            kwargs: dict[str, Any] = {"headless": True, "args": extra_args}
             if executable_path:
-                launch_kwargs["executable_path"] = executable_path
-            self._browser = self._pw.chromium.launch(**launch_kwargs)
+                kwargs["executable_path"] = executable_path
+            self._browser = self._pw.chromium.launch(**kwargs)
             self._page = self._browser.new_page()
             return None
         except Exception as exc:
@@ -196,6 +313,13 @@ class _Session:
             self._browser = None
             self._page = None
             return f"Could not start browser session: {exc}\n{_CHROMIUM_HINT}"
+
+    # -- Shared interface ---------------------------------------------------
+
+    def _start(self) -> Optional[str]:
+        if _platform() == "termux":
+            return self._start_selenium()
+        return self._start_playwright()
 
     def ensure(self) -> Optional[str]:
         with self._lock:
@@ -209,10 +333,13 @@ class _Session:
     def close(self) -> None:
         with self._lock:
             try:
-                if self._browser:
-                    self._browser.close()
-                if self._pw:
-                    self._pw.__exit__(None, None, None)
+                if isinstance(self._page, _SeleniumPage):
+                    self._page._d.quit()
+                else:
+                    if self._browser:
+                        self._browser.close()
+                    if self._pw:
+                        self._pw.__exit__(None, None, None)
             except Exception:
                 pass
             finally:
@@ -228,12 +355,10 @@ def _page_text(page: Any, max_lines: int = 200) -> str:
     """Extract readable text from the current page."""
     try:
         from bs4 import BeautifulSoup  # type: ignore[import]
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(page.content(), "html.parser")
         for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
             tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [ln for ln in text.splitlines() if ln.strip()]
+        lines = [ln for ln in soup.get_text("\n", strip=True).splitlines() if ln.strip()]
         return "\n".join(lines[:max_lines])
     except ImportError:
         return page.inner_text("body")[:8000]
@@ -289,8 +414,7 @@ def fetch_page(url: str, timeout: int = 15) -> str:
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
             tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [ln for ln in text.splitlines() if ln.strip()]
+        lines = [ln for ln in soup.get_text("\n", strip=True).splitlines() if ln.strip()]
         return "\n".join(lines[:200])
     except ImportError:
         try:
@@ -308,7 +432,7 @@ def fetch_page(url: str, timeout: int = 15) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Playwright session-based actions (all platforms including Termux)
+# Session-based actions (Playwright or Selenium, all platforms)
 # ---------------------------------------------------------------------------
 
 def navigate(url: str) -> str:
@@ -353,9 +477,7 @@ def read_current_page() -> str:
     if err:
         return err
     try:
-        url = _session.page().url
-        text = _page_text(_session.page())
-        return f"[Current page: {url}]\n\n{text}"
+        return f"[Current page: {_session.page().url}]\n\n{_page_text(_session.page())}"
     except Exception as exc:
         return f"Could not read page: {exc}"
 
@@ -404,12 +526,10 @@ def search_web(query: str) -> str:
     url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(query)
     err = _session.ensure()
     if err:
-        # Playwright unavailable — open in system browser instead
         return open_url(url)
     try:
         _session.page().goto(url, wait_until="domcontentloaded", timeout=20_000)
-        text = _page_text(_session.page(), max_lines=100)
-        return f"[Search: {query}]\n{url}\n\n{text}"
+        return f"[Search: {query}]\n{url}\n\n{_page_text(_session.page(), max_lines=100)}"
     except Exception as exc:
         return (f"Search navigation failed ({exc}) — "
                 f"opening in system browser.\n{open_url(url)}")

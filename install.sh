@@ -875,10 +875,29 @@ install_pilot_deps() {
     fi
 
     info "Installing Pilot AI dependencies..."
-    if _venv_pip -r "$req_file"; then
-        ok "Pilot dependencies installed"
+
+    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        # playwright has no PyPI wheel for Android/aarch64.
+        # Install everything else; browser.py uses the pkg-installed Chromium.
+        local tmp_req
+        tmp_req=$(mktemp)
+        grep -v "^playwright" "$req_file" > "$tmp_req"
+        if _venv_pip -r "$tmp_req"; then
+            ok "Pilot dependencies installed (playwright skipped on Termux)"
+        else
+            warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
+        fi
+        rm -f "$tmp_req"
+        # selenium drives the system Chromium on Termux (pure Python, works on aarch64)
+        _venv_pip install selenium 2>/dev/null && \
+            ok "selenium installed (Termux browser backend)" || \
+            warn "selenium install failed — browser control limited to open/fetch"
     else
-        warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
+        if _venv_pip -r "$req_file"; then
+            ok "Pilot dependencies installed"
+        else
+            warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
+        fi
     fi
 }
 
