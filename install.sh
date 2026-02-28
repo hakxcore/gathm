@@ -882,6 +882,46 @@ install_pilot_deps() {
     fi
 }
 
+# --- Install Playwright Chromium browser (needed for browser control) ---
+# Skipped on Termux (no headless Chromium on Android).
+# playwright install chromium is separate from `pip install playwright`:
+# the pip package is just a Python binding; the actual browser binary must
+# be downloaded separately via the playwright CLI.
+install_playwright_browser() {
+    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        info "Skipping Playwright Chromium install (not supported on Termux)"
+        return 0
+    fi
+
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        warn "Skipping Playwright Chromium install (offline)"
+        return 0
+    fi
+
+    # Resolve the playwright CLI from the venv or PATH
+    local pw_cmd=""
+    if [[ -x "$GATHM_VENV/bin/playwright" ]]; then
+        pw_cmd="$GATHM_VENV/bin/playwright"
+    elif command -v playwright &>/dev/null; then
+        pw_cmd="playwright"
+    else
+        warn "playwright CLI not found — skipping Chromium install"
+        warn "Run manually: playwright install chromium"
+        return 0
+    fi
+
+    info "Installing Playwright Chromium (browser engine for Pilot)..."
+    # --with-deps installs OS-level dependencies on Linux; safe no-op on macOS/Win
+    if "$pw_cmd" install chromium --with-deps 2>/dev/null; then
+        ok "Playwright Chromium installed"
+    elif "$pw_cmd" install chromium 2>/dev/null; then
+        ok "Playwright Chromium installed"
+    else
+        warn "Playwright Chromium install failed — browser control will be limited"
+        warn "Run manually: playwright install chromium"
+    fi
+}
+
 # --- Create command shortcuts ---
 # gathm and gathm-agent: symlinked directly — simpler, always in sync with
 #   the source, and uninstall just removes the links.
@@ -1200,6 +1240,7 @@ main() {
 
     install_engineer_deps
     install_pilot_deps
+    install_playwright_browser
     setup_shortcuts "$platform"
 
     reload_shell_config
