@@ -167,9 +167,9 @@ _ensure_venv() {
 _venv_pip() {
     _ensure_venv
     if [[ -n "$GATHM_VENV" && -x "$GATHM_VENV/bin/pip" ]]; then
-        "$GATHM_VENV/bin/pip" install -q "$@"
+        "$GATHM_VENV/bin/pip" install "$@"
     else
-        pip3 install -q "$@" 2>/dev/null || pip install -q "$@" 2>/dev/null || return 1
+        pip3 install "$@" 2>/dev/null || pip install "$@" 2>/dev/null || return 1
     fi
 }
 
@@ -874,7 +874,7 @@ install_pilot_deps() {
         return 0
     fi
 
-    info "Installing Pilot AI dependencies..."
+    info "Installing Pilot AI dependencies (this may take a few minutes)..."
 
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
         # playwright has no PyPI wheel for Android/aarch64; skip it and
