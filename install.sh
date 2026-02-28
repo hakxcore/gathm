@@ -235,7 +235,8 @@ start_ollama_serve() {
     fi
 
     info "Starting Ollama server (ollama serve)..."
-    nohup ollama serve &>/tmp/ollama-serve.log &
+    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
+    nohup ollama serve &>"$_log_dir/ollama-serve.log" &
     disown $! 2>/dev/null || true
 
     # Wait up to 10 s for it to come up
@@ -514,9 +515,11 @@ install_pilot_deps() {
     fi
 
     info "Installing Pilot AI dependencies..."
-    "$pip_cmd" install -q -r "$req_file" 2>/dev/null && \
-        ok "Pilot dependencies installed" || \
+    if "$pip_cmd" install -q -r "$req_file"; then
+        ok "Pilot dependencies installed"
+    else
         warn "Pilot dependency install failed — run manually: $pip_cmd install -r pilot/requirements.txt"
+    fi
 }
 
 # --- Create command shortcuts ---
@@ -606,7 +609,8 @@ start_gui_server() {
     fi
 
     info "Starting GUI server on port $GUI_PORT..."
-    nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>/tmp/gathm-gui.log &
+    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
+    nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
     disown $! 2>/dev/null || true
 
     # Wait up to 8 s for the server to respond
@@ -620,7 +624,7 @@ start_gui_server() {
         i=$((i + 1))
     done
 
-    warn "GUI server did not respond in time — check /tmp/gathm-gui.log"
+    warn "GUI server did not respond in time — check $_log_dir/gathm-gui.log"
     return 1
 }
 
