@@ -246,7 +246,7 @@ def print_status_bar() -> None:
 def print_user_message(text: str) -> None:
     """Render the user's query as a styled sent-message (dark bg, right-ish)."""
     msg = Text()
-    msg.append("  you  ", style=f"bold {_C_ACCENT}")
+    msg.append("  🐚  ", style=f"bold {_C_ACCENT}")
     msg.append(f" {text} ", style=f"white {_C_USER_BG}")
     console.print()
     console.print(Padding(msg, (0, 2)))
@@ -279,7 +279,11 @@ def get_user_input() -> str:
         # strings — it displays them literally as ^[[...m.  Wrapping with ANSI()
         # tells it to parse and render the escape codes as intended colors/styles.
         prompt_str = f"\n{_A_ACCENT}🐚{_A_RESET} {_A_BOLD}›{_A_RESET} "
-        return session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
+        text = session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
+        # Erase the raw input line so only the styled bubble below remains.
+        sys.stdout.write("\x1b[1A\x1b[2K\r")
+        sys.stdout.flush()
+        return text
     print_prompt()
     return input().strip()
 
