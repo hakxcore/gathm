@@ -877,16 +877,13 @@ install_pilot_deps() {
     info "Installing Pilot AI dependencies..."
 
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
-        # playwright has no PyPI wheel for Android/aarch64.
-        # langchain-google-genai pulls in grpcio which requires patchelf/ninja
-        # (native build tools unavailable on Termux/Android); skip it since
-        # Termux uses the local Ollama backend exclusively.
-        # Install everything else; browser.py uses the pkg-installed Chromium.
+        # playwright has no PyPI wheel for Android/aarch64; skip it and
+        # use the pkg-installed Chromium instead.
         local tmp_req
         tmp_req=$(mktemp)
-        grep -vE "^playwright|^langchain-google-genai" "$req_file" > "$tmp_req"
+        grep -vE "^playwright" "$req_file" > "$tmp_req"
         if _venv_pip -r "$tmp_req"; then
-            ok "Pilot dependencies installed (playwright + google-genai skipped on Termux)"
+            ok "Pilot dependencies installed (playwright skipped on Termux)"
         else
             warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
         fi

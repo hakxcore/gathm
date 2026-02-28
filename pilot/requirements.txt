@@ -2,7 +2,6 @@ langchain
 langchain-community
 langchain-core
 langchain-ollama
-langchain-google-genai
 langgraph
 python-dotenv
 rich>=13.0
