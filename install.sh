@@ -612,12 +612,21 @@ install_llmfit_and_select_model() {
         #      may have changed (e.g. raw-mode flags from init code)
         # Note: do NOT pass </dev/null — that also disables JSON output.
         local llmfit_output="" recommended=""
-        local _llmfit_tmp; _llmfit_tmp=$(mktemp 2>/dev/null || echo "/tmp/llmfit_out_$$")
-        # -n defaults to 5 in llmfit; json=true is the default for recommend
-        ( llmfit recommend -n 5 >"$_llmfit_tmp" 2>/dev/null ) || true
+        local _llmfit_tmp _llmfit_err
+        _llmfit_tmp=$(mktemp 2>/dev/null || echo "/tmp/llmfit_out_$$")
+        _llmfit_err=$(mktemp 2>/dev/null || echo "/tmp/llmfit_err_$$")
+        # json=true is the default for recommend; -n defaults to 5.
+        # Capturing stderr separately lets us surface diagnostics when
+        # llmfit produces no stdout output.
+        ( llmfit recommend -n 5 >"$_llmfit_tmp" 2>"$_llmfit_err" ) || true
         stty sane 2>/dev/null || true   # restore terminal after llmfit
         llmfit_output=$(cat "$_llmfit_tmp" 2>/dev/null) || true
-        rm -f "$_llmfit_tmp" 2>/dev/null || true
+        # If no stdout, show first line of stderr as a hint
+        if [[ -z "$llmfit_output" ]]; then
+            local _llmfit_hint; _llmfit_hint=$(head -1 "$_llmfit_err" 2>/dev/null | tr -d '\r\n')
+            [[ -n "$_llmfit_hint" ]] && warn "llmfit: $_llmfit_hint"
+        fi
+        rm -f "$_llmfit_tmp" "$_llmfit_err" 2>/dev/null || true
 
         if [[ -n "$llmfit_output" ]]; then
             if command -v jq &>/dev/null; then
@@ -1002,12 +1011,17 @@ uninstall() {
 
 # --- Reload shell config (best effort) ---
 reload_shell_config() {
-    # This can refresh PATH for the installer process.
-    # Parent shell still may require a manual `source ~/.bashrc`.
-    source "$HOME/.bashrc" 2>/dev/null || true
-    source "$HOME/.zshrc" 2>/dev/null || true
-    source "$HOME/.bash_profile" 2>/dev/null || true
-    source "$HOME/.profile" 2>/dev/null || true
+    # Shell config files (especially ~/.zshrc) contain zsh-specific builtins
+    # like `compdef`, `autoload`, etc. that don't exist in bash.  When `set -e`
+    # is active, a failed builtin inside a sourced file calls exit() directly —
+    # the `|| true` on the outer `source` call is never reached.
+    # Fix: disable errexit for the duration of all source calls.
+    set +e
+    source "$HOME/.bashrc"       2>/dev/null
+    source "$HOME/.zshrc"        2>/dev/null
+    source "$HOME/.bash_profile" 2>/dev/null
+    source "$HOME/.profile"      2>/dev/null
+    set -e
 }
 
 # --- Main ---
