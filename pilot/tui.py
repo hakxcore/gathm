@@ -31,7 +31,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box as rich_box
 from rich.padding import Padding
-from rich.rule import Rule
 
 # ── prompt_toolkit (optional) ────────────────────────────────────
 _PT = False

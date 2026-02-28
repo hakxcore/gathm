@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Annotated, Any, List, Optional, TypedDict
 
