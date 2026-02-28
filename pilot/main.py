@@ -275,14 +275,26 @@ def extract_tool_input(content: str, available_tools: Optional[set] = None) -> O
     if not isinstance(content, str):
         return None
 
+    known_tools = available_tools or set(discover_tools())
+
     action_input_match = re.search(r"Action Input:\s*(.+)", content, re.IGNORECASE)
     if action_input_match:
         action_input = action_input_match.group(1).strip()
         if action_input and "tool_name" not in action_input.lower():
-            # Final check to ignore placeholders
+            # Reject placeholder strings
             if any(x in action_input.lower() for x in ["[tool_name]", "[arguments]", "<arg>"]):
                 return None
-            return action_input
+            # Validate the first word is a real tool.
+            # Without this check, hallucinated tool names like "define" route to
+            # tool_node → "Error: Tool not found" → model retries → recursion limit.
+            try:
+                first_word = shlex.split(action_input)[0].lower()
+                first_word = TOOL_ALIASES.get(first_word, first_word)
+                if first_word in known_tools:
+                    return action_input
+            except ValueError:
+                pass
+            return None
 
     action_lines = [line.strip() for line in content.splitlines() if line.strip().lower().startswith("action:")]
     if not action_lines:
@@ -306,18 +318,31 @@ def extract_tool_input(content: str, available_tools: Optional[set] = None) -> O
         return None
 
     tool_name = TOOL_ALIASES.get(payload_parts[0].lower(), payload_parts[0].lower())
-    known_tools = available_tools or set(discover_tools())
-    
+
     # Check if it is a real tool and not a placeholder
     if tool_name in known_tools:
-        # Ignore placeholders often used in explanations
         if any(x in payload.lower() for x in ["[tool_name]", "[arguments]", "<arg>"]):
             return None
-            
         payload_parts[0] = tool_name
         return shlex.join(payload_parts)
 
     return None
+
+def _clean_agent_response(content: str) -> str:
+    """Strip ReAct scaffolding lines (Thought/Action/Observation) from the
+    model's reply so the user sees only the actual answer.
+
+    Small models like gemma3:4b sometimes emit the full chain-of-thought even
+    when they are not invoking a tool.  This removes those lines while
+    preserving everything else.  Falls back to the original content when
+    cleaning would leave an empty string.
+    """
+    _STRIP_PREFIXES = ("thought:", "action:", "action input:", "observation:")
+    lines = content.splitlines()
+    kept = [ln for ln in lines if not ln.strip().lower().startswith(_STRIP_PREFIXES)]
+    cleaned = "\n".join(kept).strip()
+    return cleaned if cleaned else content
+
 
 # --- 2. LangGraph Stateful Reasoning (Text-based Tool Calling) ---
 
@@ -351,6 +376,7 @@ You have access to the following gathm tools:
 {tool_descriptions}
 
 CRITICAL RULES:
+0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
@@ -366,13 +392,14 @@ Action Input: [tool_name] [arguments]
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
+12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
 
 When you have a final answer, provide it directly without the Action format.
 """
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
     response = llm.invoke(messages)
-    
+
     # Check for tool call in the text
     content = response.content
     if extract_tool_input(content):
@@ -380,8 +407,14 @@ When you have a final answer, provide it directly without the Action format.
             "messages": [response],
             "next_step": "action"
         }
+
+    # No valid tool call — clean ReAct scaffolding before returning the
+    # final answer so the user sees only the actual response text.
+    from langchain_core.messages import AIMessage as _AIMsg
+    cleaned = _clean_agent_response(content)
+    final = _AIMsg(content=cleaned) if cleaned != content else response
     return {
-        "messages": [response],
+        "messages": [final],
         "next_step": "end"
     }
 
