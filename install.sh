@@ -10,6 +10,10 @@
 # ============================================================
 
 set -euo pipefail
+# ERR trap: print the exact line that caused set -e to fire.
+# Helps diagnose silent aborts.  Printed to stderr so it shows even when
+# stdout is redirected.
+trap 'echo "[INSTALL ABORT] Line $LINENO exited with code $?" >&2' ERR
 
 VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -690,13 +694,13 @@ _save_model_config() {
     if [[ -f "$env_file" ]]; then
         if grep -q '^GATHM_OLLAMA_MODEL=' "$env_file" 2>/dev/null; then
             sed -i "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || \
-                sed -i '' "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file"
+                sed -i '' "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || true
         else
             echo "GATHM_OLLAMA_MODEL=$model" >> "$env_file"
         fi
         if grep -q '^GATHM_LLM_BACKEND=' "$env_file" 2>/dev/null; then
             sed -i "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file" 2>/dev/null || \
-                sed -i '' "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file"
+                sed -i '' "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file" 2>/dev/null || true
         else
             echo "GATHM_LLM_BACKEND=$backend" >> "$env_file"
         fi
@@ -1011,17 +1015,21 @@ uninstall() {
 
 # --- Reload shell config (best effort) ---
 reload_shell_config() {
-    # Shell config files (especially ~/.zshrc) contain zsh-specific builtins
-    # like `compdef`, `autoload`, etc. that don't exist in bash.  When `set -e`
-    # is active, a failed builtin inside a sourced file calls exit() directly —
-    # the `|| true` on the outer `source` call is never reached.
-    # Fix: disable errexit for the duration of all source calls.
+    # Disable errexit so any failure in a sourced file is silently ignored.
+    # We also save/restore the flag in case the sourced file modifies it.
+    local _had_errexit=0
+    [[ $- == *e* ]] && _had_errexit=1
     set +e
+
+    # Only source bash-compatible files in a bash install script.
+    # ~/.zshrc uses zsh builtins (compdef, autoload, etc.) that do not exist
+    # in bash; sourcing it here achieves nothing useful and can cause failures.
     source "$HOME/.bashrc"       2>/dev/null
-    source "$HOME/.zshrc"        2>/dev/null
     source "$HOME/.bash_profile" 2>/dev/null
     source "$HOME/.profile"      2>/dev/null
-    set -e
+
+    [[ $_had_errexit -eq 1 ]] && set -e
+    return 0
 }
 
 # --- Main ---
