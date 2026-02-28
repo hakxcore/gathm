@@ -229,8 +229,11 @@ detect_platform() {
 install_deps() {
     local platform="$1"
 
-    # Core packages every platform needs
-    local core="bash curl jq git openssl"
+    # Core packages every platform needs.
+    # openssl is intentionally excluded: macOS ships LibreSSL as 'openssl',
+    # and Linux distros pre-install it.  It is only added for Termux and
+    # any platform where it is genuinely absent.
+    local core="bash curl jq git"
 
     info "Platform detected: $platform"
     info "Installing dependencies..."
@@ -265,7 +268,8 @@ install_deps() {
             ;;
         macos)
             if command -v brew &>/dev/null; then
-                brew install bash curl jq git openssl python3 pv dialog wget 2>/dev/null || true
+                # openssl omitted: macOS ships LibreSSL as /usr/bin/openssl
+                brew install bash curl jq git python3 pv dialog wget 2>/dev/null || true
                 pip3 install pyyaml 2>/dev/null || true
             else
                 warn "Homebrew not found. Install it from https://brew.sh"
