@@ -599,12 +599,22 @@ install_llmfit_and_select_model() {
     if _install_llmfit "$platform" && command -v llmfit &>/dev/null; then
         info "Analyzing hardware to find the best local model..."
 
+        # llmfit recommend --json outputs: {"system": {...}, "models": [...]}
+        # Each model has: "name" (HuggingFace), "runtime" ("ollama"/"mlx"/etc.),
+        # "runtime_label" (Ollama pull tag, e.g. "llama3.1:8b")
         local llmfit_output="" recommended=""
-        llmfit_output=$(llmfit recommend --json --limit 5 2>/dev/null) || true
+        llmfit_output=$(timeout 30 llmfit recommend --json -n 5 2>/dev/null) || true
 
         if [[ -n "$llmfit_output" ]]; then
             if command -v jq &>/dev/null; then
-                recommended=$(echo "$llmfit_output" | jq -r '.[0].name // empty' 2>/dev/null)
+                # Prefer the runtime_label (Ollama tag) for the first Ollama-compatible model;
+                # fall back to checking .models as top-level array (older llmfit versions)
+                recommended=$(echo "$llmfit_output" | jq -r '
+                    (
+                        (.models // .) | map(select(.runtime == "ollama" or .runtime == null))
+                        | .[0] | (.runtime_label // .name)
+                    ) // empty
+                ' 2>/dev/null)
             else
                 local pcmd; pcmd=$(_python_cmd)
                 if [[ -n "$pcmd" ]]; then
@@ -612,7 +622,15 @@ install_llmfit_and_select_model() {
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
-    print(d[0].get('name', '') if d else '')
+    models = d.get('models', d) if isinstance(d, dict) else d
+    if isinstance(models, list):
+        for m in models:
+            rt = m.get('runtime', 'ollama')
+            if rt in ('ollama', None, ''):
+                tag = m.get('runtime_label') or m.get('name', '')
+                if tag:
+                    print(tag)
+                    break
 except Exception:
     pass
 " <<< "$llmfit_output" 2>/dev/null)
