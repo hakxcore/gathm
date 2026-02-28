@@ -429,7 +429,7 @@ Action Input: [tool_name] [arguments]
     - browser screenshot [url]        → capture a screenshot
     - browser search <query>          → DuckDuckGo search and return results
     - browser close                   → close the controlled browser session
-    On Termux only 'open' and 'fetch' work (no headless Chromium on Android).
+    Works on all platforms including Termux (requires `pkg install chromium` on Termux).
 
 When you have a final answer, provide it directly without the Action format.
 """

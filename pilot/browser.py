@@ -6,31 +6,36 @@ Commands (dispatched by run_browser_action):
   navigate <url>          — load URL in the controlled headless session
   click <selector|text>   — click an element (CSS selector or visible text)
   type <selector> <text>  — type text into a field
+  fill <selector> <value> — alias for type (form-fill ergonomics)
   read                    — return text content of the current page
   scroll <up|down>        — scroll the current page
-  fill <selector> <value> — alias for type (form-fill ergonomics)
   screenshot [url]        — capture screenshot of current page (or navigate first)
+  search <query>          — DuckDuckGo search + show results
   close                   — close the controlled session
-  search <query>          — navigate to a DuckDuckGo search for <query>
 
-Platform support matrix:
-  ┌──────────────┬────────┬───────┬──────────────┬─────────┐
-  │ Action       │ Linux  │ macOS │ Win / WSL    │ Termux  │
-  ├──────────────┼────────┼───────┼──────────────┼─────────┤
-  │ open         │   ✓    │   ✓   │      ✓       │    ✓    │
-  │ fetch        │   ✓    │   ✓   │      ✓       │    ✓    │
-  │ navigate     │   ✓    │   ✓   │      ✓       │    ✗*   │
-  │ click        │   ✓    │   ✓   │      ✓       │    ✗*   │
-  │ type / fill  │   ✓    │   ✓   │      ✓       │    ✗*   │
-  │ read         │   ✓    │   ✓   │      ✓       │    ✗*   │
-  │ scroll       │   ✓    │   ✓   │      ✓       │    ✗*   │
-  │ screenshot   │   ✓    │   ✓   │      ✓       │    ✗*   │
-  └──────────────┴────────┴───────┴──────────────┴─────────┘
-  * Termux: playwright / headless Chromium unavailable; fetch is used instead.
+Platform support matrix (all actions available everywhere):
+  ┌──────────────┬────────┬───────┬──────────────┬──────────────────────────────┐
+  │ Action       │ Linux  │ macOS │ Win / WSL    │ Termux                       │
+  ├──────────────┼────────┼───────┼──────────────┼──────────────────────────────┤
+  │ open         │   ✓    │   ✓   │      ✓       │ ✓ termux-open-url            │
+  │ fetch        │   ✓    │   ✓   │      ✓       │ ✓ requests/curl              │
+  │ navigate     │   ✓    │   ✓   │      ✓       │ ✓ system Chromium (tur-repo) │
+  │ click        │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  │ type / fill  │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  │ read         │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  │ scroll       │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  │ screenshot   │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  │ search       │   ✓    │   ✓   │      ✓       │ ✓ system Chromium            │
+  └──────────────┴────────┴───────┴──────────────┴──────────────────────────────┘
 
-Playwright is an optional dependency.  If it is not installed (or Chromium
-is not downloaded) the controlled-session actions degrade gracefully with a
-clear install hint.  Run `playwright install chromium` to enable them.
+Termux note: `playwright install chromium` fails on Android ("unsupported platform").
+Instead, install Chromium via pkg:
+  pkg install tur-repo x11-repo && pkg install chromium
+Then this module locates the binary automatically and passes it to Playwright
+via `executable_path` with the required --no-sandbox / --disable-dev-shm-usage flags.
+
+Desktop: if playwright's bundled Chromium is absent, falls back to any system
+Chromium found on PATH before giving up.
 """
 
 from __future__ import annotations
@@ -38,14 +43,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Platform + binary helpers
 # ---------------------------------------------------------------------------
 
 def _platform() -> str:
@@ -64,6 +68,38 @@ def _platform() -> str:
     return "linux"
 
 
+def _find_system_chromium() -> Optional[str]:
+    """Locate an installed system Chromium/Chrome binary.
+
+    Checked in preference order so the best available binary is used.
+    On Termux $PREFIX expands to /data/data/com.termux/files/usr.
+    """
+    prefix = os.environ.get("PREFIX", "")  # Termux sets this
+
+    candidates = [
+        # Termux (tur-repo chromium)
+        os.path.join(prefix, "bin", "chromium-browser") if prefix else "",
+        os.path.join(prefix, "bin", "chromium") if prefix else "",
+        "/data/data/com.termux/files/usr/bin/chromium-browser",
+        "/data/data/com.termux/files/usr/bin/chromium",
+        # Standard Linux
+        shutil.which("chromium-browser") or "",
+        shutil.which("chromium") or "",
+        shutil.which("google-chrome-stable") or "",
+        shutil.which("google-chrome") or "",
+        # macOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        # Windows (common install paths)
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def _playwright_available() -> bool:
     try:
         import playwright  # noqa: F401
@@ -73,42 +109,95 @@ def _playwright_available() -> bool:
 
 
 _PLAYWRIGHT_HINT = (
-    "playwright is not installed or Chromium is missing.\n"
-    "Fix: pip install playwright && playwright install chromium"
+    "playwright Python package is not installed.\n"
+    "Fix: pip install playwright\n"
+    "Then on desktop: playwright install chromium\n"
+    "On Termux:       pkg install tur-repo x11-repo && pkg install chromium"
 )
+
+_CHROMIUM_HINT = (
+    "Chromium not found.  Install it:\n"
+    "  Desktop: playwright install chromium\n"
+    "  Termux:  pkg install tur-repo x11-repo && pkg install chromium"
+)
+
 
 # ---------------------------------------------------------------------------
 # Stateful Playwright session
-# Kept as module-level state so multiple Pilot commands share one browser.
+# One session shared across all Pilot commands in a conversation.
 # ---------------------------------------------------------------------------
 
 class _Session:
-    """Holds a single long-running Playwright browser + page."""
+    """A single long-running Playwright browser + page."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pw: Any = None      # playwright context manager (sync_playwright)
+        self._pw: Any = None
         self._browser: Any = None
         self._page: Any = None
 
     def _start(self) -> Optional[str]:
-        """Launch headless Chromium. Returns error string or None on success."""
+        """Launch headless Chromium. Returns an error string on failure."""
         if not _playwright_available():
             return _PLAYWRIGHT_HINT
+
+        plat = _platform()
+
+        # Extra flags for sandboxed/restricted environments
+        extra_args: list[str] = []
+        executable_path: Optional[str] = None
+
+        if plat == "termux":
+            # Playwright's bundled Chromium is x86_64 only — unusable on Android.
+            # Use the ARM64 Chromium installed via pkg instead.
+            executable_path = _find_system_chromium()
+            if not executable_path:
+                return (
+                    "Chromium not found on Termux.\n"
+                    "Install it: pkg install tur-repo x11-repo && pkg install chromium"
+                )
+            # Android kernel doesn't support the Chrome sandbox
+            extra_args = [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",  # /dev/shm may be tiny on Android
+                "--disable-gpu",
+            ]
+        else:
+            # On other platforms try playwright's own Chromium first; fall back
+            # to any system binary if the bundled one is absent.
+            try:
+                from playwright.sync_api import sync_playwright  # type: ignore[import]
+                _test_pw = sync_playwright().__enter__()
+                try:
+                    test_browser = _test_pw.chromium.launch(headless=True)
+                    test_browser.close()
+                    _test_pw.__exit__(None, None, None)
+                    # Built-in Chromium works — use it without executable_path
+                except Exception:
+                    _test_pw.__exit__(None, None, None)
+                    # Fall back to system binary
+                    executable_path = _find_system_chromium()
+                    if not executable_path:
+                        return _CHROMIUM_HINT
+            except Exception:
+                return _PLAYWRIGHT_HINT
+
         try:
             from playwright.sync_api import sync_playwright  # type: ignore[import]
             self._pw = sync_playwright().__enter__()
-            self._browser = self._pw.chromium.launch(headless=True)
+            launch_kwargs: dict[str, Any] = {"headless": True, "args": extra_args}
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
+            self._browser = self._pw.chromium.launch(**launch_kwargs)
             self._page = self._browser.new_page()
             return None
         except Exception as exc:
             self._pw = None
             self._browser = None
             self._page = None
-            return f"Could not start browser session: {exc}\n{_PLAYWRIGHT_HINT}"
+            return f"Could not start browser session: {exc}\n{_CHROMIUM_HINT}"
 
     def ensure(self) -> Optional[str]:
-        """Return an error string if the session can't be started, else None."""
         with self._lock:
             if self._page is None:
                 return self._start()
@@ -136,7 +225,7 @@ _session = _Session()
 
 
 def _page_text(page: Any, max_lines: int = 200) -> str:
-    """Extract visible text from the current page via beautifulsoup4."""
+    """Extract readable text from the current page."""
     try:
         from bs4 import BeautifulSoup  # type: ignore[import]
         html = page.content()
@@ -147,14 +236,13 @@ def _page_text(page: Any, max_lines: int = 200) -> str:
         lines = [ln for ln in text.splitlines() if ln.strip()]
         return "\n".join(lines[:max_lines])
     except ImportError:
-        # Fall back to Playwright's innerText
         return page.inner_text("body")[:8000]
     except Exception as exc:
         return f"(could not extract page text: {exc})"
 
 
 # ---------------------------------------------------------------------------
-# Action: open URL in system browser
+# Action: open URL in the system's GUI browser
 # ---------------------------------------------------------------------------
 
 def open_url(url: str) -> str:
@@ -179,13 +267,13 @@ def open_url(url: str) -> str:
                     break
         return f"Opened in browser: {url}"
     except FileNotFoundError as exc:
-        return f"Browser opener not found ({exc}). Visit manually: {url}"
+        return f"Browser opener not found ({exc}). Visit: {url}"
     except Exception as exc:
-        return f"Could not open browser ({exc}). Visit manually: {url}"
+        return f"Could not open browser ({exc}). Visit: {url}"
 
 
 # ---------------------------------------------------------------------------
-# Action: HTTP fetch (no rendering — available on all platforms)
+# Action: HTTP fetch (no JS rendering — works everywhere without Chromium)
 # ---------------------------------------------------------------------------
 
 def fetch_page(url: str, timeout: int = 15) -> str:
@@ -214,46 +302,32 @@ def fetch_page(url: str, timeout: int = 15) -> str:
             return result.stdout.strip()[:6000] or f"No content returned for {url}"
         except Exception as exc:
             return (f"Cannot fetch {url}: {exc}. "
-                    "Install 'requests' and 'beautifulsoup4' for web support.")
+                    "Install 'requests' and 'beautifulsoup4'.")
     except Exception as exc:
         return f"Error fetching {url}: {exc}"
 
 
 # ---------------------------------------------------------------------------
-# Playwright session-based actions (desktop only)
+# Playwright session-based actions (all platforms including Termux)
 # ---------------------------------------------------------------------------
 
-def _termux_only_open(action: str) -> str:
-    return (
-        f"'{action}' requires a headless browser which is not available on Termux. "
-        "Use 'browser open <url>' to open in Android's browser, "
-        "or 'browser fetch <url>' to read page content."
-    )
-
-
 def navigate(url: str) -> str:
-    if _platform() == "termux":
-        return _termux_only_open("navigate")
     err = _session.ensure()
     if err:
         return err
     try:
         _session.page().goto(url, wait_until="domcontentloaded", timeout=30_000)
-        title = _session.page().title()
-        return f"Navigated to: {url}\nPage title: {title}"
+        return f"Navigated to: {url}\nPage title: {_session.page().title()}"
     except Exception as exc:
         return f"Navigation failed: {exc}"
 
 
 def click_element(selector_or_text: str) -> str:
-    if _platform() == "termux":
-        return _termux_only_open("click")
     err = _session.ensure()
     if err:
         return err
     page = _session.page()
     try:
-        # Try CSS/XPath selector first; fall back to visible text match
         try:
             page.click(selector_or_text, timeout=5_000)
         except Exception:
@@ -264,8 +338,6 @@ def click_element(selector_or_text: str) -> str:
 
 
 def type_into(selector: str, text: str) -> str:
-    if _platform() == "termux":
-        return _termux_only_open("type")
     err = _session.ensure()
     if err:
         return err
@@ -277,8 +349,6 @@ def type_into(selector: str, text: str) -> str:
 
 
 def read_current_page() -> str:
-    if _platform() == "termux":
-        return _termux_only_open("read")
     err = _session.ensure()
     if err:
         return err
@@ -291,29 +361,21 @@ def read_current_page() -> str:
 
 
 def scroll_page(direction: str) -> str:
-    if _platform() == "termux":
-        return _termux_only_open("scroll")
     err = _session.ensure()
     if err:
         return err
     try:
-        if direction.lower() in ("down", "d"):
-            _session.page().keyboard.press("PageDown")
-        elif direction.lower() in ("up", "u"):
-            _session.page().keyboard.press("PageUp")
-        else:
+        key = "PageDown" if direction.lower() in ("down", "d") else \
+              "PageUp"   if direction.lower() in ("up", "u")   else None
+        if key is None:
             return f"Unknown direction '{direction}'. Use 'up' or 'down'."
+        _session.page().keyboard.press(key)
         return f"Scrolled {direction}"
     except Exception as exc:
         return f"Scroll failed: {exc}"
 
 
 def screenshot(url: Optional[str] = None) -> str:
-    if _platform() == "termux":
-        return (
-            "Screenshots are not supported on Termux. "
-            "Use 'browser fetch <url>' to read page content instead."
-        )
     err = _session.ensure()
     if err:
         return err
@@ -338,21 +400,19 @@ def close_session() -> str:
 
 
 def search_web(query: str) -> str:
-    """Navigate to a DuckDuckGo search result page."""
     import urllib.parse
-    search_url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(query)
-    if _platform() == "termux":
-        return open_url(search_url)
+    url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(query)
     err = _session.ensure()
     if err:
-        # Fall back to opening in system browser
-        return open_url(search_url)
+        # Playwright unavailable — open in system browser instead
+        return open_url(url)
     try:
-        _session.page().goto(search_url, wait_until="domcontentloaded", timeout=20_000)
+        _session.page().goto(url, wait_until="domcontentloaded", timeout=20_000)
         text = _page_text(_session.page(), max_lines=100)
-        return f"[Search: {query}]\n{search_url}\n\n{text}"
+        return f"[Search: {query}]\n{url}\n\n{text}"
     except Exception as exc:
-        return f"Search navigation failed ({exc}) — opening in system browser instead.\n{open_url(search_url)}"
+        return (f"Search navigation failed ({exc}) — "
+                f"opening in system browser.\n{open_url(url)}")
 
 
 # ---------------------------------------------------------------------------
@@ -360,70 +420,46 @@ def search_web(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 def run_browser_action(command: str) -> str:
-    """Dispatch a browser command issued by Pilot.
-
-    Syntax:
-        open <url>
-        fetch <url>
-        navigate <url>
-        click <selector_or_text>
-        type <selector> <text>
-        fill <selector> <value>
-        read
-        scroll up|down
-        screenshot [url]
-        close
-        search <query>
-    """
+    """Dispatch a browser command from Pilot."""
     parts = command.strip().split(None, 1)
     if not parts:
         return (
             "Usage: browser <action> [args]\n"
-            "Actions: open, fetch, navigate, click, type, fill, read, "
-            "scroll, screenshot, close, search"
+            "Actions: open fetch navigate click type fill read scroll "
+            "screenshot search close"
         )
 
     action = parts[0].lower()
     rest = parts[1].strip() if len(parts) > 1 else ""
 
-    # Ensure scheme for URL actions
     def _with_scheme(u: str) -> str:
         return u if u.startswith(("http://", "https://")) else "https://" + u
 
     if action == "open":
-        if not rest:
-            return "Usage: browser open <url>"
-        return open_url(_with_scheme(rest))
+        return open_url(_with_scheme(rest)) if rest else "Usage: browser open <url>"
 
     elif action == "fetch":
         if not rest:
             return "Usage: browser fetch <url>"
-        content = fetch_page(_with_scheme(rest))
-        return f"[Content from {rest}]\n\n{content}"
+        return f"[Content from {rest}]\n\n{fetch_page(_with_scheme(rest))}"
 
     elif action == "navigate":
-        if not rest:
-            return "Usage: browser navigate <url>"
-        return navigate(_with_scheme(rest))
+        return navigate(_with_scheme(rest)) if rest else "Usage: browser navigate <url>"
 
     elif action == "click":
-        if not rest:
-            return "Usage: browser click <css_selector_or_visible_text>"
-        return click_element(rest)
+        return click_element(rest) if rest else "Usage: browser click <selector|text>"
 
     elif action in ("type", "fill"):
-        # "type input#q hello world" → selector=input#q, text=hello world
-        type_parts = rest.split(None, 1)
-        if len(type_parts) < 2:
+        tp = rest.split(None, 1)
+        if len(tp) < 2:
             return f"Usage: browser {action} <selector> <text>"
-        return type_into(type_parts[0], type_parts[1])
+        return type_into(tp[0], tp[1])
 
     elif action == "read":
         return read_current_page()
 
     elif action == "scroll":
-        direction = rest or "down"
-        return scroll_page(direction)
+        return scroll_page(rest or "down")
 
     elif action in ("screenshot", "capture"):
         return screenshot(_with_scheme(rest) if rest else None)
@@ -432,13 +468,11 @@ def run_browser_action(command: str) -> str:
         return close_session()
 
     elif action == "search":
-        if not rest:
-            return "Usage: browser search <query>"
-        return search_web(rest)
+        return search_web(rest) if rest else "Usage: browser search <query>"
 
     else:
         return (
             f"Unknown browser action: '{action}'.\n"
-            "Valid actions: open, fetch, navigate, click, type, fill, "
-            "read, scroll, screenshot, close, search"
+            "Valid: open fetch navigate click type fill read scroll "
+            "screenshot search close"
         )

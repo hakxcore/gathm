@@ -882,43 +882,59 @@ install_pilot_deps() {
     fi
 }
 
-# --- Install Playwright Chromium browser (needed for browser control) ---
-# Skipped on Termux (no headless Chromium on Android).
-# playwright install chromium is separate from `pip install playwright`:
-# the pip package is just a Python binding; the actual browser binary must
-# be downloaded separately via the playwright CLI.
+# --- Install browser engine for Pilot's browser control feature ---
+#
+# Desktop (Linux/macOS/Windows/WSL):
+#   `playwright install chromium` downloads Playwright's bundled Chromium.
+#   On Linux, --with-deps also installs the required OS packages.
+#
+# Termux (Android):
+#   `playwright install chromium` reports "unsupported platform: android" and
+#   refuses to run.  Instead, we install the ARM64 Chromium that is distributed
+#   through Termux's community repository (tur-repo + x11-repo).  Pilot's
+#   browser.py detects the system binary automatically via `executable_path`.
 install_playwright_browser() {
-    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
-        info "Skipping Playwright Chromium install (not supported on Termux)"
-        return 0
-    fi
-
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        warn "Skipping Playwright Chromium install (offline)"
+        warn "Skipping browser engine install (offline)"
         return 0
     fi
 
-    # Resolve the playwright CLI from the venv or PATH
+    # ── Termux path: install system Chromium via pkg ──────────────────
+    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        info "Installing Chromium for Termux (tur-repo)..."
+        # tur-repo provides community-built packages; x11-repo provides
+        # display-related libraries needed by the Chromium binary.
+        pkg install -y tur-repo x11-repo 2>/dev/null || true
+        if pkg install -y chromium 2>/dev/null; then
+            ok "Chromium installed via pkg — full browser control enabled on Termux"
+        else
+            warn "Chromium pkg install failed — browser control limited to open/fetch"
+            warn "Retry manually: pkg install tur-repo x11-repo && pkg install chromium"
+        fi
+        return 0
+    fi
+
+    # ── Desktop path: download Playwright's bundled Chromium ──────────
     local pw_cmd=""
     if [[ -x "$GATHM_VENV/bin/playwright" ]]; then
         pw_cmd="$GATHM_VENV/bin/playwright"
     elif command -v playwright &>/dev/null; then
         pw_cmd="playwright"
     else
-        warn "playwright CLI not found — skipping Chromium install"
+        warn "playwright CLI not found — skipping Chromium download"
         warn "Run manually: playwright install chromium"
         return 0
     fi
 
     info "Installing Playwright Chromium (browser engine for Pilot)..."
-    # --with-deps installs OS-level dependencies on Linux; safe no-op on macOS/Win
+    # --with-deps installs required OS libraries on Linux (harmless on macOS/Win)
     if "$pw_cmd" install chromium --with-deps 2>/dev/null; then
-        ok "Playwright Chromium installed"
+        ok "Playwright Chromium ready"
     elif "$pw_cmd" install chromium 2>/dev/null; then
-        ok "Playwright Chromium installed"
+        ok "Playwright Chromium ready"
     else
-        warn "Playwright Chromium install failed — browser control will be limited"
-        warn "Run manually: playwright install chromium"
+        warn "Playwright Chromium download failed — browser control will be limited"
+        warn "Retry manually: playwright install chromium"
     fi
 }
 
