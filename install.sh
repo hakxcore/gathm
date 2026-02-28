@@ -605,13 +605,16 @@ install_llmfit_and_select_model() {
         #
         # IMPORTANT: llmfit uses a TUI framework that can corrupt terminal state
         # even when running non-interactively.  We work around this by:
-        #   1. Feeding /dev/null as stdin — prevents TUI from detecting a TTY
-        #   2. Writing output to a temp file — avoids $() subshell issues
-        #   3. Calling stty sane — restores terminal settings afterwards
+        #   1. Writing output to a temp file instead of $() — llmfit sees
+        #      stdout is NOT a TTY so it falls back to plain JSON output,
+        #      avoiding TUI initialisation entirely
+        #   2. Calling stty sane — restores any terminal settings llmfit
+        #      may have changed (e.g. raw-mode flags from init code)
+        # Note: do NOT pass </dev/null — that also disables JSON output.
         local llmfit_output="" recommended=""
         local _llmfit_tmp; _llmfit_tmp=$(mktemp 2>/dev/null || echo "/tmp/llmfit_out_$$")
-        # -n defaults to 5 in llmfit; json is the default output for recommend
-        ( llmfit recommend -n 5 </dev/null >"$_llmfit_tmp" 2>/dev/null ) || true
+        # -n defaults to 5 in llmfit; json=true is the default for recommend
+        ( llmfit recommend -n 5 >"$_llmfit_tmp" 2>/dev/null ) || true
         stty sane 2>/dev/null || true   # restore terminal after llmfit
         llmfit_output=$(cat "$_llmfit_tmp" 2>/dev/null) || true
         rm -f "$_llmfit_tmp" 2>/dev/null || true
@@ -1056,7 +1059,7 @@ main() {
     install_llmfit_and_select_model
 
     reload_shell_config
-    verify
+    verify || true   # non-zero return just means warnings; never abort setup
 
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
