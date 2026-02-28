@@ -30,6 +30,104 @@ ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
 warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
 fail()  { echo -e "${RED}[-]${RESET} $1"; }
 
+# ── Python version gate ──────────────────────────────────────────────
+# Pilot, api/server.py, and engineer all require Python 3.8+.
+# We check (and optionally auto-install) Python early, before touching
+# the venv or pip, so failures surface with a clear message.
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=8
+
+# Returns 0 if $1 points to a python binary >= MIN_PYTHON_MAJOR.MINOR
+_python_version_ok() {
+    local cmd="$1"
+    command -v "$cmd" &>/dev/null || return 1
+    "$cmd" -c "
+import sys
+ok = sys.version_info >= ($MIN_PYTHON_MAJOR, $MIN_PYTHON_MINOR)
+sys.exit(0 if ok else 1)
+" 2>/dev/null
+}
+
+# Returns the first working python command, or empty string
+_python_cmd() {
+    if _python_version_ok python3; then echo "python3"
+    elif _python_version_ok python; then echo "python"
+    else echo ""
+    fi
+}
+
+# Check Python is available; try to install it for the given platform if not.
+# Exits with an error if Python still can't be found after the install attempt.
+check_and_install_python() {
+    local platform="$1"
+
+    # ── fast path: already have a good Python ────────────────────────
+    if _python_version_ok python3 || _python_version_ok python; then
+        local pcmd; pcmd=$(_python_cmd)
+        ok "Python: $($pcmd --version 2>&1)"
+        return 0
+    fi
+
+    warn "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ not found — attempting automatic install..."
+
+    case "$platform" in
+        termux)
+            pkg install -y python 2>/dev/null || true
+            ;;
+        debian|wsl)
+            sudo apt-get update -y 2>/dev/null || true
+            sudo apt-get install -y python3 python3-pip python3-venv 2>/dev/null || true
+            ;;
+        fedora)
+            sudo dnf install -y python3 python3-pip 2>/dev/null || true
+            ;;
+        arch)
+            sudo pacman -Sy --noconfirm python python-pip 2>/dev/null || true
+            ;;
+        alpine)
+            apk add --no-cache python3 py3-pip 2>/dev/null || true
+            ;;
+        opensuse)
+            sudo zypper install -y python3 python3-pip 2>/dev/null || true
+            ;;
+        macos)
+            if command -v brew &>/dev/null; then
+                brew install python3 2>/dev/null || true
+            else
+                fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
+                fail "Install Homebrew first: https://brew.sh"
+                fail "Then run: brew install python3 && bash install.sh"
+                exit 1
+            fi
+            ;;
+        windows)
+            if command -v scoop &>/dev/null; then
+                scoop install python 2>/dev/null || true
+            elif command -v choco &>/dev/null; then
+                choco install python3 -y 2>/dev/null || true
+            else
+                fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
+                fail "Download from: https://www.python.org/downloads/"
+                fail "After installing, re-run: bash install.sh"
+                exit 1
+            fi
+            ;;
+        *)
+            warn "Unknown platform — cannot auto-install Python. Install it manually."
+            ;;
+    esac
+
+    # ── verify the install worked ─────────────────────────────────────
+    if _python_version_ok python3 || _python_version_ok python; then
+        local pcmd; pcmd=$(_python_cmd)
+        ok "Python installed: $($pcmd --version 2>&1)"
+    else
+        fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ could not be installed automatically."
+        fail "Please install it manually and re-run: bash install.sh"
+        exit 1
+    fi
+}
+
 # ── Python venv (used for all Python package installs) ──────────────
 # pilot/run.sh already expects a venv at pilot/venv/; we create it here
 # so both the install and the runtime use the same isolated environment.
@@ -42,8 +140,12 @@ _init_venv() {
 _ensure_venv() {
     _init_venv
     if [[ ! -d "$GATHM_VENV" ]]; then
-        local python_cmd="python3"
-        command -v python3 &>/dev/null || python_cmd="python"
+        local python_cmd; python_cmd=$(_python_cmd)
+        if [[ -z "$python_cmd" ]]; then
+            warn "Python not found — cannot create venv"
+            GATHM_VENV=""
+            return 1
+        fi
         info "Creating Python venv at $GATHM_VENV..."
         "$python_cmd" -m venv "$GATHM_VENV" || {
             warn "venv creation failed — falling back to system pip"
@@ -137,7 +239,7 @@ install_deps() {
             ;;
         debian|wsl)
             sudo apt-get update -y 2>/dev/null || true
-            sudo apt-get install -y $core python3 python3-pip pv dialog wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
+            sudo apt-get install -y $core python3 python3-pip python3-venv pv dialog wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || pip install pyyaml 2>/dev/null || true
             ;;
         fedora)
@@ -828,6 +930,11 @@ main() {
 
     # Check internet first — determines what we can install
     check_internet
+
+    # Verify Python 3.8+ is present before touching the venv or pip.
+    # This runs before install_deps so a missing Python surfaces immediately
+    # with a clear message rather than a cryptic venv failure later.
+    check_and_install_python "$platform"
 
     setup_termux_storage "$platform"
     install_deps "$platform"
