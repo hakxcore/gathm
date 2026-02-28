@@ -129,6 +129,23 @@ TOOL_ALIASES = {
     "movies": "movie",
 }
 
+# Built-in tools handled directly in Python (not shell scripts in tools/)
+BUILTIN_TOOLS: dict[str, str] = {
+    "browser": "Open URLs, fetch web pages, or take screenshots. "
+               "Usage: browser open <url> | browser fetch <url> | browser screenshot <url>",
+}
+
+# Lazy-import the browser module so a missing optional dep doesn't crash Pilot
+def _run_browser_action(command: str) -> str:
+    try:
+        try:
+            from pilot.browser import run_browser_action
+        except ImportError:
+            from browser import run_browser_action  # type: ignore[no-redef]
+        return run_browser_action(command)
+    except Exception as exc:
+        return f"Browser error: {exc}"
+
 HIGH_RISK_QUERY_PATTERNS = (
     r"\bopen(?:ly)?\s+available\s+(?:ftp|cameras?)\b",
     r"\bpublic(?:ly)?\s+accessible\s+(?:ftp|cameras?)\b",
@@ -175,8 +192,8 @@ def report_to_engineer(error_msg: str, task: str):
         f.write(f"Task: {task} | Error: {error_msg}\n")
 
 def discover_tools():
-    """Scan the tools/ directory and return a list of available tool names."""
-    available = []
+    """Return available tool names: shell tools from tools/ plus built-ins."""
+    available = list(BUILTIN_TOOLS.keys())  # built-ins always present
     if TOOLS_DIR.is_dir():
         for tool_dir in sorted(TOOLS_DIR.iterdir()):
             if tool_dir.is_dir():
@@ -186,15 +203,17 @@ def discover_tools():
     return available
 
 def get_tool_description(tool_name):
-    """Extract description from tool.yaml or script headers."""
-    tool_path = TOOLS_DIR / tool_name / tool_name
+    """Return description for a tool (built-in or shell-based)."""
+    if tool_name in BUILTIN_TOOLS:
+        return BUILTIN_TOOLS[tool_name]
     yaml_path = TOOLS_DIR / tool_name / "tool.yaml"
     if yaml_path.is_file():
         try:
             for line in yaml_path.read_text().splitlines():
                 if line.strip().startswith("description:"):
                     return line.split(":", 1)[1].strip().strip('"').strip("'")
-        except Exception: pass
+        except Exception:
+            pass
     return f"Run the {tool_name} tool"
 
 def _looks_number(value: str) -> bool:
@@ -238,6 +257,11 @@ def run_gathm_tool_raw(command: str) -> str:
     normalized_parts = _normalize_tool_invocation(parts)
     tool_name = normalized_parts[0]
     tool_args = normalized_parts[1:]
+
+    # Dispatch built-in tools before looking in the shell tools directory
+    if tool_name == "browser":
+        return _run_browser_action(" ".join(tool_args))
+
     tool_path = TOOLS_DIR / tool_name / tool_name
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
@@ -393,6 +417,11 @@ Action Input: [tool_name] [arguments]
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
 12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+13. For WEB BROWSING use the 'browser' tool:
+    - browser open <url>        → open a URL in the user's browser
+    - browser fetch <url>       → retrieve and read the text content of a page
+    - browser screenshot <url>  → take a screenshot (desktop platforms only)
+    Works on all platforms including Termux (open/fetch only on Termux).
 
 When you have a final answer, provide it directly without the Action format.
 """

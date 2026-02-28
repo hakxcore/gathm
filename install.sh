@@ -132,11 +132,15 @@ check_and_install_python() {
     fi
 }
 
-# ── Python venv (used for all Python package installs) ──────────────
-# pilot/run.sh already expects a venv at pilot/venv/; we create it here
-# so both the install and the runtime use the same isolated environment.
-GATHM_VENV=""  # set after SCRIPT_DIR is known (see _init_venv)
+# ── Python venvs ─────────────────────────────────────────────────────
+# Pilot gets its own venv at pilot/venv  (langchain, langgraph, etc.)
+# Engineer gets a separate venv at engineer/venv  (autogen, etc.)
+# Keeping them separate avoids dependency conflicts between the two
+# very different AI frameworks.
+GATHM_VENV=""      # pilot venv — set by _init_venv
+ENGINEER_VENV=""   # engineer venv — set by _init_engineer_venv
 
+# ── Pilot venv ──
 _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
@@ -146,17 +150,17 @@ _ensure_venv() {
     if [[ ! -d "$GATHM_VENV" ]]; then
         local python_cmd; python_cmd=$(_python_cmd)
         if [[ -z "$python_cmd" ]]; then
-            warn "Python not found — cannot create venv"
+            warn "Python not found — cannot create pilot venv"
             GATHM_VENV=""
             return 1
         fi
-        info "Creating Python venv at $GATHM_VENV..."
+        info "Creating Pilot Python venv at $GATHM_VENV..."
         "$python_cmd" -m venv "$GATHM_VENV" || {
-            warn "venv creation failed — falling back to system pip"
+            warn "Pilot venv creation failed — falling back to system pip"
             GATHM_VENV=""
             return 1
         }
-        ok "Python venv created"
+        ok "Pilot Python venv created"
     fi
 }
 
@@ -166,6 +170,40 @@ _venv_pip() {
         "$GATHM_VENV/bin/pip" install -q "$@"
     else
         pip3 install -q "$@" 2>/dev/null || pip install -q "$@" 2>/dev/null || return 1
+    fi
+}
+
+# ── Engineer venv ──
+_init_engineer_venv() {
+    ENGINEER_VENV="$SCRIPT_DIR/engineer/venv"
+}
+
+_ensure_engineer_venv() {
+    _init_engineer_venv
+    if [[ ! -d "$ENGINEER_VENV" ]]; then
+        local python_cmd; python_cmd=$(_python_cmd)
+        if [[ -z "$python_cmd" ]]; then
+            warn "Python not found — cannot create engineer venv"
+            ENGINEER_VENV=""
+            return 1
+        fi
+        info "Creating Engineer Python venv at $ENGINEER_VENV..."
+        "$python_cmd" -m venv "$ENGINEER_VENV" || {
+            warn "Engineer venv creation failed — will share pilot venv as fallback"
+            ENGINEER_VENV=""
+            return 1
+        }
+        ok "Engineer Python venv created"
+    fi
+}
+
+_engineer_venv_pip() {
+    _ensure_engineer_venv
+    if [[ -n "$ENGINEER_VENV" && -x "$ENGINEER_VENV/bin/pip" ]]; then
+        "$ENGINEER_VENV/bin/pip" install -q "$@"
+    else
+        # Fall back to the pilot venv or system pip
+        _venv_pip "$@"
     fi
 }
 
@@ -348,8 +386,34 @@ install_ollama() {
             pkg install -y ollama 2>/dev/null || true
             ;;
         windows)
-            warn "On Windows, install Ollama from https://ollama.com/download"
-            return 0
+            # Try package managers first, then fall back to the official installer exe
+            if command -v winget &>/dev/null; then
+                info "Installing Ollama via winget..."
+                winget install --id Ollama.Ollama --accept-source-agreements \
+                    --accept-package-agreements --silent 2>/dev/null || true
+            elif command -v scoop &>/dev/null; then
+                info "Installing Ollama via scoop..."
+                scoop bucket add extras 2>/dev/null || true
+                scoop install extras/ollama 2>/dev/null || true
+            elif command -v choco &>/dev/null; then
+                info "Installing Ollama via Chocolatey..."
+                choco install ollama -y 2>/dev/null || true
+            else
+                # Download and run the official silent installer
+                info "Downloading OllamaSetup.exe (official installer)..."
+                local _tmp_dir; _tmp_dir=$(mktemp -d 2>/dev/null || echo "$TEMP/gathm_$$")
+                mkdir -p "$_tmp_dir" 2>/dev/null || true
+                local _setup_exe="$_tmp_dir/OllamaSetup.exe"
+                if curl -fsSL "https://ollama.com/download/OllamaSetup.exe" \
+                        -o "$_setup_exe" 2>/dev/null; then
+                    # /SILENT runs without UI; no admin rights required
+                    "$_setup_exe" /SILENT 2>/dev/null || true
+                    rm -f "$_setup_exe" 2>/dev/null || true
+                else
+                    warn "Could not download Ollama installer."
+                    warn "Install manually from: https://ollama.com/download/windows"
+                fi
+            fi
             ;;
         *)
             # Linux (all distros), WSL
@@ -564,25 +628,78 @@ _install_llmfit() {
     return 1  # all methods failed
 }
 
-# Pull an ollama model; on failure falls back to gemma3:4b
+# Pull the best ollama model.
+#   $1 (optional) — preferred model tag (e.g. "llama3.1:8b")
+#
+# Logic:
+#   1. If $1 is set and already in `ollama list` → use it immediately, no download.
+#   2. If $1 is set but not yet pulled → attempt download.
+#   3. On download failure (or no $1 given) → scan `ollama list` for anything
+#      already present and pick the best match from a priority list.
+#   4. If nothing is pulled at all → pull gemma3:4b as the minimal default.
 _pull_ollama_model() {
-    local model="$1"
-    local is_fallback="${2:-false}"
+    local requested_model="${1:-}"
 
-    if [[ "$is_fallback" == "true" ]]; then
-        model="gemma3:4b"
-        info "Pulling default model gemma3:4b (this may take a few minutes)..."
-    else
-        info "Pulling model via Ollama: $model (this may take a few minutes)..."
+    if ! command -v ollama &>/dev/null; then
+        warn "ollama not available — skipping model pull"
+        return 1
     fi
 
-    if ollama pull "$model"; then
-        _save_model_config "$model"
-    elif [[ "$is_fallback" == "false" ]]; then
-        warn "Failed to pull '$model' — falling back to gemma3:4b"
-        _pull_ollama_model "gemma3:4b" true
+    # ── 1. Inventory already-pulled models ───────────────────────────
+    local pulled_models
+    pulled_models=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -v '^$' || true)
+
+    # ── 2. Requested model: check list before downloading ─────────────
+    if [[ -n "$requested_model" ]]; then
+        if echo "$pulled_models" | grep -qF "$requested_model"; then
+            ok "Model '$requested_model' already pulled — no download needed"
+            _save_model_config "$requested_model"
+            return 0
+        fi
+        info "Pulling model: $requested_model (this may take a few minutes)..."
+        if ollama pull "$requested_model" 2>/dev/null; then
+            _save_model_config "$requested_model"
+            return 0
+        fi
+        warn "Could not pull '$requested_model' — checking for already-pulled alternatives..."
+    fi
+
+    # ── 3. Pick the best model from what is already on disk ───────────
+    if [[ -n "$pulled_models" ]]; then
+        local preferred=(
+            "llama3.3" "llama3.2" "llama3.1" "llama3"
+            "mistral-nemo" "mistral"
+            "gemma3" "gemma2" "gemma"
+            "phi4" "phi3.5" "phi3"
+            "qwen2.5" "qwen2"
+            "deepseek-r1" "deepseek"
+        )
+        for pref in "${preferred[@]}"; do
+            local match
+            match=$(echo "$pulled_models" | grep -i "^${pref}" | head -1 || true)
+            if [[ -n "$match" ]]; then
+                ok "Using already-pulled model: $match"
+                _save_model_config "$match"
+                return 0
+            fi
+        done
+        # Nothing matched the priority list — just use whatever is there
+        local first_model
+        first_model=$(echo "$pulled_models" | head -1)
+        if [[ -n "$first_model" ]]; then
+            ok "Using already-pulled model: $first_model"
+            _save_model_config "$first_model"
+            return 0
+        fi
+    fi
+
+    # ── 4. Nothing available — pull gemma3:4b as the minimal default ──
+    info "No local models found. Pulling gemma3:4b as default (this may take a few minutes)..."
+    if ollama pull "gemma3:4b" 2>/dev/null; then
+        ok "Default model gemma3:4b ready"
+        _save_model_config "gemma3:4b"
     else
-        warn "Model pull failed — run manually: ollama pull gemma3:4b"
+        warn "Could not pull gemma3:4b — run manually: ollama pull gemma3:4b"
         _save_model_config "gemma3:4b"
     fi
 }
@@ -590,8 +707,8 @@ _pull_ollama_model() {
 # --- Install llmfit and select best model ---
 install_llmfit_and_select_model() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        warn "Skipping llmfit (offline) — using default model: gemma3:4b"
-        _save_model_config "gemma3:4b"
+        warn "Skipping llmfit (offline) — checking local models"
+        _pull_ollama_model ""
         return 0
     fi
 
@@ -673,12 +790,12 @@ except Exception:
             ok "Best model for your hardware: $recommended"
             _pull_ollama_model "$recommended"
         else
-            warn "Could not determine best model — using default: gemma3:4b"
-            _pull_ollama_model "gemma3:4b" true
+            warn "Could not determine best model from llmfit — checking local models"
+            _pull_ollama_model ""
         fi
     else
-        warn "llmfit not available — using default model: gemma3:4b"
-        _pull_ollama_model "gemma3:4b" true
+        warn "llmfit not available — checking local models / falling back to gemma3:4b"
+        _pull_ollama_model ""
     fi
 }
 
@@ -744,8 +861,8 @@ install_engineer_deps() {
         return 0
     fi
 
-    info "Installing engineer AI dependencies (autogen-agentchat, autogen-ext)..."
-    _venv_pip -r "$req_file" && \
+    info "Installing engineer AI dependencies into engineer/venv (autogen-agentchat, autogen-ext)..."
+    _engineer_venv_pip -r "$req_file" && \
         ok "Engineer dependencies installed" || \
         warn "Engineer dependency install failed — run manually: pip install -r engineer/requirements.txt"
 }
@@ -766,6 +883,10 @@ install_pilot_deps() {
 }
 
 # --- Create command shortcuts ---
+# gathm and gathm-agent: symlinked directly — simpler, always in sync with
+#   the source, and uninstall just removes the links.
+# gathm-api: needs a thin wrapper to select the right Python interpreter
+#   (venv vs system) since server.py is not a standalone executable.
 setup_shortcuts() {
     local platform="$1"
     info "Creating command shortcuts..."
@@ -773,27 +894,18 @@ setup_shortcuts() {
     local bin_dir="$HOME/.local/bin"
     mkdir -p "$bin_dir"
 
-    # Determine shebang
+    # gathm — symlink to the main executable
+    chmod +x "$SCRIPT_DIR/gathm" 2>/dev/null || true
+    ln -sf "$SCRIPT_DIR/gathm" "$bin_dir/gathm"
+
+    # gathm-agent — symlink to the orchestrator
+    chmod +x "$SCRIPT_DIR/agent/orchestrator.sh" 2>/dev/null || true
+    ln -sf "$SCRIPT_DIR/agent/orchestrator.sh" "$bin_dir/gathm-agent"
+
+    # gathm-api — thin wrapper: picks venv python when available
     local shebang="#!/usr/bin/env bash"
-    if [[ "$platform" == "termux" ]]; then
-        shebang="#!/data/data/com.termux/files/usr/bin/bash"
-    fi
+    [[ "$platform" == "termux" ]] && shebang="#!/data/data/com.termux/files/usr/bin/bash"
 
-    # gathm
-    cat > "$bin_dir/gathm" << SCRIPT
-$shebang
-exec "$SCRIPT_DIR/gathm" "\$@"
-SCRIPT
-    chmod +x "$bin_dir/gathm"
-
-    # compatibility alias: gathm-agent
-    cat > "$bin_dir/gathm-agent" << SCRIPT
-$shebang
-exec bash "$SCRIPT_DIR/agent/orchestrator.sh" "\$@"
-SCRIPT
-    chmod +x "$bin_dir/gathm-agent"
-
-    # gathm-api — prefer venv python so deps are available
     local api_python_cmd
     if [[ -x "$GATHM_VENV/bin/python3" ]]; then
         api_python_cmd="$GATHM_VENV/bin/python3"
@@ -808,7 +920,7 @@ exec $api_python_cmd "$SCRIPT_DIR/api/server.py" "\$@"
 SCRIPT
     chmod +x "$bin_dir/gathm-api"
 
-    # Add to PATH if needed
+    # Add ~/.local/bin to PATH if not already there
     local rc_file=""
     if [[ "$platform" == "termux" ]]; then
         rc_file="$HOME/.bashrc"
@@ -827,7 +939,9 @@ SCRIPT
         info "Added ~/.local/bin to PATH in $rc_file"
     fi
 
-    ok "Commands: gathm, gathm-api"
+    ok "Shortcuts created: gathm → $SCRIPT_DIR/gathm"
+    ok "                   gathm-agent → $SCRIPT_DIR/agent/orchestrator.sh"
+    ok "                   gathm-api (wrapper, python: $api_python_cmd)"
 }
 
 # --- Start the GUI API server in the background ---
@@ -1075,14 +1189,18 @@ main() {
     setup_termux_storage "$platform"
     install_deps "$platform"
     setup_files
+
+    # Install Ollama + pull the best available model first.
+    # Pilot needs a running LLM to function, so we set up the AI runtime
+    # before installing Python deps — this also means the model is ready
+    # by the time Pilot starts for the first time.
+    # If Ollama cannot be installed, falls back to Google Gemini free tier.
+    install_ollama "$platform"
+    install_llmfit_and_select_model
+
     install_engineer_deps
     install_pilot_deps
     setup_shortcuts "$platform"
-
-    # Install Ollama + best-fit model (requires internet)
-    # If Ollama cannot be installed, falls back to Google Gemini free tier
-    install_ollama "$platform"
-    install_llmfit_and_select_model
 
     reload_shell_config
     verify || true   # non-zero return just means warnings; never abort setup
