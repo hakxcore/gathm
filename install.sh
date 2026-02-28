@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Gathm Enterprise - Universal Installer
-#  Works on: Linux (all distros), macOS, Termux, WSL, Git Bash
+#  Works on: Linux (all distros), macOS, WSL, Git Bash
 #
 #  Usage:
 #    bash install.sh              # Auto-detect platform & install
@@ -650,6 +650,13 @@ main() {
     platform=$(detect_platform)
     # Expose platform globally so sub-functions (e.g. Gemini fallback) can use it
     _GATHM_PLATFORM="$platform"
+
+    if [[ "$platform" == "termux" ]]; then
+        echo -e "${BOLD}${RED}[!] Termux is not supported yet.${RESET}"
+        echo "    The AI Engineer component does not run on Termux at this time."
+        echo "    Please use a Linux machine, macOS, or WSL."
+        exit 1
+    fi
 
     # Check internet first — determines what we can install
     check_internet
