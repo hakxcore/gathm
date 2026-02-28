@@ -99,7 +99,7 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            pkg install -y $core python pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
+            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
@@ -498,27 +498,35 @@ install_engineer_deps() {
         warn "Engineer dependency install failed — run manually: $pip_cmd install -r engineer/requirements.txt"
 }
 
-# --- Install Pilot Python requirements ---
+# --- Install Pilot Python requirements inside a venv ---
 install_pilot_deps() {
     local req_file="$SCRIPT_DIR/pilot/requirements.txt"
     if [[ ! -f "$req_file" ]]; then
         return 0
     fi
 
-    local pip_cmd=""
-    command -v pip3 &>/dev/null && pip_cmd="pip3"
-    command -v pip &>/dev/null && [[ -z "$pip_cmd" ]] && pip_cmd="pip"
+    local python_cmd=""
+    command -v python3 &>/dev/null && python_cmd="python3"
+    command -v python  &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
 
-    if [[ -z "$pip_cmd" ]]; then
-        warn "pip not found — skipping Pilot dependencies"
+    if [[ -z "$python_cmd" ]]; then
+        warn "Python not found — skipping Pilot dependencies"
+        return 0
+    fi
+
+    local venv_dir="$SCRIPT_DIR/pilot/.venv"
+    info "Creating Pilot virtual environment..."
+    if ! "$python_cmd" -m venv "$venv_dir"; then
+        warn "venv creation failed — skipping Pilot dependencies"
         return 0
     fi
 
     info "Installing Pilot AI dependencies..."
-    if "$pip_cmd" install -q -r "$req_file"; then
+    if "$venv_dir/bin/pip" install -q --prefer-binary -r "$req_file"; then
         ok "Pilot dependencies installed"
+        _PILOT_PYTHON="$venv_dir/bin/python"
     else
-        warn "Pilot dependency install failed — run manually: $pip_cmd install -r pilot/requirements.txt"
+        warn "Pilot dependency install failed — run manually: $venv_dir/bin/pip install -r pilot/requirements.txt"
     fi
 }
 
@@ -648,10 +656,14 @@ launch_post_install() {
 
     echo ""
 
-    # 3. Determine how to launch Pilot
-    local python_cmd=""
-    command -v python3 &>/dev/null && python_cmd="python3"
-    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+    # 3. Determine how to launch Pilot (prefer venv set by install_pilot_deps)
+    local python_cmd="${_PILOT_PYTHON:-}"
+    if [[ -z "$python_cmd" ]]; then
+        local venv_python="$SCRIPT_DIR/pilot/.venv/bin/python"
+        [[ -x "$venv_python" ]] && python_cmd="$venv_python"
+    fi
+    [[ -z "$python_cmd" ]] && command -v python3 &>/dev/null && python_cmd="python3"
+    [[ -z "$python_cmd" ]] && command -v python  &>/dev/null && python_cmd="python"
 
     local pilot_main="$SCRIPT_DIR/pilot/main.py"
 
