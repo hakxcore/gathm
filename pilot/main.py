@@ -111,12 +111,16 @@ try:
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
+        start_waiting, stop_waiting, print_user_message, get_user_input,
+        console,
     )
 except ImportError:
     from tui import (  # type: ignore[no-redef]
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
+        start_waiting, stop_waiting, print_user_message, get_user_input,
+        console,
     )
 
 
@@ -152,8 +156,8 @@ def print_tricolor_banner():
     plat = _detect_platform()
     model_label = f"{OLLAMA_MODEL} [{LLM_BACKEND.upper()}]"
     connectivity = check_connectivity()
-    os.system("clear" if os.name != "nt" else "cls")
-    print(render_welcome(model_label, tool_count, plat, connectivity=connectivity))
+    # render_welcome handles os.system("clear") internally
+    render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
 
 def report_to_engineer(error_msg: str, task: str):
@@ -422,13 +426,13 @@ def _handle_slash_command(cmd: str) -> bool:
     cmd_lower = cmd.strip().lower()
 
     if cmd_lower in ("/help", "?"):
-        print(render_help())
+        render_help()
         return True
 
     if cmd_lower == "/tools":
         tools = discover_tools()
         tool_info = [(t, get_tool_description(t)) for t in tools]
-        print(render_tools_list(tool_info))
+        render_tools_list(tool_info)
         return True
 
     if cmd_lower == "/clear":
@@ -436,8 +440,8 @@ def _handle_slash_command(cmd: str) -> bool:
         return True
 
     if cmd_lower == "/model":
-        print(f"\n  {SAFFRON}Backend:{RESET} {LLM_BACKEND.upper()}")
-        print(f"  {SAFFRON}Model:{RESET}   {OLLAMA_MODEL}")
+        console.print(f"\n  [color(208)]Backend:[/color(208)] {LLM_BACKEND.upper()}")
+        console.print(f"  [color(208)]Model:[/color(208)]   {OLLAMA_MODEL}")
         return True
 
     if cmd_lower in ("/quit", "/exit"):
@@ -451,7 +455,8 @@ def main():
 
     # Graceful shutdown on SIGTERM (e.g. kill, docker stop)
     def _handle_sigterm(_sig, _frame):
-        print(render_goodbye())
+        stop_waiting()
+        render_goodbye()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -470,14 +475,13 @@ def main():
 
     while True:
         try:
-            print_prompt()
-            user_input = input().strip()
+            user_input = get_user_input()
             if not user_input:
                 continue
 
             # ── Exit ──
             if user_input.lower() in ("exit", "quit", "/quit", "/exit"):
-                print(render_goodbye())
+                render_goodbye()
                 break
 
             # ── Slash commands ──
@@ -485,11 +489,14 @@ def main():
                 _handle_slash_command(user_input)
                 continue
 
+            # ── Show user message in the chat log ──
+            print_user_message(user_input)
+
             # ── Safety check ──
             risk_category = classify_high_risk_query(user_input)
             if risk_category:
                 refusal = safety_refusal_message()
-                print(render_response(refusal))
+                render_response(refusal)
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=refusal),
@@ -497,25 +504,35 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
                 continue
 
-            # ── AI reasoning loop ──
+            # ── AI reasoning loop (with shimmer animation) ──
             state = {"messages": conversation_history + [HumanMessage(content=user_input)]}
             final_agent_reply: Optional[str] = None
+            _stream_error = False
+            start_waiting()
             try:
                 for output in app.stream(state, config={"recursion_limit": 25}):
                     for key, value in output.items():
                         if key == "agent" and value.get("next_step") == "end":
                             final_agent_reply = value["messages"][-1].content  # type: ignore[index]
-                            print(render_response(final_agent_reply))
             except KeyboardInterrupt:
                 # Ctrl+C during AI processing — cancel the current query, not the app
-                print(f"\n  {SAFFRON}[*]{RESET} Query cancelled.")
+                stop_waiting()
+                console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
                 report_to_engineer(str(e), user_input)
-                print(render_error(str(e)))
+                _stream_error = True
+                stop_waiting()
+                render_error(str(e))
                 final_agent_reply = "I encountered an error. The Engineer is on it."
+            finally:
+                stop_waiting()
 
             if final_agent_reply:
+                # Only render the response panel for successful AI replies
+                # (error case already displayed render_error above)
+                if not _stream_error:
+                    render_response(final_agent_reply)
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=final_agent_reply),
@@ -523,17 +540,17 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
 
         except (EOFError, KeyboardInterrupt):
-            print(render_goodbye())
+            render_goodbye()
             break
         except Exception as e:
-            print(render_error(str(e)))
+            render_error(str(e))
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(render_goodbye())
+        render_goodbye()
         sys.exit(0)
     except BrokenPipeError:
         sys.exit(0)
