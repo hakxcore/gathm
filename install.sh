@@ -1015,20 +1015,20 @@ uninstall() {
 
 # --- Reload shell config (best effort) ---
 reload_shell_config() {
-    # Disable errexit so any failure in a sourced file is silently ignored.
-    # We also save/restore the flag in case the sourced file modifies it.
-    local _had_errexit=0
-    [[ $- == *e* ]] && _had_errexit=1
-    set +e
-
-    # Only source bash-compatible files in a bash install script.
-    # ~/.zshrc uses zsh builtins (compdef, autoload, etc.) that do not exist
-    # in bash; sourcing it here achieves nothing useful and can cause failures.
-    source "$HOME/.bashrc"       2>/dev/null
-    source "$HOME/.bash_profile" 2>/dev/null
-    source "$HOME/.profile"      2>/dev/null
-
-    [[ $_had_errexit -eq 1 ]] && set -e
+    # DO NOT source ~/.bashrc, ~/.bash_profile, or any rc file here.
+    #
+    # On macOS it is common for ~/.bashrc to contain 'exec zsh', which
+    # replaces the running bash process with zsh.  When invoked via
+    # 'source', exec replaces the INSTALL SCRIPT'S bash process, which
+    # then exits cleanly (exit 0) — silently terminating the install
+    # without firing the ERR trap or printing any error.
+    #
+    # PATH was already prepended with ~/.local/bin at the top of this
+    # script (export PATH="$LOCAL_BIN:$PATH"), so the installed commands
+    # are already accessible for the rest of the install.  The user's
+    # interactive shell will see the updated PATH the next time they
+    # open a terminal or run 'source ~/.zshrc'.
+    export PATH="$LOCAL_BIN:$PATH"
     return 0
 }
 
