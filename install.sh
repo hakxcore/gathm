@@ -186,6 +186,7 @@ install_ollama() {
 
     if command -v ollama &>/dev/null; then
         ok "Ollama already installed ($(ollama --version 2>&1 | head -1))"
+        start_ollama_serve
         return 0
     fi
 
@@ -215,6 +216,7 @@ install_ollama() {
 
     if command -v ollama &>/dev/null; then
         ok "Ollama installed"
+        start_ollama_serve
     else
         warn "Ollama installation failed — install manually from https://ollama.com"
     fi
@@ -406,9 +408,6 @@ except Exception:
         ollama pull "gemma3:4b" 2>/dev/null || true
         _save_model_config "gemma3:4b"
     fi
-
-    # Start serving immediately after the model is ready
-    start_ollama_serve
 }
 
 # Save selected model to config
