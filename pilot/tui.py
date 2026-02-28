@@ -38,6 +38,7 @@ try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
     _PT = True
 except ImportError:
     pass
@@ -274,8 +275,11 @@ def get_user_input() -> str:
     """Read user input (prompt_toolkit with history, or plain input fallback)."""
     session = _get_pt_session()
     if session is not None:
+        # prompt_toolkit does not interpret raw ANSI escape sequences in prompt
+        # strings — it displays them literally as ^[[...m.  Wrapping with ANSI()
+        # tells it to parse and render the escape codes as intended colors/styles.
         prompt_str = f"\n{_A_ACCENT}🐚{_A_RESET} {_A_BOLD}›{_A_RESET} "
-        return session.prompt(prompt_str).strip()   # type: ignore[union-attr]
+        return session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
     print_prompt()
     return input().strip()
 
