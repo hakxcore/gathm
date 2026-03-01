@@ -145,6 +145,52 @@ _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
 
+# Create pure-Python stubs for Rust-based packages that can't compile on
+# Android/aarch64 (Termux).  Each stub satisfies pip's dependency resolver
+# and provides the stdlib fallback that the actual package would use anyway.
+#
+# Currently stubbed:
+#   uuid-utils   — langchain-core uses it for faster UUID generation but wraps
+#                  the import in try/except and falls back to stdlib uuid.uuid4.
+_create_termux_native_stubs() {
+    local venv="$1"
+    local python_cmd="$venv/bin/python3"
+    [[ -x "$python_cmd" ]] || return 0
+
+    local site_packages
+    site_packages=$("$python_cmd" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 0
+    [[ -n "$site_packages" ]] || return 0
+
+    # uuid-utils stub --------------------------------------------------------
+    local pkg_dir="$site_packages/uuid_utils"
+    local dist_dir="$site_packages/uuid_utils-0.14.1.dist-info"
+    if [[ ! -d "$pkg_dir" ]]; then
+        mkdir -p "$pkg_dir" "$dist_dir"
+        cat > "$pkg_dir/__init__.py" << 'PYEOF'
+# Termux stub: uuid-utils Rust extension cannot compile on Android/aarch64.
+# Provides the same public interface using the Python standard library.
+from uuid import UUID, uuid1, uuid3, uuid4, uuid5
+PYEOF
+        cat > "$dist_dir/METADATA" << 'META'
+Metadata-Version: 2.1
+Name: uuid-utils
+Version: 0.14.1
+Summary: Termux pure-Python stub
+META
+        printf 'Wheel-Version: 1.0\nGenerator: termux-stub\nRoot-Is-Purelib: true\nTag: py3-none-any\n' \
+            > "$dist_dir/WHEEL"
+        printf '%s\n' \
+            "uuid_utils/__init__.py,," \
+            "uuid_utils-0.14.1.dist-info/METADATA,," \
+            "uuid_utils-0.14.1.dist-info/WHEEL,," \
+            "uuid_utils-0.14.1.dist-info/INSTALLER,," \
+            "uuid_utils-0.14.1.dist-info/RECORD,," \
+            > "$dist_dir/RECORD"
+        echo "stub" > "$dist_dir/INSTALLER"
+        ok "uuid-utils stub created (pure Python, Termux-compatible)"
+    fi
+}
+
 _ensure_venv() {
     _init_venv
     if [[ ! -d "$GATHM_VENV" ]]; then
@@ -886,6 +932,11 @@ install_pilot_deps() {
     info "Installing Pilot AI dependencies (this may take a few minutes)..."
 
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        # Pre-populate the venv with stubs for packages that require Rust/native
+        # compilation (patchelf/ninja/maturin) which can't build on Android/aarch64.
+        _ensure_venv
+        _create_termux_native_stubs "$GATHM_VENV"
+
         # playwright has no PyPI wheel for Android/aarch64; skip it and
         # use the pkg-installed Chromium instead.
         local tmp_req
