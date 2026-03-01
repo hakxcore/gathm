@@ -155,7 +155,12 @@ _ensure_venv() {
             return 1
         fi
         info "Creating Pilot Python venv at $GATHM_VENV..."
-        "$python_cmd" -m venv "$GATHM_VENV" || {
+        # On Termux, use --system-site-packages so the venv inherits
+        # pkg-installed native packages (numpy, etc.) that can't be
+        # compiled from source on Android/aarch64.
+        local venv_opts=""
+        [[ "${_GATHM_PLATFORM:-}" == "termux" ]] && venv_opts="--system-site-packages"
+        "$python_cmd" -m venv $venv_opts "$GATHM_VENV" || {
             warn "Pilot venv creation failed — falling back to system pip"
             GATHM_VENV=""
             return 1
@@ -280,6 +285,10 @@ install_deps() {
         termux)
             pkg update -y 2>/dev/null || true
             pkg install -y $core python pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
+            # numpy has no manylinux wheel for Android/aarch64 and can't compile from
+            # source (patchelf/ninja fail). Install the pre-built Termux package so pip
+            # sees it as already satisfied and skips the source build.
+            pkg install -y python-numpy 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
