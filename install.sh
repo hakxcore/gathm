@@ -218,6 +218,51 @@ PYEOF
         _write_stub_distinfo "$site_packages" "ormsgpack" "1.12.2" "ormsgpack"
         ok "ormsgpack stub created (pure Python, Termux-compatible)"
     fi
+
+    # orjson stub ------------------------------------------------------------
+    # langgraph-sdk requires orjson for JSON serialization.
+    # stdlib json provides the same interface; orjson.dumps returns bytes so
+    # we encode accordingly.
+    if [[ ! -d "$site_packages/orjson" ]]; then
+        mkdir -p "$site_packages/orjson"
+        cat > "$site_packages/orjson/__init__.py" << 'PYEOF'
+# Termux stub: orjson Rust extension cannot compile on Android/aarch64.
+# Wraps stdlib json with the same bytes-oriented API.
+import json as _json
+
+OPT_NON_STR_KEYS    = 1
+OPT_INDENT_2        = 2
+OPT_SORT_KEYS       = 4
+OPT_SERIALIZE_UUID  = 8
+OPT_SERIALIZE_NUMPY = 16
+OPT_STRICT_INTEGER  = 32
+OPT_NAIVE_DATETIME  = 64
+OPT_UTC_Z           = 128
+OPT_PASSTHROUGH_DATETIME   = 256
+OPT_PASSTHROUGH_SUBCLASS   = 512
+OPT_OMIT_MICROSECONDS      = 1024
+OPT_SERIALIZE_DATACLASS    = 2048
+
+class JSONDecodeError(ValueError):
+    pass
+
+def dumps(obj, default=None, option=None) -> bytes:
+    indent = 2 if (option and option & OPT_INDENT_2) else None
+    sort_keys = bool(option and option & OPT_SORT_KEYS)
+    return _json.dumps(obj, default=default, indent=indent,
+                       sort_keys=sort_keys).encode("utf-8")
+
+def loads(data) -> object:
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        data = data.decode("utf-8")
+    try:
+        return _json.loads(data)
+    except _json.JSONDecodeError as exc:
+        raise JSONDecodeError(str(exc)) from exc
+PYEOF
+        _write_stub_distinfo "$site_packages" "orjson" "3.11.7" "orjson"
+        ok "orjson stub created (pure Python, Termux-compatible)"
+    fi
 }
 
 _ensure_venv() {
