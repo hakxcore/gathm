@@ -161,33 +161,62 @@ _create_termux_native_stubs() {
     site_packages=$("$python_cmd" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null) || return 0
     [[ -n "$site_packages" ]] || return 0
 
+    # Helper: write a minimal dist-info directory so pip sees the package as installed.
+    # Usage: _write_stub_distinfo <site-packages> <name> <version> <module>
+    _write_stub_distinfo() {
+        local sp="$1" name="$2" ver="$3" mod="$4"
+        local d="$sp/${name//-/_}-${ver}.dist-info"
+        mkdir -p "$d"
+        printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\nSummary: Termux pure-Python stub\n' \
+            "$name" "$ver" > "$d/METADATA"
+        printf 'Wheel-Version: 1.0\nGenerator: termux-stub\nRoot-Is-Purelib: true\nTag: py3-none-any\n' \
+            > "$d/WHEEL"
+        echo "stub" > "$d/INSTALLER"
+        printf '%s/__init__.py,,\n%s-stub/METADATA,,\n%s-stub/WHEEL,,\n%s-stub/INSTALLER,,\n%s-stub/RECORD,,\n' \
+            "$mod" "$name" "$name" "$name" "$name" > "$d/RECORD"
+    }
+
     # uuid-utils stub --------------------------------------------------------
-    local pkg_dir="$site_packages/uuid_utils"
-    local dist_dir="$site_packages/uuid_utils-0.14.1.dist-info"
-    if [[ ! -d "$pkg_dir" ]]; then
-        mkdir -p "$pkg_dir" "$dist_dir"
-        cat > "$pkg_dir/__init__.py" << 'PYEOF'
+    # langchain-core uses it for faster UUID generation; falls back to stdlib
+    # uuid on ImportError, so a pure-Python stub is fully compatible.
+    if [[ ! -d "$site_packages/uuid_utils" ]]; then
+        mkdir -p "$site_packages/uuid_utils"
+        cat > "$site_packages/uuid_utils/__init__.py" << 'PYEOF'
 # Termux stub: uuid-utils Rust extension cannot compile on Android/aarch64.
-# Provides the same public interface using the Python standard library.
 from uuid import UUID, uuid1, uuid3, uuid4, uuid5
 PYEOF
-        cat > "$dist_dir/METADATA" << 'META'
-Metadata-Version: 2.1
-Name: uuid-utils
-Version: 0.14.1
-Summary: Termux pure-Python stub
-META
-        printf 'Wheel-Version: 1.0\nGenerator: termux-stub\nRoot-Is-Purelib: true\nTag: py3-none-any\n' \
-            > "$dist_dir/WHEEL"
-        printf '%s\n' \
-            "uuid_utils/__init__.py,," \
-            "uuid_utils-0.14.1.dist-info/METADATA,," \
-            "uuid_utils-0.14.1.dist-info/WHEEL,," \
-            "uuid_utils-0.14.1.dist-info/INSTALLER,," \
-            "uuid_utils-0.14.1.dist-info/RECORD,," \
-            > "$dist_dir/RECORD"
-        echo "stub" > "$dist_dir/INSTALLER"
+        _write_stub_distinfo "$site_packages" "uuid-utils" "0.14.1" "uuid_utils"
         ok "uuid-utils stub created (pure Python, Termux-compatible)"
+    fi
+
+    # ormsgpack stub ---------------------------------------------------------
+    # langgraph-checkpoint uses ormsgpack for checkpoint serialization.
+    # pickle provides consistent serialization within a session.
+    if [[ ! -d "$site_packages/ormsgpack" ]]; then
+        mkdir -p "$site_packages/ormsgpack"
+        cat > "$site_packages/ormsgpack/__init__.py" << 'PYEOF'
+# Termux stub: ormsgpack Rust extension cannot compile on Android/aarch64.
+# Uses pickle for in-session checkpoint serialization.
+import pickle as _pickle
+
+OPT_NON_STR_KEYS      = 1
+OPT_SERIALIZE_UUID     = 2
+OPT_OMIT_MICROSECONDS  = 4
+OPT_NAIVE_DATETIME     = 8
+OPT_UTC_Z              = 16
+OPT_PASSTHROUGH_DATETIME   = 32
+OPT_PASSTHROUGH_SUBCLASS   = 64
+OPT_INDENT_2           = 128
+OPT_SORT_KEYS          = 256
+
+def packb(obj, *, option=None, default=None):
+    return _pickle.dumps(obj, protocol=_pickle.HIGHEST_PROTOCOL)
+
+def unpackb(data, *, option=None):
+    return _pickle.loads(data)
+PYEOF
+        _write_stub_distinfo "$site_packages" "ormsgpack" "1.12.2" "ormsgpack"
+        ok "ormsgpack stub created (pure Python, Termux-compatible)"
     fi
 }
 
