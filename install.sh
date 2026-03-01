@@ -263,6 +263,63 @@ PYEOF
         _write_stub_distinfo "$site_packages" "orjson" "3.11.7" "orjson"
         ok "orjson stub created (pure Python, Termux-compatible)"
     fi
+
+    # pydantic-core: force manylinux_2_17_aarch64 wheel -------------------
+    # pydantic v2 cannot function without pydantic-core (pure Rust, no Python
+    # fallback).  Termux Python's SOABI is "cpython-312" (no arch suffix), so
+    # pip never selects the pre-built aarch64 wheels and falls through to a
+    # maturin source build which always fails.
+    #
+    # Fix: (1) install pydantic (pure Python) with --no-deps to read its
+    # exact pydantic-core version requirement; (2) download the manylinux
+    # aarch64 wheel for that exact version; (3) extract the wheel and rename
+    # *.cpython-312-aarch64-linux-gnu.so → *.cpython-312.so so that Termux
+    # Python (SOABI=cpython-312) can dlopen it.
+    if ! "$python_cmd" -c "import pydantic_core" 2>/dev/null; then
+        local _pc_tmp; _pc_tmp=$(mktemp -d)
+
+        # Step 1: install pydantic shell (pure Python, no deps) to learn
+        #         the required pydantic-core version from its metadata.
+        "$venv/bin/pip" install "pydantic<3.0.0,>=2.7.4" --no-deps -q 2>/dev/null || true
+        local _pc_ver
+        _pc_ver=$("$python_cmd" -c "
+from importlib.metadata import requires
+for r in (requires('pydantic') or []):
+    if 'pydantic-core' in r:
+        import re; m = re.search(r'pydantic-core==([\d.]+)', r)
+        if m: print(m.group(1)); break
+" 2>/dev/null)
+
+        if [[ -n "$_pc_ver" ]]; then
+            # Step 2: download the manylinux aarch64 wheel for that exact version
+            if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
+                    --platform manylinux_2_17_aarch64 \
+                    --python-version 312 --implementation cp --abi cp312 \
+                    --only-binary :all: --no-deps -q \
+                    -d "$_pc_tmp" 2>/dev/null; then
+                local _whl; _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
+                if [[ -n "$_whl" ]]; then
+                    # Step 3: extract and rename SOABI suffix
+                    local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
+                    python3 -c "
+import zipfile, sys
+with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
+" "$_whl" "$_ext" 2>/dev/null
+                    # cpython-312-aarch64-linux-gnu.so → cpython-312.so
+                    while IFS= read -r f; do
+                        mv "$f" "${f/-aarch64-linux-gnu/}"
+                    done < <(find "$_ext" -name "*-aarch64-linux-gnu.so" 2>/dev/null)
+                    cp -r "$_ext/"* "$site_packages/"
+                    ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux)"
+                fi
+            else
+                warn "pydantic-core wheel download failed — pip install will likely fail"
+            fi
+        else
+            warn "Could not determine pydantic-core version from pydantic metadata"
+        fi
+        rm -rf "$_pc_tmp"
+    fi
 }
 
 _ensure_venv() {
