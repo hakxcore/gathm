@@ -291,27 +291,37 @@ for r in (requires('pydantic') or []):
 " 2>/dev/null)
 
         if [[ -n "$_pc_ver" ]]; then
-            # Step 2: download the manylinux aarch64 wheel for that exact version
-            if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
-                    --platform manylinux_2_17_aarch64 \
-                    --python-version 312 --implementation cp --abi cp312 \
-                    --only-binary :all: --no-deps -q \
-                    -d "$_pc_tmp" 2>/dev/null; then
-                local _whl; _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
-                if [[ -n "$_whl" ]]; then
-                    # Step 3: extract and rename SOABI suffix
-                    local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
-                    python3 -c "
+            # Step 2: download an aarch64 wheel.
+            # Prefer musllinux: Rust compiles that target with a fully static
+            # runtime (no external libgcc_s.so.1 needed), making it work on
+            # Termux/Android's Bionic libc without additional packages.
+            # Fall back to manylinux if musl isn't available (libgcc pkg covers it).
+            local _whl=""
+            for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
+                if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
+                        --platform "$_plat" \
+                        --python-version 312 --implementation cp --abi cp312 \
+                        --only-binary :all: --no-deps -q \
+                        -d "$_pc_tmp" 2>/dev/null; then
+                    _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
+                    [[ -n "$_whl" ]] && break
+                fi
+            done
+            if [[ -n "$_whl" ]]; then
+                # Step 3: extract and rename SOABI suffix
+                # *.cpython-312-aarch64-linux-{gnu,musl}.so → *.cpython-312.so
+                local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
+                python3 -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
 " "$_whl" "$_ext" 2>/dev/null
-                    # cpython-312-aarch64-linux-gnu.so → cpython-312.so
-                    while IFS= read -r f; do
-                        mv "$f" "${f/-aarch64-linux-gnu/}"
-                    done < <(find "$_ext" -name "*-aarch64-linux-gnu.so" 2>/dev/null)
-                    cp -r "$_ext/"* "$site_packages/"
-                    ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux)"
-                fi
+                while IFS= read -r f; do
+                    # Strip -aarch64-linux-{gnu,musl} from the basename
+                    local nf; nf=$(echo "$f" | sed 's/cpython-312-aarch64-linux-[^.]*\.so/cpython-312.so/')
+                    [[ "$f" != "$nf" ]] && mv "$f" "$nf"
+                done < <(find "$_ext" -name "*.so" 2>/dev/null)
+                cp -r "$_ext/"* "$site_packages/"
+                ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux)"
             else
                 warn "pydantic-core wheel download failed — pip install will likely fail"
             fi
@@ -466,6 +476,10 @@ install_deps() {
             # source (patchelf/ninja fail). Install the pre-built Termux package so pip
             # sees it as already satisfied and skips the source build.
             pkg install -y python-numpy 2>/dev/null || true
+            # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
+            # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
+            # this ensures manylinux fallback wheels also load correctly.
+            pkg install -y libgcc 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
