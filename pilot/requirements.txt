@@ -2,5 +2,10 @@ langchain
 langchain-community
 langchain-core
 langchain-ollama
-langchain-google-genai
+langgraph
 python-dotenv
+rich>=13.0
+prompt_toolkit>=3.0
+requests
+beautifulsoup4
+playwright

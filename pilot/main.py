@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Annotated, Any, List, Optional, TypedDict
 
@@ -111,18 +112,39 @@ try:
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
+        start_waiting, stop_waiting, print_user_message, get_user_input,
+        console,
     )
 except ImportError:
     from tui import (  # type: ignore[no-redef]
         render_welcome, print_prompt, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
+        start_waiting, stop_waiting, print_user_message, get_user_input,
+        console,
     )
 
 
 TOOL_ALIASES = {
     "movies": "movie",
 }
+
+# Built-in tools handled directly in Python (not shell scripts in tools/)
+BUILTIN_TOOLS: dict[str, str] = {
+    "browser": "Open URLs, fetch web pages, or take screenshots. "
+               "Usage: browser open <url> | browser fetch <url> | browser screenshot <url>",
+}
+
+# Lazy-import the browser module so a missing optional dep doesn't crash Pilot
+def _run_browser_action(command: str) -> str:
+    try:
+        try:
+            from pilot.browser import run_browser_action
+        except ImportError:
+            from browser import run_browser_action  # type: ignore[no-redef]
+        return run_browser_action(command)
+    except Exception as exc:
+        return f"Browser error: {exc}"
 
 HIGH_RISK_QUERY_PATTERNS = (
     r"\bopen(?:ly)?\s+available\s+(?:ftp|cameras?)\b",
@@ -152,8 +174,8 @@ def print_tricolor_banner():
     plat = _detect_platform()
     model_label = f"{OLLAMA_MODEL} [{LLM_BACKEND.upper()}]"
     connectivity = check_connectivity()
-    os.system("clear" if os.name != "nt" else "cls")
-    print(render_welcome(model_label, tool_count, plat, connectivity=connectivity))
+    # render_welcome handles os.system("clear") internally
+    render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
 
 def report_to_engineer(error_msg: str, task: str):
@@ -170,8 +192,8 @@ def report_to_engineer(error_msg: str, task: str):
         f.write(f"Task: {task} | Error: {error_msg}\n")
 
 def discover_tools():
-    """Scan the tools/ directory and return a list of available tool names."""
-    available = []
+    """Return available tool names: shell tools from tools/ plus built-ins."""
+    available = list(BUILTIN_TOOLS.keys())  # built-ins always present
     if TOOLS_DIR.is_dir():
         for tool_dir in sorted(TOOLS_DIR.iterdir()):
             if tool_dir.is_dir():
@@ -181,15 +203,17 @@ def discover_tools():
     return available
 
 def get_tool_description(tool_name):
-    """Extract description from tool.yaml or script headers."""
-    tool_path = TOOLS_DIR / tool_name / tool_name
+    """Return description for a tool (built-in or shell-based)."""
+    if tool_name in BUILTIN_TOOLS:
+        return BUILTIN_TOOLS[tool_name]
     yaml_path = TOOLS_DIR / tool_name / "tool.yaml"
     if yaml_path.is_file():
         try:
             for line in yaml_path.read_text().splitlines():
                 if line.strip().startswith("description:"):
                     return line.split(":", 1)[1].strip().strip('"').strip("'")
-        except Exception: pass
+        except Exception:
+            pass
     return f"Run the {tool_name} tool"
 
 def _looks_number(value: str) -> bool:
@@ -233,6 +257,11 @@ def run_gathm_tool_raw(command: str) -> str:
     normalized_parts = _normalize_tool_invocation(parts)
     tool_name = normalized_parts[0]
     tool_args = normalized_parts[1:]
+
+    # Dispatch built-in tools before looking in the shell tools directory
+    if tool_name == "browser":
+        return _run_browser_action(" ".join(tool_args))
+
     tool_path = TOOLS_DIR / tool_name / tool_name
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
@@ -270,14 +299,26 @@ def extract_tool_input(content: str, available_tools: Optional[set] = None) -> O
     if not isinstance(content, str):
         return None
 
+    known_tools = available_tools or set(discover_tools())
+
     action_input_match = re.search(r"Action Input:\s*(.+)", content, re.IGNORECASE)
     if action_input_match:
         action_input = action_input_match.group(1).strip()
         if action_input and "tool_name" not in action_input.lower():
-            # Final check to ignore placeholders
+            # Reject placeholder strings
             if any(x in action_input.lower() for x in ["[tool_name]", "[arguments]", "<arg>"]):
                 return None
-            return action_input
+            # Validate the first word is a real tool.
+            # Without this check, hallucinated tool names like "define" route to
+            # tool_node → "Error: Tool not found" → model retries → recursion limit.
+            try:
+                first_word = shlex.split(action_input)[0].lower()
+                first_word = TOOL_ALIASES.get(first_word, first_word)
+                if first_word in known_tools:
+                    return action_input
+            except ValueError:
+                pass
+            return None
 
     action_lines = [line.strip() for line in content.splitlines() if line.strip().lower().startswith("action:")]
     if not action_lines:
@@ -301,18 +342,31 @@ def extract_tool_input(content: str, available_tools: Optional[set] = None) -> O
         return None
 
     tool_name = TOOL_ALIASES.get(payload_parts[0].lower(), payload_parts[0].lower())
-    known_tools = available_tools or set(discover_tools())
-    
+
     # Check if it is a real tool and not a placeholder
     if tool_name in known_tools:
-        # Ignore placeholders often used in explanations
         if any(x in payload.lower() for x in ["[tool_name]", "[arguments]", "<arg>"]):
             return None
-            
         payload_parts[0] = tool_name
         return shlex.join(payload_parts)
 
     return None
+
+def _clean_agent_response(content: str) -> str:
+    """Strip ReAct scaffolding lines (Thought/Action/Observation) from the
+    model's reply so the user sees only the actual answer.
+
+    Small models like gemma3:4b sometimes emit the full chain-of-thought even
+    when they are not invoking a tool.  This removes those lines while
+    preserving everything else.  Falls back to the original content when
+    cleaning would leave an empty string.
+    """
+    _STRIP_PREFIXES = ("thought:", "action:", "action input:", "observation:")
+    lines = content.splitlines()
+    kept = [ln for ln in lines if not ln.strip().lower().startswith(_STRIP_PREFIXES)]
+    cleaned = "\n".join(kept).strip()
+    return cleaned if cleaned else content
+
 
 # --- 2. LangGraph Stateful Reasoning (Text-based Tool Calling) ---
 
@@ -346,6 +400,7 @@ You have access to the following gathm tools:
 {tool_descriptions}
 
 CRITICAL RULES:
+0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
@@ -361,13 +416,27 @@ Action Input: [tool_name] [arguments]
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
+12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+13. For WEB BROWSING use the 'browser' tool. Available actions:
+    - browser open <url>              → open URL in the user's system browser
+    - browser fetch <url>             → read page text (HTTP, works everywhere)
+    - browser navigate <url>          → go to URL in the controlled session
+    - browser click <selector|text>   → click element (CSS selector or visible text)
+    - browser type <selector> <text>  → type text into a field
+    - browser fill <selector> <value> → fill a form field
+    - browser read                    → read current page text
+    - browser scroll up|down          → scroll the page
+    - browser screenshot [url]        → capture a screenshot
+    - browser search <query>          → DuckDuckGo search and return results
+    - browser close                   → close the controlled browser session
+    Works on all platforms including Termux (requires `pkg install chromium` on Termux).
 
 When you have a final answer, provide it directly without the Action format.
 """
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
     response = llm.invoke(messages)
-    
+
     # Check for tool call in the text
     content = response.content
     if extract_tool_input(content):
@@ -375,8 +444,14 @@ When you have a final answer, provide it directly without the Action format.
             "messages": [response],
             "next_step": "action"
         }
+
+    # No valid tool call — clean ReAct scaffolding before returning the
+    # final answer so the user sees only the actual response text.
+    from langchain_core.messages import AIMessage as _AIMsg
+    cleaned = _clean_agent_response(content)
+    final = _AIMsg(content=cleaned) if cleaned != content else response
     return {
-        "messages": [response],
+        "messages": [final],
         "next_step": "end"
     }
 
@@ -422,13 +497,13 @@ def _handle_slash_command(cmd: str) -> bool:
     cmd_lower = cmd.strip().lower()
 
     if cmd_lower in ("/help", "?"):
-        print(render_help())
+        render_help()
         return True
 
     if cmd_lower == "/tools":
         tools = discover_tools()
         tool_info = [(t, get_tool_description(t)) for t in tools]
-        print(render_tools_list(tool_info))
+        render_tools_list(tool_info)
         return True
 
     if cmd_lower == "/clear":
@@ -436,8 +511,8 @@ def _handle_slash_command(cmd: str) -> bool:
         return True
 
     if cmd_lower == "/model":
-        print(f"\n  {SAFFRON}Backend:{RESET} {LLM_BACKEND.upper()}")
-        print(f"  {SAFFRON}Model:{RESET}   {OLLAMA_MODEL}")
+        console.print(f"\n  [color(208)]Backend:[/color(208)] {LLM_BACKEND.upper()}")
+        console.print(f"  [color(208)]Model:[/color(208)]   {OLLAMA_MODEL}")
         return True
 
     if cmd_lower in ("/quit", "/exit"):
@@ -451,7 +526,8 @@ def main():
 
     # Graceful shutdown on SIGTERM (e.g. kill, docker stop)
     def _handle_sigterm(_sig, _frame):
-        print(render_goodbye())
+        stop_waiting()
+        render_goodbye()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -470,14 +546,13 @@ def main():
 
     while True:
         try:
-            print_prompt()
-            user_input = input().strip()
+            user_input = get_user_input()
             if not user_input:
                 continue
 
             # ── Exit ──
             if user_input.lower() in ("exit", "quit", "/quit", "/exit"):
-                print(render_goodbye())
+                render_goodbye()
                 break
 
             # ── Slash commands ──
@@ -485,11 +560,14 @@ def main():
                 _handle_slash_command(user_input)
                 continue
 
+            # ── Show user message in the chat log ──
+            print_user_message(user_input)
+
             # ── Safety check ──
             risk_category = classify_high_risk_query(user_input)
             if risk_category:
                 refusal = safety_refusal_message()
-                print(render_response(refusal))
+                render_response(refusal)
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=refusal),
@@ -497,25 +575,35 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
                 continue
 
-            # ── AI reasoning loop ──
+            # ── AI reasoning loop (with shimmer animation) ──
             state = {"messages": conversation_history + [HumanMessage(content=user_input)]}
             final_agent_reply: Optional[str] = None
+            _stream_error = False
+            start_waiting()
             try:
                 for output in app.stream(state, config={"recursion_limit": 25}):
                     for key, value in output.items():
                         if key == "agent" and value.get("next_step") == "end":
                             final_agent_reply = value["messages"][-1].content  # type: ignore[index]
-                            print(render_response(final_agent_reply))
             except KeyboardInterrupt:
                 # Ctrl+C during AI processing — cancel the current query, not the app
-                print(f"\n  {SAFFRON}[*]{RESET} Query cancelled.")
+                stop_waiting()
+                console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
                 report_to_engineer(str(e), user_input)
-                print(render_error(str(e)))
+                _stream_error = True
+                stop_waiting()
+                render_error(str(e))
                 final_agent_reply = "I encountered an error. The Engineer is on it."
+            finally:
+                stop_waiting()
 
             if final_agent_reply:
+                # Only render the response panel for successful AI replies
+                # (error case already displayed render_error above)
+                if not _stream_error:
+                    render_response(final_agent_reply)
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=final_agent_reply),
@@ -523,17 +611,17 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
 
         except (EOFError, KeyboardInterrupt):
-            print(render_goodbye())
+            render_goodbye()
             break
         except Exception as e:
-            print(render_error(str(e)))
+            render_error(str(e))
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print(render_goodbye())
+        render_goodbye()
         sys.exit(0)
     except BrokenPipeError:
         sys.exit(0)

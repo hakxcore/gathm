@@ -1,77 +1,130 @@
 #!/usr/bin/env bash
 ## Author: Hakxcore https://github.com/hakxcore
-## Gathm Uninstaller
+## Gathm Uninstaller — supports Termux, macOS, Linux (all distros), WSL, Git Bash
 
-#colors
-RED="$(printf '\033[31m')"
-GREEN="$(printf '\033[32m')"
-ORANGE="$(printf '\033[33m')"
-BLUE="$(printf '\033[34m')"
-MAGENTA="$(printf '\033[35m')"
-CYAN="$(printf '\033[36m')"
-WHITE="$(printf '\033[37m')"
-BLACK="$(printf '\033[30m')"
-RESETBG="$(printf '\e[0m')"
+set -euo pipefail
 
-# Platform/Prefix detection
-if [[ "$OSTYPE" == linux-android* ]]; then
-    distro="termux"
-    prefix="/data/data/com.termux/files"
-    privilage=""
-    showError="Try executing the uninstall script again."
-elif [ -f "/etc/os-release" ]; then
-    distro="$(source /etc/os-release && echo $ID)"
-    prefix=""
-    privilage="sudo"
-    showError="Try running the uninstall script again with root privileges."
-elif [ "$OSTYPE" == "darwin" ]; then
-    distro="darwin"
-    prefix=""
-    privilage="sudo"
-    showError="Try running the uninstall script again with root privileges."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+# ── Colors ────────────────────────────────────────────────────────────
+if [[ "${TERM:-dumb}" != "dumb" ]]; then
+    RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"
+    BLUE="\033[34m"; BOLD="\033[1m"; RESET="\033[0m"
 else
-    distro="invalid"
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; RESET=""
 fi
 
-if [ "$distro" == "invalid" ]; then
-    echo "$RED> Unsupported platform.$RESETBG"
-    exit 1
-fi
+info()  { echo -e "${BLUE}[*]${RESET} $1"; }
+ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
+fail()  { echo -e "${RED}[-]${RESET} $1"; }
 
-INSTALL_DIR="$prefix/usr/share/gathm"
-BIN_DIR="$prefix/usr/bin"
-GATHM_SYMLINK="$BIN_DIR/gathm"
+# ── Platform detection ────────────────────────────────────────────────
+detect_platform() {
+    # Termux (Android)
+    if [[ "$OSTYPE" == linux-android* ]] || command -v termux-setup-storage &>/dev/null; then
+        echo "termux"; return
+    fi
+    case "$(uname -s 2>/dev/null)" in
+        Darwin) echo "macos"; return ;;
+        MINGW*|MSYS*|CYGWIN*) echo "windows"; return ;;
+    esac
+    if [[ -f /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+        echo "wsl"; return
+    fi
+    echo "linux"
+}
 
-echo "$BLUE> This script will remove the Gathm Framework.$RESETBG"
-echo "It will delete the following:"
-echo "  - Symlink: $GATHM_SYMLINK"
-echo "  - Installation Directory: $INSTALL_DIR"
+PLATFORM=$(detect_platform)
+
+# ── What install.sh actually puts on disk ────────────────────────────
+LOCAL_BIN="$HOME/.local/bin"
+DATA_DIR="$HOME/.gathm"
+PILOT_VENV="$SCRIPT_DIR/pilot/venv"
+
+SHORTCUTS=("$LOCAL_BIN/gathm" "$LOCAL_BIN/gathm-agent" "$LOCAL_BIN/gathm-api")
+
+# Shell RC files that may contain the PATH entry added by install.sh
+RC_FILES=(
+    "$HOME/.zshrc"
+    "$HOME/.bashrc"
+    "$HOME/.bash_profile"
+    "$HOME/.profile"
+)
+
+# ── Preview what will be removed ─────────────────────────────────────
+echo ""
+echo -e "${BOLD}Gathm Uninstaller${RESET}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "  Platform : ${GREEN}${PLATFORM}${RESET}"
+echo ""
+echo "  The following will be removed:"
+for s in "${SHORTCUTS[@]}"; do
+    [[ -f "$s" ]] && echo "    • $s" || echo "    • $s  (not found — skip)"
+done
+[[ -d "$DATA_DIR"    ]] && echo "    • $DATA_DIR  (config & logs)"   || echo "    • $DATA_DIR  (not found — skip)"
+[[ -d "$PILOT_VENV"  ]] && echo "    • $PILOT_VENV  (Python venv)"  || echo "    • $PILOT_VENV  (not found — skip)"
+echo "    • PATH entry from shell RC files"
 echo ""
 
-read -p "$ORANGE> Do you wish to proceed with uninstallation? [y/N]: $RESETBG" answer
-
-if [[ "$answer" != [Yy] ]]; then
-    echo "$GREEN> Uninstallation cancelled by user.$RESETBG"
+read -r -p "$(echo -e "${YELLOW}> Proceed with uninstallation? [y/N]: ${RESET}")" answer </dev/tty || answer="n"
+if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    echo -e "${GREEN}> Uninstallation cancelled.${RESET}"
     exit 0
 fi
 
-# Remove symlink
-if [ -L "$GATHM_SYMLINK" ]; then
-    echo -n "> Removing symlink $GATHM_SYMLINK: "
-    $privilage rm "$GATHM_SYMLINK" || { echo "$RED"Failed"$RESETBG"; echo "$showError"; exit 1; }
-    echo "$GREEN"Success"$RESETBG"
+echo ""
+
+# ── Remove command shortcuts ──────────────────────────────────────────
+for s in "${SHORTCUTS[@]}"; do
+    if [[ -f "$s" || -L "$s" ]]; then
+        rm -f "$s" && ok "Removed $s" || warn "Could not remove $s"
+    else
+        info "Skipping $s (not found)"
+    fi
+done
+
+# ── Remove data directory ─────────────────────────────────────────────
+if [[ -d "$DATA_DIR" ]]; then
+    rm -rf "$DATA_DIR" && ok "Removed $DATA_DIR" || warn "Could not remove $DATA_DIR"
 else
-    echo "> Symlink $GATHM_SYMLINK not found. Skipping."
+    info "Skipping $DATA_DIR (not found)"
 fi
 
-# Remove installation directory
-if [ -d "$INSTALL_DIR" ]; then
-    echo -n "> Removing directory $INSTALL_DIR: "
-    $privilage rm -rf "$INSTALL_DIR" || { echo "$RED"Failed"$RESETBG"; echo "$showError"; exit 1; }
-    echo "$GREEN"Success"$RESETBG"
+# ── Remove pilot venv ─────────────────────────────────────────────────
+if [[ -d "$PILOT_VENV" ]]; then
+    rm -rf "$PILOT_VENV" && ok "Removed $PILOT_VENV" || warn "Could not remove $PILOT_VENV"
 else
-    echo "> Directory $INSTALL_DIR not found. Skipping."
+    info "Skipping $PILOT_VENV (not found)"
 fi
 
-echo -e "\n$GREEN================= UNINSTALLED ===================$RESETBG"
-echo "Gathm has been removed from your system."
+# ── Remove PATH entry from shell RC files ────────────────────────────
+_strip_path_entry() {
+    local rc="$1"
+    [[ ! -f "$rc" ]] && return
+    # Remove the two lines install.sh adds:
+    #   # Gathm Framework
+    #   export PATH="$HOME/.local/bin:$PATH"
+    local tmp
+    tmp=$(mktemp)
+    # Use grep -v to strip both the comment and the PATH export line
+    grep -v '# Gathm Framework' "$rc" \
+        | grep -v 'export PATH="$HOME/.local/bin:$PATH"' \
+        > "$tmp" && mv "$tmp" "$rc" || { rm -f "$tmp"; return 1; }
+}
+
+for rc in "${RC_FILES[@]}"; do
+    if [[ -f "$rc" ]] && grep -q 'Gathm Framework\|\.local/bin.*PATH' "$rc" 2>/dev/null; then
+        _strip_path_entry "$rc" && ok "Cleaned PATH entry from $rc" || warn "Could not clean $rc"
+    fi
+done
+
+# ── Done ─────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${GREEN}━━━━━━━━━━ UNINSTALLED ━━━━━━━━━━${RESET}"
+echo "  Gathm shortcuts and data have been removed."
+echo "  The source directory was NOT deleted: $SCRIPT_DIR"
+echo ""
+echo -e "  ${YELLOW}Note:${RESET} Open a new terminal (or run ${BOLD}source ~/.zshrc${RESET}) to"
+echo "  refresh your PATH."
+echo ""
