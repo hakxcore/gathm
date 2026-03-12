@@ -43,9 +43,22 @@ except ImportError:
 # Configuration
 GATHM_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
+GUI_DIR = GATHM_ROOT / "gui"
 AGENT_SCRIPT = GATHM_ROOT / "agent" / "orchestrator.sh"
 DEFAULT_PORT = 8080
 DEFAULT_HOST = "127.0.0.1"
+
+# MIME types for static GUI files
+MIME_TYPES = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
 
 # API Authentication
 # Set GATHM_API_KEY environment variable to enable API key authentication.
@@ -53,6 +66,7 @@ DEFAULT_HOST = "127.0.0.1"
 # Health and root endpoints are exempt.
 GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
 PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health"}
+# GUI static files are also public (any path not starting with /api/)
 
 import hashlib
 import secrets
@@ -201,6 +215,25 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())
 
+    def _serve_gui_file(self, file_path: str):
+        """Serve a static file from the gui/ directory."""
+        if file_path in ("", "/"):
+            file_path = "/index.html"
+        # Prevent path traversal
+        safe_path = Path(os.path.normpath(file_path.lstrip("/")))
+        if ".." in safe_path.parts:
+            self._send_json({"error": "Forbidden"}, 403)
+            return
+        full_path = GUI_DIR / safe_path
+        if not full_path.is_file():
+            self._send_json({"error": "Not found"}, 404)
+            return
+        mime = MIME_TYPES.get(full_path.suffix, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.end_headers()
+        self.wfile.write(full_path.read_bytes())
+
     def _read_body(self) -> dict:
         """Read and parse JSON request body."""
         content_length = int(self.headers.get("Content-Length", 0))
@@ -219,8 +252,8 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
-        if path in PUBLIC_PATHS:
-            return True  # Public endpoints
+        if path in PUBLIC_PATHS or not path.startswith("/api/"):
+            return True  # Public endpoints and GUI static files
 
         auth_header = self.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
@@ -271,8 +304,8 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             result = run_agent_command("status")
             self._send_json(result)
 
-        # Root - API documentation
-        elif path in ("", "/", "/api", "/api/v1"):
+        # API documentation
+        elif path in ("/api", "/api/v1"):
             self._send_json({
                 "name": "Gathm Enterprise API",
                 "version": "2.0.0",
@@ -293,8 +326,9 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
                 }
             })
 
+        # GUI static files (root and any non-API path)
         else:
-            self._send_json({"error": "Not found"}, 404)
+            self._serve_gui_file(parsed.path)
 
     def do_POST(self):
         """Handle POST requests."""
@@ -407,9 +441,8 @@ def main():
 ╠══════════════════════════════════════════════════╣
 ║  Host: {host:<41s} ║
 ║  Port: {port:<41d} ║
-║  URL:  http://{host}:{port:<25d} ║
-╠══════════════════════════════════════════════════╣
-║  Docs: http://{host}:{port}/api/v1{' ' * 16}║
+║  GUI:  http://{host}:{port:<25d} ║
+║  API:  http://{host}:{port}/api/v1{' ' * 16}║
 ╚══════════════════════════════════════════════════╝
 """)
 

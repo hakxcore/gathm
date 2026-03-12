@@ -273,10 +273,15 @@ PYEOF
     # Fix: (1) install pydantic (pure Python) with --no-deps to read its
     # exact pydantic-core version requirement; (2) download the manylinux
     # aarch64 wheel for that exact version; (3) extract the wheel and rename
-    # *.cpython-312-aarch64-linux-gnu.so → *.cpython-312.so so that Termux
-    # Python (SOABI=cpython-312) can dlopen it.
+    # *.cpython-3XX-aarch64-linux-gnu.so → *.cpython-3XX.so so that Termux
+    # Python can dlopen it.
     if ! "$python_cmd" -c "import pydantic_core" 2>/dev/null; then
         local _pc_tmp; _pc_tmp=$(mktemp -d)
+
+        # Detect Python version for pip download flags and SOABI renaming
+        local _py_majmin _py_ver_nodot
+        _py_majmin=$("$python_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+        _py_ver_nodot="${_py_majmin:-313}"
 
         # Step 1: install pydantic shell (pure Python, no deps) to learn
         #         the required pydantic-core version from its metadata.
@@ -300,7 +305,7 @@ for r in (requires('pydantic') or []):
             for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
                 if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
                         --platform "$_plat" \
-                        --python-version 312 --implementation cp --abi cp312 \
+                        --python-version "$_py_ver_nodot" --implementation cp --abi "cp${_py_ver_nodot}" \
                         --only-binary :all: --no-deps -q \
                         -d "$_pc_tmp" 2>/dev/null; then
                     _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
@@ -309,19 +314,19 @@ for r in (requires('pydantic') or []):
             done
             if [[ -n "$_whl" ]]; then
                 # Step 3: extract and rename SOABI suffix
-                # *.cpython-312-aarch64-linux-{gnu,musl}.so → *.cpython-312.so
+                # *.cpython-3XX-aarch64-linux-{gnu,musl}.so → *.cpython-3XX.so
                 local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
-                python3 -c "
+                "$python_cmd" -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
 " "$_whl" "$_ext" 2>/dev/null
                 while IFS= read -r f; do
                     # Strip -aarch64-linux-{gnu,musl} from the basename
-                    local nf; nf=$(echo "$f" | sed 's/cpython-312-aarch64-linux-[^.]*\.so/cpython-312.so/')
+                    local nf; nf=$(echo "$f" | sed "s/cpython-${_py_ver_nodot}-aarch64-linux-[^.]*\.so/cpython-${_py_ver_nodot}.so/")
                     [[ "$f" != "$nf" ]] && mv "$f" "$nf"
                 done < <(find "$_ext" -name "*.so" 2>/dev/null)
                 cp -r "$_ext/"* "$site_packages/"
-                ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux)"
+                ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
             else
                 warn "pydantic-core wheel download failed — pip install will likely fail"
             fi
