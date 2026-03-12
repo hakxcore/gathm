@@ -145,6 +145,86 @@ _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
 
+# Rename .so files from manylinux/musllinux SOABI to the actual Termux SOABI.
+# Usage: _soabi_patch_dir <python_cmd> <directory>
+# e.g.  _soabi_patch_dir "$venv/bin/python3" "/path/to/site-packages/pydantic_core"
+_soabi_patch_dir() {
+    local python_cmd="$1" dir="$2"
+    # Get Termux Python's actual SOABI (e.g. "cpython-313" without arch triplet)
+    local _target_soabi
+    _target_soabi=$("$python_cmd" -c "import sysconfig; print(sysconfig.get_config_var('SOABI') or '')" 2>/dev/null)
+    [[ -z "$_target_soabi" ]] && return 1
+
+    while IFS= read -r f; do
+        local base; base=$(basename "$f")
+        # Match *.cpython-3XX-<arch-triplet>.so and rename to *.<target_soabi>.so
+        if [[ "$base" =~ \.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so$ ]]; then
+            local nf
+            nf=$(echo "$f" | sed -E "s/\.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so/.$_target_soabi.so/")
+            [[ "$f" != "$nf" ]] && mv "$f" "$nf"
+        fi
+    done < <(find "$dir" -name "*.so" 2>/dev/null)
+}
+
+# Download, extract, and SOABI-patch pydantic-core for Termux.
+# Called from _create_termux_native_stubs and _repair_pydantic_core_soabi.
+_install_pydantic_core_termux() {
+    local venv="$1" python_cmd="$2" site_packages="$3"
+    local _pc_tmp; _pc_tmp=$(mktemp -d)
+
+    # Detect Python version for pip download flags
+    local _py_majmin _py_ver_nodot
+    _py_majmin=$("$python_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
+    _py_ver_nodot="${_py_majmin:-313}"
+
+    # Step 1: install pydantic shell (pure Python, no deps) to learn
+    #         the required pydantic-core version from its metadata.
+    "$venv/bin/pip" install "pydantic<3.0.0,>=2.7.4" --no-deps -q 2>/dev/null || true
+    local _pc_ver
+    _pc_ver=$("$python_cmd" -c "
+from importlib.metadata import requires
+for r in (requires('pydantic') or []):
+    if 'pydantic-core' in r:
+        import re; m = re.search(r'pydantic-core==([\d.]+)', r)
+        if m: print(m.group(1)); break
+" 2>/dev/null)
+
+    if [[ -n "$_pc_ver" ]]; then
+        # Step 2: download an aarch64 wheel.
+        # Prefer musllinux: Rust compiles that target with a fully static
+        # runtime (no external libgcc_s.so.1 needed), making it work on
+        # Termux/Android's Bionic libc without additional packages.
+        # Fall back to manylinux if musl isn't available (libgcc pkg covers it).
+        local _whl=""
+        for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
+            if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
+                    --platform "$_plat" \
+                    --python-version "$_py_ver_nodot" --implementation cp --abi "cp${_py_ver_nodot}" \
+                    --only-binary :all: --no-deps -q \
+                    -d "$_pc_tmp" 2>/dev/null; then
+                _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
+                [[ -n "$_whl" ]] && break
+            fi
+        done
+        if [[ -n "$_whl" ]]; then
+            # Step 3: extract and rename SOABI suffix using actual Termux SOABI
+            local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
+            "$python_cmd" -c "
+import zipfile, sys
+with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
+" "$_whl" "$_ext" 2>/dev/null
+            _soabi_patch_dir "$python_cmd" "$_ext"
+            cp -r "$_ext/"* "$site_packages/"
+            ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
+        else
+            warn "pydantic-core wheel download failed — pip install will likely fail"
+        fi
+    else
+        warn "Could not determine pydantic-core version from pydantic metadata"
+    fi
+    rm -rf "$_pc_tmp"
+}
+
 # Create pure-Python stubs for Rust-based packages that can't compile on
 # Android/aarch64 (Termux).  Each stub satisfies pip's dependency resolver
 # and provides the stdlib fallback that the actual package would use anyway.
@@ -276,64 +356,7 @@ PYEOF
     # *.cpython-3XX-aarch64-linux-gnu.so → *.cpython-3XX.so so that Termux
     # Python can dlopen it.
     if ! "$python_cmd" -c "import pydantic_core" 2>/dev/null; then
-        local _pc_tmp; _pc_tmp=$(mktemp -d)
-
-        # Detect Python version for pip download flags and SOABI renaming
-        local _py_majmin _py_ver_nodot
-        _py_majmin=$("$python_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-        _py_ver_nodot="${_py_majmin:-313}"
-
-        # Step 1: install pydantic shell (pure Python, no deps) to learn
-        #         the required pydantic-core version from its metadata.
-        "$venv/bin/pip" install "pydantic<3.0.0,>=2.7.4" --no-deps -q 2>/dev/null || true
-        local _pc_ver
-        _pc_ver=$("$python_cmd" -c "
-from importlib.metadata import requires
-for r in (requires('pydantic') or []):
-    if 'pydantic-core' in r:
-        import re; m = re.search(r'pydantic-core==([\d.]+)', r)
-        if m: print(m.group(1)); break
-" 2>/dev/null)
-
-        if [[ -n "$_pc_ver" ]]; then
-            # Step 2: download an aarch64 wheel.
-            # Prefer musllinux: Rust compiles that target with a fully static
-            # runtime (no external libgcc_s.so.1 needed), making it work on
-            # Termux/Android's Bionic libc without additional packages.
-            # Fall back to manylinux if musl isn't available (libgcc pkg covers it).
-            local _whl=""
-            for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
-                if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
-                        --platform "$_plat" \
-                        --python-version "$_py_ver_nodot" --implementation cp --abi "cp${_py_ver_nodot}" \
-                        --only-binary :all: --no-deps -q \
-                        -d "$_pc_tmp" 2>/dev/null; then
-                    _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
-                    [[ -n "$_whl" ]] && break
-                fi
-            done
-            if [[ -n "$_whl" ]]; then
-                # Step 3: extract and rename SOABI suffix
-                # *.cpython-3XX-aarch64-linux-{gnu,musl}.so → *.cpython-3XX.so
-                local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
-                "$python_cmd" -c "
-import zipfile, sys
-with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
-" "$_whl" "$_ext" 2>/dev/null
-                while IFS= read -r f; do
-                    # Strip -aarch64-linux-{gnu,musl} from the basename
-                    local nf; nf=$(echo "$f" | sed "s/cpython-${_py_ver_nodot}-aarch64-linux-[^.]*\.so/cpython-${_py_ver_nodot}.so/")
-                    [[ "$f" != "$nf" ]] && mv "$f" "$nf"
-                done < <(find "$_ext" -name "*.so" 2>/dev/null)
-                cp -r "$_ext/"* "$site_packages/"
-                ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
-            else
-                warn "pydantic-core wheel download failed — pip install will likely fail"
-            fi
-        else
-            warn "Could not determine pydantic-core version from pydantic metadata"
-        fi
-        rm -rf "$_pc_tmp"
+        _install_pydantic_core_termux "$venv" "$python_cmd" "$site_packages"
     fi
 }
 
@@ -1098,6 +1121,18 @@ install_pilot_deps() {
             warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
         fi
         rm -f "$tmp_req"
+
+        # pip may have overwritten SOABI-patched pydantic-core .so files
+        # during dependency resolution. Re-patch if pydantic-core is broken.
+        if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
+            warn "pydantic-core broken after pip install — re-patching SOABI..."
+            local _pc_sp
+            _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+            if [[ -n "$_pc_sp" ]]; then
+                _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
+            fi
+        fi
+
         # selenium drives the system Chromium on Termux (pure Python, works on aarch64)
         _venv_pip install selenium 2>/dev/null && \
             ok "selenium installed (Termux browser backend)" || \
@@ -1261,9 +1296,11 @@ start_gui_server() {
     nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
     disown $! 2>/dev/null || true
 
-    # Wait up to 8 s for the server to respond
+    # Wait up to 15 s for the server to respond (Termux can be slow)
+    local _max_wait=15
+    [[ "$_GATHM_PLATFORM" != "termux" ]] && _max_wait=8
     local i=0
-    while (( i < 8 )); do
+    while (( i < _max_wait )); do
         sleep 1
         if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
             ok "GUI server started at ${CYAN}${GUI_URL}${RESET}"
@@ -1299,7 +1336,7 @@ launch_post_install() {
     # 3. Determine how to launch Pilot (prefer venv set by install_pilot_deps)
     local python_cmd="${_PILOT_PYTHON:-}"
     if [[ -z "$python_cmd" ]]; then
-        local venv_python="$SCRIPT_DIR/pilot/.venv/bin/python"
+        local venv_python="$SCRIPT_DIR/pilot/venv/bin/python"
         [[ -x "$venv_python" ]] && python_cmd="$venv_python"
     fi
     [[ -z "$python_cmd" ]] && command -v python3 &>/dev/null && python_cmd="python3"
