@@ -1107,36 +1107,6 @@ install_pilot_deps() {
     fi
 }
 
-# --- Install Pilot Python requirements inside a venv ---
-install_pilot_deps() {
-    local req_file="$SCRIPT_DIR/pilot/requirements.txt"
-    if [[ ! -f "$req_file" ]]; then
-        return 0
-    fi
-
-    local python_cmd=""
-    command -v python3 &>/dev/null && python_cmd="python3"
-    command -v python  &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
-
-    if [[ -z "$python_cmd" ]]; then
-        warn "Python not found — skipping Pilot dependencies"
-        return 0
-    fi
-
-    local venv_dir="$SCRIPT_DIR/pilot/.venv"
-    info "Creating Pilot virtual environment..."
-    if ! "$python_cmd" -m venv "$venv_dir"; then
-        warn "venv creation failed — skipping Pilot dependencies"
-        return 0
-    fi
-
-    info "Installing Pilot AI dependencies..."
-    if "$venv_dir/bin/pip" install -q --prefer-binary -r "$req_file"; then
-        ok "Pilot dependencies installed"
-        _PILOT_PYTHON="$venv_dir/bin/python"
-    else
-        warn "Pilot dependency install failed — run manually: $venv_dir/bin/pip install -r pilot/requirements.txt"
-=======
 # --- Install browser engine for Pilot's browser control feature ---
 #
 # Desktop (Linux/macOS/Windows/WSL):
