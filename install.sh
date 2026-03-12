@@ -480,7 +480,6 @@ install_deps() {
             # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
             # this ensures manylinux fallback wheels also load correctly.
             pkg install -y libgcc 2>/dev/null || true
-        main
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
