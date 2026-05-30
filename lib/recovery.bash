@@ -3,7 +3,7 @@
 # Handles automatic failure recovery, retries, and fallback chains
 # Cross-platform: Linux, macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
-SCRIPT_DIR_RECOVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+SCRIPT_DIR_RECOVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."\ &>/dev/null && pwd)"
 source "$SCRIPT_DIR_RECOVERY/lib/logging.bash" 2>/dev/null
 source "$SCRIPT_DIR_RECOVERY/lib/health.bash" 2>/dev/null
 
@@ -176,7 +176,6 @@ auto_install_deps() {
 }
 
 # Map package names to Termux equivalents
-# Some packages have different names on Termux
 _termux_pkg_name() {
     case "$1" in
         python3)        echo "python" ;;
@@ -191,13 +190,8 @@ _termux_pkg_name() {
 }
 
 # Try to install a dependency using available package manager
-# Supports: apt-get (Debian/Ubuntu), pkg (Termux), brew (macOS),
-#           yum/dnf (RHEL/CentOS/Fedora), pacman (Arch), zypper (openSUSE),
-#           apk (Alpine), choco/scoop (Windows)
 _try_install_dep() {
     local dep="$1"
-
-    # Detect platform for smarter package manager selection
     local platform
     platform=$(_detect_platform_for_install)
 
@@ -224,7 +218,6 @@ _try_install_dep() {
             fi
             ;;
         windows)
-            # Windows: try scoop first (no admin), then choco
             if command -v scoop &>/dev/null; then
                 scoop install "$dep" 2>/dev/null && {
                     log_info "recovery" "Installed dependency: $dep (via scoop)"
@@ -236,7 +229,6 @@ _try_install_dep() {
                     return 0
                 }
             elif command -v pacman &>/dev/null; then
-                # MSYS2 uses pacman
                 pacman -S --noconfirm "$dep" 2>/dev/null && {
                     log_info "recovery" "Installed dependency: $dep (via pacman/MSYS2)"
                     return 0
@@ -244,7 +236,6 @@ _try_install_dep() {
             fi
             ;;
         *)
-            # Linux: try all known package managers
             if command -v apt-get &>/dev/null; then
                 sudo apt-get install -y "$dep" 2>/dev/null && {
                     log_info "recovery" "Installed dependency: $dep (via apt-get)"
@@ -305,9 +296,8 @@ _detect_platform_for_install() {
             fi
             ;;
         *)
-            # Check for WSL
             if grep -qi microsoft /proc/version 2>/dev/null; then
-                echo "linux"  # WSL acts like Linux for packages
+                echo "linux"
             else
                 echo "unknown"
             fi
@@ -316,18 +306,15 @@ _detect_platform_for_install() {
 }
 
 # Validate tool output (basic sanity check)
-# Usage: validate_output TOOL_NAME OUTPUT
 validate_output() {
     local tool_name="$1"
     local output="$2"
 
-    # Check for empty output
     if [[ -z "$output" ]]; then
         log_warn "recovery" "Empty output from tool: $tool_name"
         return 1
     fi
 
-    # Check for common error patterns
     if echo "$output" | grep -qi "error\|failed\|not found\|connection refused" &>/dev/null; then
         log_warn "recovery" "Potential error in output from tool: $tool_name"
         return 1
@@ -337,7 +324,6 @@ validate_output() {
 }
 
 # Self-heal: check and fix common issues
-# Usage: self_heal TOOL_NAME
 self_heal() {
     local tool_name="$1"
     local tool_dir="$SCRIPT_DIR_RECOVERY/tools/$tool_name"
@@ -346,17 +332,14 @@ self_heal() {
 
     log_info "recovery" "Running self-heal for tool: $tool_name"
 
-    # Fix: executable permissions
     if [[ -f "$tool_path" && ! -x "$tool_path" ]]; then
         chmod +x "$tool_path"
         log_info "recovery" "Fixed executable permissions for: $tool_name"
         healed=true
     fi
 
-    # Fix: missing dependencies
     auto_install_deps "$tool_name"
 
-    # Fix: reset circuit breaker if tool is now healthy
     local health
     health=$(healthcheck_tool "$tool_name")
     if echo "$health" | grep -q '"status":"healthy"'; then

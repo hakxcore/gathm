@@ -2,7 +2,7 @@
 # Gathm Enterprise - Health Check Framework
 # Provides health checking capabilities for all tools
 
-SCRIPT_DIR_HEALTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+SCRIPT_DIR_HEALTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."\ &>/dev/null && pwd)"
 source "$SCRIPT_DIR_HEALTH/lib/logging.bash" 2>/dev/null
 
 GATHM_HEALTH_DIR="${GATHM_HEALTH_DIR:-${HOME}/.gathm/health}"

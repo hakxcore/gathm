@@ -172,7 +172,6 @@ class LLMProvider:
         import google.generativeai as genai  # type: ignore[import]
         genai.configure(api_key=self.config.api_key)
         model = genai.GenerativeModel(self.config.model)
-        # Flatten to a single prompt for simplicity
         prompt = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
         resp = model.generate_content(prompt)
         return resp.text

@@ -70,7 +70,7 @@ tool_output() {
 # ---------------------------------------------------------------------------
 tool_output_json() {
     local exit_code="${1:-0}"
-    local json="${2:-{\}}"
+    local json="${2:-{}}"
 
     if [[ "${GATHM_OUTPUT_MODE:-text}" == "json" ]]; then
         local tool

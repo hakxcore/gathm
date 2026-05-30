@@ -94,7 +94,6 @@ grep '^failures=' "$GATHM_HEALTH_DIR/cb_count_tool.state" | cut -d= -f2
         self.assertEqual(out, "2")
 
     def test_recovery_timeout_yields_half_open(self):
-        # Back-date last_failure so the 60 s timeout has elapsed
         past = int(time.time()) - 120
         _, out, _ = self._run(f"""
 cat > "$GATHM_HEALTH_DIR/cb_old_tool.state" <<'EOF'
@@ -253,8 +252,6 @@ class TestFallbackGuard(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, snippet: str) -> tuple[int, str, str]:
-        # Source logging + health, then stub out the recovery helpers we don't
-        # want to exercise, and finally source recovery.bash itself.
         preamble = f"""
 export GATHM_LOG_DIR="{self._logs}"
 export GATHM_HEALTH_DIR="{self._health}"
@@ -293,8 +290,6 @@ echo "$output"
         self.assertIn("cycle", combined, "Should report cycle detected")
 
     def test_first_call_has_no_guard_overhead(self):
-        # No depth env, no chain env — guard should not trigger
-        # (tool will fail normally due to stubbed retry, but no cycle/depth msg)
         _, out, err = self._run("""
 output=$(execute_with_recovery nonexistent_tool 2>&1)
 echo "$output"
@@ -304,15 +299,12 @@ echo "$output"
         self.assertNotIn("fallback_depth",  combined)
 
     def test_chain_accumulates_across_hops(self):
-        # Tool A (chain="") → tries fallback → guard should see "tool_a" in chain
-        # We test this by pre-setting a chain with one tool and making tool_b appear
         _, out, err = self._run("""
 output=$(_GATHM_FALLBACK_DEPTH=1 _GATHM_FALLBACK_CHAIN="tool_a" \
     execute_with_recovery tool_b 2>&1)
 # Depth 1 < max(2), no cycle — should fail normally (no cycle/depth message)
 echo "${output}" | grep -v "cycle" | grep -v "depth" && echo OK || echo GUARDED
 """)
-        # depth=1 is below max (2), tool_b not in chain — should proceed normally
         self.assertIn("OK", out + err)
 
 
@@ -321,7 +313,6 @@ echo "${output}" | grep -v "cycle" | grep -v "depth" && echo OK || echo GUARDED
 # ---------------------------------------------------------------------------
 
 try:
-    # Only run these if FastAPI is installed
     from api.server import check_rate_limit, _rate_windows
     _FASTAPI_AVAILABLE = True
 except Exception:
@@ -353,19 +344,14 @@ class TestAPIRateLimit(unittest.TestCase):
 
     def test_expired_window_entries_are_evicted(self):
         key = self._fresh_key()
-        # Fill the window with timestamps 70 s in the past (outside 60 s window)
         _rate_windows[key] = [time.monotonic() - 70.0] * 5
-        # All entries are stale — next request should be allowed
         self.assertTrue(check_rate_limit(key, 5))
 
     def test_partial_window_expiry(self):
         key = self._fresh_key()
-        # Fill to the limit with stale entries first (they will be evicted)
         _rate_windows[key] = [time.monotonic() - 70.0] * 5
-        # Add fresh requests up to the limit; stale entries don't count
         for _ in range(5):
-            self.assertTrue(check_rate_limit(key, 5))   # fills window
-        # Now at limit — next should be blocked
+            self.assertTrue(check_rate_limit(key, 5))
         self.assertFalse(check_rate_limit(key, 5), "Should be blocked at limit")
 
     def test_independent_keys_do_not_interfere(self):
@@ -373,7 +359,6 @@ class TestAPIRateLimit(unittest.TestCase):
         b = self._fresh_key()
         for _ in range(5):
             check_rate_limit(a, 5)
-        # Key b is unaffected
         self.assertTrue(check_rate_limit(b, 5))
 
 
