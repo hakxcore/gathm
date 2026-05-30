@@ -22,6 +22,11 @@ Endpoints:
     POST /api/v1/agent/parallel         - Execute tools in parallel
     GET  /api/v1/agent/status           - Agent status
     POST /api/v1/agent/heal             - Self-heal tools
+    POST /api/v1/jobs                   - Submit async job (returns 202 + job_id)
+    GET  /api/v1/jobs                   - List all jobs
+    GET  /api/v1/jobs/{id}              - Poll job status + output
+    GET  /api/v1/jobs/{id}/stream       - Stream live output via SSE
+    DELETE /api/v1/jobs/{id}            - Cancel a job
 """
 
 from __future__ import annotations
@@ -35,13 +40,16 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 try:
     from fastapi import FastAPI, HTTPException, Request, Response, status
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
     import uvicorn
@@ -284,17 +292,160 @@ async def run_agent_command(command: str, arg: str = "") -> dict:
         return {"raw_output": raw, "exit_code": result.get("exit_code", -1)}
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# Async Job Store
 # ---------------------------------------------------------------------------
 
-if not HAS_FASTAPI:
-    # Fallback: print helpful error and exit; prevents silent failures
-    print(
-        "ERROR: FastAPI and uvicorn are required.\n"
-        "Install with: pip install fastapi uvicorn pydantic",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+JOBS_DIR = Path.home() / ".gathm" / "jobs"
+
+class JobStatus(str, Enum):
+    pending   = "pending"
+    running   = "running"
+    completed = "completed"
+    failed    = "failed"
+    cancelled = "cancelled"
+
+@dataclass
+class Job:
+    id: str
+    kind: str           # "tool" | "ask" | "plan" | "chain" | "parallel" | "engineer"
+    tool: str           # tool name for kind="tool"; agent sub-command otherwise
+    args: list[str]
+    timeout: int
+    status: JobStatus = JobStatus.pending
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    output_lines: list[str] = field(default_factory=list)
+    exit_code: Optional[int] = None
+    error: str = ""
+    # async-only fields — not persisted
+    _task: Any = field(default=None, repr=False)
+    _proc: Any = field(default=None, repr=False)
+    _subscribers: list = field(default_factory=list, repr=False)
+
+_job_store: dict[str, Job] = {}
+
+def _job_to_dict(job: Job) -> dict:
+    return {
+        "id": job.id,
+        "kind": job.kind,
+        "tool": job.tool,
+        "args": job.args,
+        "timeout": job.timeout,
+        "status": job.status.value,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "exit_code": job.exit_code,
+        "error": job.error,
+        "output": "\n".join(job.output_lines),
+        "line_count": len(job.output_lines),
+    }
+
+async def _persist_job(job: Job) -> None:
+    try:
+        JOBS_DIR.mkdir(parents=True, exist_ok=True)
+        (JOBS_DIR / f"{job.id}.json").write_text(json.dumps(_job_to_dict(job), indent=2))
+    except Exception:
+        pass
+
+async def _run_job_task(job: Job) -> None:
+    job.status = JobStatus.running
+    job.started_at = time.time()
+    await _persist_job(job)
+
+    if job.kind == "tool":
+        cmd = [BASH_CMD, str(AGENT_SCRIPT), "run", job.tool] + job.args
+    else:
+        cmd = [BASH_CMD, str(AGENT_SCRIPT), job.kind] + job.args + ["--json"]
+
+    env = {**os.environ, "GATHM_OUTPUT_MODE": "json"}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        job._proc = proc
+
+        stderr_lines: list[str] = []
+
+        async def _drain_stderr() -> None:
+            assert proc.stderr
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                stderr_lines.append(line.decode(errors="replace").rstrip())
+
+        async def _drain_stdout() -> None:
+            assert proc.stdout
+            deadline = asyncio.get_event_loop().time() + job.timeout
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    job.status = JobStatus.failed
+                    job.error = f"Timed out after {job.timeout}s"
+                    break
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=min(remaining, 5.0))
+                except asyncio.TimeoutError:
+                    continue
+                if not raw:
+                    break
+                text = raw.decode(errors="replace").rstrip("\n")
+                job.output_lines.append(text)
+                event_data = json.dumps({"event": "output", "line": text, "ts": time.time()})
+                for q in list(job._subscribers):
+                    try:
+                        q.put_nowait(event_data)
+                    except asyncio.QueueFull:
+                        pass
+
+        await asyncio.gather(_drain_stdout(), _drain_stderr())
+        await proc.wait()
+        if job.status == JobStatus.running:
+            job.exit_code = proc.returncode
+            job.error = "\n".join(stderr_lines) if proc.returncode != 0 else ""
+            job.status = JobStatus.completed if proc.returncode == 0 else JobStatus.failed
+
+    except asyncio.CancelledError:
+        if job._proc:
+            try:
+                job._proc.kill()
+            except Exception:
+                pass
+        job.status = JobStatus.cancelled
+    except Exception as exc:
+        job.status = JobStatus.failed
+        job.error = str(exc)
+    finally:
+        job.completed_at = time.time()
+        done_data = json.dumps({
+            "event": "done",
+            "status": job.status.value,
+            "exit_code": job.exit_code,
+        })
+        for q in list(job._subscribers):
+            try:
+                q.put_nowait(done_data)
+            except asyncio.QueueFull:
+                pass
+        job._subscribers.clear()
+        await _persist_job(job)
+
+def _create_job(kind: str, tool: str, args: list[str], timeout: int) -> Job:
+    job = Job(id=uuid.uuid4().hex, kind=kind, tool=tool, args=args, timeout=timeout)
+    _job_store[job.id] = job
+    job._task = asyncio.create_task(_run_job_task(job))
+    return job
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Gathm Enterprise API",
@@ -308,7 +459,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -379,6 +530,12 @@ class ParallelRequest(BaseModel):
 
 class HealRequest(BaseModel):
     tool: str = "all"
+
+class JobRequest(BaseModel):
+    kind: str = "tool"       # "tool" | "ask" | "plan" | "chain" | "parallel" | "engineer"
+    tool: str                # tool name or agent command argument
+    args: list[str] | str = []
+    timeout: int = 120
 
 # ---------------------------------------------------------------------------
 # Helper: enforce tool-level permissions
@@ -512,10 +669,131 @@ async def agent_status(request: Request):
 @app.post("/api/v1/agent/heal", tags=["agent"])
 async def agent_heal(body: HealRequest, request: Request):
     role = _get_role(request)
-    # Only admin and agent roles can trigger self-healing
     if not role_has_permission(role, "tool:execute") or role == "readonly":
         raise HTTPException(403, f"Role '{role}' cannot trigger self-healing")
     return await run_agent_command("heal", body.tool)
+
+# ---------------------------------------------------------------------------
+# Routes: async job queue
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/jobs", tags=["jobs"], status_code=202)
+async def submit_job(body: JobRequest, request: Request):
+    """Submit a long-running job. Returns immediately with a job_id to poll or stream."""
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+
+    args = body.args.split() if isinstance(body.args, str) else list(body.args)
+
+    # Tool-level access check for tool kind
+    if body.kind == "tool":
+        denied = _check_tool_access(role, body.tool)
+        if denied:
+            return denied
+
+    job = _create_job(kind=body.kind, tool=body.tool, args=args, timeout=body.timeout)
+    return JSONResponse(_job_to_dict(job), status_code=202)
+
+@app.get("/api/v1/jobs", tags=["jobs"])
+async def list_jobs(request: Request, status: str | None = None):
+    """List all jobs, optionally filtered by status."""
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:discover"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
+    jobs = list(_job_store.values())
+    if status:
+        try:
+            target = JobStatus(status)
+            jobs = [j for j in jobs if j.status == target]
+        except ValueError:
+            raise HTTPException(400, f"Invalid status '{status}'. "
+                                f"Must be one of: {[s.value for s in JobStatus]}")
+    return {"jobs": [_job_to_dict(j) for j in jobs], "count": len(jobs)}
+
+@app.get("/api/v1/jobs/{job_id}", tags=["jobs"])
+async def get_job(job_id: str, request: Request):
+    """Poll a job's current status and output."""
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:discover"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
+    job = _job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+    return _job_to_dict(job)
+
+@app.get("/api/v1/jobs/{job_id}/stream", tags=["jobs"])
+async def stream_job(job_id: str, request: Request):
+    """
+    Stream live output from a job via Server-Sent Events (SSE).
+
+    Each event is a JSON object on a ``data:`` line:
+    - ``{"event": "output", "line": "...", "ts": 1234567890.0}`` — a stdout line
+    - ``{"event": "done",   "status": "completed", "exit_code": 0}`` — terminal event
+
+    Replays all lines already emitted before delivering live output.
+    """
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:discover"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
+    job = _job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+
+    async def event_stream():
+        # Replay lines already captured
+        for line in list(job.output_lines):
+            yield f'data: {json.dumps({"event": "output", "line": line})}\n\n'
+
+        # Already finished — emit done and close
+        if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
+            yield f'data: {json.dumps({"event": "done", "status": job.status.value, "exit_code": job.exit_code})}\n\n'
+            return
+
+        # Subscribe to live output
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
+        job._subscribers.append(queue)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    raw = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f'data: {raw}\n\n'
+                    if json.loads(raw).get("event") == "done":
+                        break
+                except asyncio.TimeoutError:
+                    yield ': keepalive\n\n'  # SSE comment keeps connection alive
+        finally:
+            try:
+                job._subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+@app.delete("/api/v1/jobs/{job_id}", tags=["jobs"])
+async def cancel_job(job_id: str, request: Request):
+    """Cancel a pending or running job."""
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    job = _job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+    if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
+        return JSONResponse({"id": job_id, "status": job.status.value,
+                             "detail": "Job already in terminal state"}, status_code=200)
+    if job._task and not job._task.done():
+        job._task.cancel()
+    job.status = JobStatus.cancelled
+    job.completed_at = time.time()
+    await _persist_job(job)
+    return JSONResponse({"id": job_id, "status": "cancelled"})
 
 # ---------------------------------------------------------------------------
 # Routes: API info
@@ -532,7 +810,7 @@ async def api_info():
         "endpoints": {
             "GET /api/v1/tools": "List all tools",
             "GET /api/v1/tools/{name}": "Get tool metadata",
-            "POST /api/v1/tools/{name}/execute": "Execute a tool",
+            "POST /api/v1/tools/{name}/execute": "Execute a tool (synchronous)",
             "GET /api/v1/health": "System health check (public)",
             "GET /api/v1/health/{tool}": "Tool health check",
             "POST /api/v1/agent/ask": "Natural language query",
@@ -542,6 +820,11 @@ async def api_info():
             "POST /api/v1/agent/parallel": "Execute tools in parallel",
             "GET /api/v1/agent/status": "Agent status",
             "POST /api/v1/agent/heal": "Self-heal tools",
+            "POST /api/v1/jobs": "Submit async job — returns 202 + job_id immediately",
+            "GET /api/v1/jobs": "List all jobs (filter: ?status=running)",
+            "GET /api/v1/jobs/{id}": "Poll job status + captured output",
+            "GET /api/v1/jobs/{id}/stream": "Stream live output via SSE",
+            "DELETE /api/v1/jobs/{id}": "Cancel a running job",
         },
     }
 
@@ -557,6 +840,14 @@ if GUI_DIR.exists():
 # ---------------------------------------------------------------------------
 
 def main():
+    if not HAS_FASTAPI:
+        print(
+            "ERROR: FastAPI and uvicorn are required.\n"
+            "Install with: pip install fastapi uvicorn pydantic",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     port = DEFAULT_PORT
     host = DEFAULT_HOST
 

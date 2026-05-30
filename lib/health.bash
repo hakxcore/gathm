@@ -5,7 +5,7 @@
 SCRIPT_DIR_HEALTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 source "$SCRIPT_DIR_HEALTH/lib/logging.bash" 2>/dev/null
 
-GATHM_HEALTH_DIR="${HOME}/.gathm/health"
+GATHM_HEALTH_DIR="${GATHM_HEALTH_DIR:-${HOME}/.gathm/health}"
 GATHM_HEALTH_CACHE_TTL=300  # 5 minutes cache
 
 # Circuit breaker states
@@ -149,37 +149,22 @@ cb_get_state() {
     echo "${state:-$CB_STATE_CLOSED}"
 }
 
-# Portable file locking: uses flock(1) when available (Linux/WSL/Termux),
-# falls back to a mkdir-based spinlock on macOS/BSD where flock may be absent.
-_cb_lock() {
-    local lockfile="$1"
-    shift
-    if command -v flock &>/dev/null; then
-        flock -x "$lockfile" "$@"
-    else
-        # mkdir is atomic on POSIX; spin up to 2 s then proceed anyway
-        local lockdir="${lockfile}.lock"
-        local waited=0
-        until mkdir "$lockdir" 2>/dev/null; do
-            sleep 0.1
-            waited=$((waited + 1))
-            [[ $waited -ge 20 ]] && break
-        done
-        "$@"
-        rmdir "$lockdir" 2>/dev/null || true
-    fi
-}
-
 # Circuit Breaker - Record a success
+# Uses the canonical subshell+flock pattern so all parent-shell variables
+# are inherited without complex quoting, and the lock is released on exit.
 cb_record_success() {
     local tool="$1"
     local state_file="$GATHM_HEALTH_DIR/cb_${tool}.state"
+    local lock_file="${state_file}.lock"
 
-    _cb_lock "$state_file" bash -c "cat > \"$state_file\" << 'EOF'
-state=$CB_STATE_CLOSED
-failures=0
-last_failure=0
-EOF"
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 9
+            printf 'state=%s\nfailures=0\nlast_failure=0\n' "$CB_STATE_CLOSED" > "$state_file"
+        ) 9>>"$lock_file"
+    else
+        printf 'state=%s\nfailures=0\nlast_failure=0\n' "$CB_STATE_CLOSED" > "$state_file"
+    fi
     log_debug "circuit_breaker" "Circuit closed for tool: $tool"
 }
 
@@ -187,26 +172,42 @@ EOF"
 cb_record_failure() {
     local tool="$1"
     local state_file="$GATHM_HEALTH_DIR/cb_${tool}.state"
+    local lock_file="${state_file}.lock"
     local now
     now=$(date +%s)
 
-    # Read-modify-write under lock to prevent race conditions
-    local cb_tool="$tool" cb_now="$now" cb_threshold="$CB_FAILURE_THRESHOLD"
-    local cb_state_closed="$CB_STATE_CLOSED" cb_state_open="$CB_STATE_OPEN"
-    _cb_lock "$state_file" bash -c '
-        failures=0
-        if [[ -f "'"$state_file"'" ]]; then
-            failures=$(grep "^failures=" "'"$state_file"'" | cut -d= -f2)
-            failures=${failures:-0}
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 9
+            local failures=0
+            if [[ -f "$state_file" ]]; then
+                failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+                failures="${failures:-0}"
+            fi
+            failures=$(( failures + 1 ))
+            local state="$CB_STATE_CLOSED"
+            if (( failures >= CB_FAILURE_THRESHOLD )); then
+                state="$CB_STATE_OPEN"
+            fi
+            printf 'state=%s\nfailures=%d\nlast_failure=%s\n' \
+                "$state" "$failures" "$now" > "$state_file"
+        ) 9>>"$lock_file"
+    else
+        # No flock — best-effort write (still correct for single-process use)
+        local failures=0
+        if [[ -f "$state_file" ]]; then
+            failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+            failures="${failures:-0}"
         fi
-        failures=$((failures + 1))
-        state="'"$cb_state_closed"'"
-        if (( failures >= '"$cb_threshold"' )); then
-            state="'"$cb_state_open"'"
+        failures=$(( failures + 1 ))
+        local state="$CB_STATE_CLOSED"
+        if (( failures >= CB_FAILURE_THRESHOLD )); then
+            state="$CB_STATE_OPEN"
         fi
-        printf "state=%s\nfailures=%d\nlast_failure=%s\n" "$state" "$failures" "'"$now"'" > "'"$state_file"'"
-    '
-    # Re-read state for log message (outside lock, best-effort)
+        printf 'state=%s\nfailures=%d\nlast_failure=%s\n' \
+            "$state" "$failures" "$now" > "$state_file"
+    fi
+
     local cur_state
     cur_state=$(grep "^state=" "$state_file" 2>/dev/null | cut -d= -f2 || echo "$CB_STATE_CLOSED")
     if [[ "$cur_state" == "$CB_STATE_OPEN" ]]; then
