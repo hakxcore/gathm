@@ -52,11 +52,34 @@ retry_with_backoff() {
 
 # Execute a tool with full recovery pipeline
 # Usage: execute_with_recovery TOOL_NAME [args...]
+# Optional env: _GATHM_FALLBACK_DEPTH (internal, tracks recursion depth)
+#               _GATHM_FALLBACK_CHAIN (internal, colon-separated visited tools)
 execute_with_recovery() {
     local tool_name="$1"
     shift
     local tool_args=("$@")
     local tool_path="$SCRIPT_DIR_RECOVERY/tools/$tool_name/$tool_name"
+
+    # --- Cycle/depth guard ---
+    local depth="${_GATHM_FALLBACK_DEPTH:-0}"
+    local chain="${_GATHM_FALLBACK_CHAIN:-}"
+    local max_fallback_depth=2
+
+    if [[ "$depth" -ge "$max_fallback_depth" ]]; then
+        log_error "recovery" "Fallback depth limit ($max_fallback_depth) reached, aborting chain: $chain -> $tool_name"
+        echo '{"error":"fallback_depth_exceeded","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Maximum fallback depth reached. Possible cycle in fallback configuration."}' >&2
+        return 1
+    fi
+
+    case ":${chain}:" in
+        *":${tool_name}:"*)
+            log_error "recovery" "Fallback cycle detected: $chain -> $tool_name"
+            echo '{"error":"fallback_cycle","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Cycle detected in fallback chain. Check tool manifest fallback_tool fields."}' >&2
+            return 1
+            ;;
+    esac
+
+    local new_chain="${chain:+${chain}:}${tool_name}"
 
     log_info "recovery" "Executing tool with recovery: $tool_name" "\"args\":\"${tool_args[*]}\""
 
@@ -67,7 +90,8 @@ execute_with_recovery() {
         fallback=$(get_fallback_tool "$tool_name")
         if [[ -n "$fallback" && "$fallback" != "null" ]]; then
             log_info "recovery" "Using fallback tool: $fallback for $tool_name"
-            execute_with_recovery "$fallback" "${tool_args[@]}"
+            _GATHM_FALLBACK_DEPTH=$((depth + 1)) _GATHM_FALLBACK_CHAIN="$new_chain" \
+                execute_with_recovery "$fallback" "${tool_args[@]}"
             return $?
         fi
         log_error "recovery" "No fallback available for $tool_name, circuit is open"
@@ -104,7 +128,8 @@ execute_with_recovery() {
         fallback=$(get_fallback_tool "$tool_name")
         if [[ -n "$fallback" && "$fallback" != "null" ]]; then
             log_warn "recovery" "Tool $tool_name failed, trying fallback: $fallback"
-            execute_with_recovery "$fallback" "${tool_args[@]}"
+            _GATHM_FALLBACK_DEPTH=$((depth + 1)) _GATHM_FALLBACK_CHAIN="$new_chain" \
+                execute_with_recovery "$fallback" "${tool_args[@]}"
             return $?
         fi
 
