@@ -80,7 +80,8 @@ _log_append() {
     local file="$1"
     local line="$2"
     if command -v flock &>/dev/null; then
-        (flock -x 9; printf '%s\n' "$line") 9>>"$file" 2>/dev/null
+        local lock_file="${file}.lock"
+        (flock -x 9; printf '%s\n' "$line" >> "$file") 9>>"$lock_file" 2>/dev/null
     else
         printf '%s\n' "$line" >> "$file" 2>/dev/null
     fi
