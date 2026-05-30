@@ -9,7 +9,7 @@ dependencies:
 apis:
   - name: telehack
     base_url: telehack.com
-    health_endpoint: null
+    health_endpoint: ""
     auth_required: false
 
 input_schema:
