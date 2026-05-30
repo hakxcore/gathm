@@ -149,16 +149,37 @@ cb_get_state() {
     echo "${state:-$CB_STATE_CLOSED}"
 }
 
+# Portable file locking: uses flock(1) when available (Linux/WSL/Termux),
+# falls back to a mkdir-based spinlock on macOS/BSD where flock may be absent.
+_cb_lock() {
+    local lockfile="$1"
+    shift
+    if command -v flock &>/dev/null; then
+        flock -x "$lockfile" "$@"
+    else
+        # mkdir is atomic on POSIX; spin up to 2 s then proceed anyway
+        local lockdir="${lockfile}.lock"
+        local waited=0
+        until mkdir "$lockdir" 2>/dev/null; do
+            sleep 0.1
+            waited=$((waited + 1))
+            [[ $waited -ge 20 ]] && break
+        done
+        "$@"
+        rmdir "$lockdir" 2>/dev/null || true
+    fi
+}
+
 # Circuit Breaker - Record a success
 cb_record_success() {
     local tool="$1"
     local state_file="$GATHM_HEALTH_DIR/cb_${tool}.state"
 
-    cat > "$state_file" << EOF
+    _cb_lock "$state_file" bash -c "cat > \"$state_file\" << 'EOF'
 state=$CB_STATE_CLOSED
 failures=0
 last_failure=0
-EOF
+EOF"
     log_debug "circuit_breaker" "Circuit closed for tool: $tool"
 }
 
@@ -169,23 +190,28 @@ cb_record_failure() {
     local now
     now=$(date +%s)
 
-    local failures=0
-    if [[ -f "$state_file" ]]; then
-        failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+    # Read-modify-write under lock to prevent race conditions
+    local cb_tool="$tool" cb_now="$now" cb_threshold="$CB_FAILURE_THRESHOLD"
+    local cb_state_closed="$CB_STATE_CLOSED" cb_state_open="$CB_STATE_OPEN"
+    _cb_lock "$state_file" bash -c '
+        failures=0
+        if [[ -f "'"$state_file"'" ]]; then
+            failures=$(grep "^failures=" "'"$state_file"'" | cut -d= -f2)
+            failures=${failures:-0}
+        fi
+        failures=$((failures + 1))
+        state="'"$cb_state_closed"'"
+        if (( failures >= '"$cb_threshold"' )); then
+            state="'"$cb_state_open"'"
+        fi
+        printf "state=%s\nfailures=%d\nlast_failure=%s\n" "$state" "$failures" "'"$now"'" > "'"$state_file"'"
+    '
+    # Re-read state for log message (outside lock, best-effort)
+    local cur_state
+    cur_state=$(grep "^state=" "$state_file" 2>/dev/null | cut -d= -f2 || echo "$CB_STATE_CLOSED")
+    if [[ "$cur_state" == "$CB_STATE_OPEN" ]]; then
+        log_warn "circuit_breaker" "Circuit OPEN for tool: $tool"
     fi
-    failures=$((failures + 1))
-
-    local state="$CB_STATE_CLOSED"
-    if (( failures >= CB_FAILURE_THRESHOLD )); then
-        state="$CB_STATE_OPEN"
-        log_warn "circuit_breaker" "Circuit OPEN for tool: $tool (failures: $failures)"
-    fi
-
-    cat > "$state_file" << EOF
-state=$state
-failures=$failures
-last_failure=$now
-EOF
 }
 
 # Circuit Breaker - Check if tool is allowed to execute

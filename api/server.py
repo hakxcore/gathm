@@ -1,109 +1,106 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gathm Enterprise - REST API Server
+Gathm Enterprise - REST API Server (FastAPI)
 Exposes all Gathm tools via HTTP endpoints for programmatic access.
-Cross-platform: Linux (all distros), macOS, Termux, Windows (WSL/Git Bash/MSYS2/native)
+Cross-platform: Linux (all distros), macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
 Usage:
     python3 api/server.py [--port 8080] [--host 0.0.0.0]
+    uvicorn api.server:app --port 8080
 
 Endpoints:
     GET  /api/v1/tools                  - List all tools
     GET  /api/v1/tools/{name}           - Get tool metadata
     POST /api/v1/tools/{name}/execute   - Execute a tool
-    GET  /api/v1/health                 - System health check
+    GET  /api/v1/health                 - System health check (public)
     GET  /api/v1/health/{tool}          - Tool health check
     POST /api/v1/agent/ask              - Natural language query
     POST /api/v1/agent/plan             - Create execution plan
     POST /api/v1/agent/engineer         - Engineering agent task
     POST /api/v1/agent/chain            - Execute tool pipeline
+    POST /api/v1/agent/parallel         - Execute tools in parallel
     GET  /api/v1/agent/status           - Agent status
     POST /api/v1/agent/heal             - Self-heal tools
 """
 
-import http.server
+from __future__ import annotations
+
+import asyncio
 import json
 import os
 import platform
+import secrets
 import shutil
 import subprocess
 import sys
-import urllib.parse
 import time
 from pathlib import Path
+from typing import Any
 
-# PyYAML is optional - fall back to basic parsing if not available
+try:
+    from fastapi import FastAPI, HTTPException, Request, Response, status
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel
+    import uvicorn
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
 try:
     import yaml
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
 
-# Configuration
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
 GATHM_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
 GUI_DIR = GATHM_ROOT / "gui"
 AGENT_SCRIPT = GATHM_ROOT / "agent" / "orchestrator.sh"
-DEFAULT_PORT = 8080
-DEFAULT_HOST = "127.0.0.1"
+POLICIES_FILE = GATHM_ROOT / "config" / "policies.yaml"
 
-# MIME types for static GUI files
-MIME_TYPES = {
-    ".html": "text/html",
-    ".css": "text/css",
-    ".js": "application/javascript",
-    ".json": "application/json",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".svg": "image/svg+xml",
-    ".ico": "image/x-icon",
-}
+DEFAULT_PORT = int(os.environ.get("GATHM_PORT", 8080))
+DEFAULT_HOST = os.environ.get("GATHM_HOST", "127.0.0.1")
 
-# API Authentication
-# Set GATHM_API_KEY environment variable to enable API key authentication.
-# When set, all requests must include: Authorization: Bearer <key>
-# Health and root endpoints are exempt.
-GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
-PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health"}
-# GUI static files are also public (any path not starting with /api/)
+API_VERSION = "3.0.0"
 
-import hashlib
-import secrets
-
+# ---------------------------------------------------------------------------
+# Bash detection (cross-platform)
+# ---------------------------------------------------------------------------
 
 def _find_bash() -> str:
-    """Find bash executable cross-platform (Linux/macOS/Termux/Windows)."""
-    # Direct lookup
     bash = shutil.which("bash")
     if bash:
         return bash
-    # Windows-specific paths
     if platform.system() == "Windows":
-        candidates = [
+        for candidate in [
             r"C:\Program Files\Git\bin\bash.exe",
             r"C:\msys64\usr\bin\bash.exe",
-            r"C:\Windows\System32\bash.exe",  # WSL
-        ]
-        for candidate in candidates:
+            r"C:\Windows\System32\bash.exe",
+        ]:
             if os.path.isfile(candidate):
                 return candidate
-    return "bash"  # Last resort - hope it's on PATH
-
+    return "bash"
 
 BASH_CMD = _find_bash()
 
+# ---------------------------------------------------------------------------
+# YAML helpers
+# ---------------------------------------------------------------------------
 
-def load_tool_manifest(tool_name: str) -> dict:
-    """Load a tool's YAML manifest (works with or without PyYAML)."""
-    manifest_path = TOOLS_DIR / tool_name / "tool.yaml"
-    if not manifest_path.exists():
+def _load_yaml(path: Path) -> dict:
+    if not path.exists():
         return {}
-    with open(manifest_path) as f:
+    with open(path) as f:
         if HAS_YAML:
             return yaml.safe_load(f) or {}
-        # Basic YAML fallback parser for simple key: value manifests
-        result = {}
+        result: dict = {}
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and ":" in line:
@@ -113,312 +110,456 @@ def load_tool_manifest(tool_name: str) -> dict:
                     result[key.strip()] = value
         return result
 
+# ---------------------------------------------------------------------------
+# Policies / RBAC
+# ---------------------------------------------------------------------------
 
-def list_tools() -> list:
-    """List all available tools with their metadata."""
+_policies: dict = {}
+_policies_mtime: float = 0.0
+
+def _get_policies() -> dict:
+    global _policies, _policies_mtime
+    try:
+        mtime = POLICIES_FILE.stat().st_mtime
+    except OSError:
+        return _policies
+    if mtime != _policies_mtime:
+        _policies = _load_yaml(POLICIES_FILE)
+        _policies_mtime = mtime
+    return _policies
+
+# token → role mapping via GATHM_API_KEYS env var
+# Format: "token1:role1,token2:role2"  e.g. "secret123:admin,readonly-key:readonly"
+# If GATHM_API_KEY (legacy single key) is set alone, it maps to "admin" role.
+def _build_token_map() -> dict[str, str]:
+    token_map: dict[str, str] = {}
+    multi = os.environ.get("GATHM_API_KEYS", "")
+    if multi:
+        for pair in multi.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                tok, role = pair.split(":", 1)
+                token_map[tok.strip()] = role.strip()
+    legacy = os.environ.get("GATHM_API_KEY", "")
+    if legacy and legacy not in token_map:
+        token_map[legacy] = "admin"
+    return token_map
+
+TOKEN_MAP: dict[str, str] = _build_token_map()
+AUTH_ENABLED = bool(TOKEN_MAP)
+
+# Public paths that skip auth entirely
+PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health"}
+
+def resolve_role(request: Request) -> str | None:
+    """Return the role for the request's bearer token, or None if unauthenticated."""
+    if not AUTH_ENABLED:
+        return "admin"
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:]
+    for stored_token, role in TOKEN_MAP.items():
+        if secrets.compare_digest(token, stored_token):
+            return role
+    return None
+
+def role_has_permission(role: str, permission: str) -> bool:
+    policies = _get_policies()
+    roles_cfg = policies.get("roles", {})
+    role_cfg = roles_cfg.get(role, {})
+    perms = role_cfg.get("permissions", [])
+    return "*" in perms or permission in perms
+
+def role_rate_limit(role: str) -> int:
+    """Returns requests-per-minute limit; 0 means unlimited."""
+    policies = _get_policies()
+    roles_cfg = policies.get("roles", {})
+    role_cfg = roles_cfg.get(role, {})
+    return int(role_cfg.get("rate_limit", 60))
+
+def tool_rate_limit(tool_name: str) -> int | None:
+    """Returns per-tool override limit if configured."""
+    policies = _get_policies()
+    per_tool = policies.get("rate_limiting", {}).get("per_tool_limits", {})
+    val = per_tool.get(tool_name)
+    return int(val) if val is not None else None
+
+def role_blocked_tools(role: str) -> list[str]:
+    policies = _get_policies()
+    roles_cfg = policies.get("roles", {})
+    return list(roles_cfg.get(role, {}).get("blocked_tools", []))
+
+def role_requires_approval(role: str) -> list[str]:
+    policies = _get_policies()
+    roles_cfg = policies.get("roles", {})
+    return list(roles_cfg.get(role, {}).get("requires_approval", []))
+
+# ---------------------------------------------------------------------------
+# In-process rate limiter (sliding window per token/IP)
+# ---------------------------------------------------------------------------
+
+_rate_windows: dict[str, list[float]] = {}
+
+def check_rate_limit(key: str, limit: int) -> bool:
+    """Returns True if allowed, False if rate-limited. limit=0 means unlimited."""
+    if limit == 0:
+        return True
+    now = time.monotonic()
+    window = _rate_windows.setdefault(key, [])
+    # Evict entries older than 60 s
+    cutoff = now - 60.0
+    _rate_windows[key] = [t for t in window if t > cutoff]
+    if len(_rate_windows[key]) >= limit:
+        return False
+    _rate_windows[key].append(now)
+    return True
+
+# ---------------------------------------------------------------------------
+# Tool helpers
+# ---------------------------------------------------------------------------
+
+def load_tool_manifest(tool_name: str) -> dict:
+    return _load_yaml(TOOLS_DIR / tool_name / "tool.yaml")
+
+def list_tools() -> list[dict]:
     tools = []
     for tool_dir in sorted(TOOLS_DIR.iterdir()):
-        if tool_dir.is_dir():
-            tool_name = tool_dir.name
-            tool_exec = tool_dir / tool_name
-            if tool_exec.exists():
-                manifest = load_tool_manifest(tool_name)
-                tools.append({
-                    "name": tool_name,
-                    "description": manifest.get("description", "No description"),
-                    "version": manifest.get("version", "unknown"),
-                    "category": manifest.get("category", "unknown"),
-                    "tags": manifest.get("tags", []),
-                })
+        if tool_dir.is_dir() and (tool_dir / tool_dir.name).exists():
+            m = load_tool_manifest(tool_dir.name)
+            tools.append({
+                "name": tool_dir.name,
+                "description": m.get("description", "No description"),
+                "version": m.get("version", "unknown"),
+                "category": m.get("category", "unknown"),
+                "tags": m.get("tags", []),
+            })
     return tools
 
+async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None = None) -> dict:
+    env = {**os.environ, "GATHM_OUTPUT_MODE": "json"}
+    if extra_env:
+        env.update(extra_env)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return {"status": "error", "exit_code": -1, "output": "",
+                    "error": f"Timed out after {timeout}s", "duration_ms": timeout * 1000}
+        return {
+            "status": "success" if proc.returncode == 0 else "error",
+            "exit_code": proc.returncode,
+            "output": stdout.decode(errors="replace").strip(),
+            "error": stderr.decode(errors="replace").strip() if proc.returncode != 0 else "",
+        }
+    except Exception as exc:
+        return {"status": "error", "exit_code": -1, "output": "", "error": str(exc)}
 
-def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
-    """Execute a tool via the agent orchestrator."""
-    args = args or []
+async def execute_tool(tool_name: str, args: list[str], timeout: int = 120) -> dict:
+    start = time.monotonic()
     cmd = [BASH_CMD, str(AGENT_SCRIPT), "run", tool_name] + args
+    result = await _run_subprocess(cmd, timeout)
+    result["tool"] = tool_name
+    result.setdefault("duration_ms", int((time.monotonic() - start) * 1000))
+    return result
 
-    start_time = time.time()
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ, "GATHM_OUTPUT_MODE": "json"}
-        )
-        duration_ms = int((time.time() - start_time) * 1000)
-
-        return {
-            "tool": tool_name,
-            "status": "success" if result.returncode == 0 else "error",
-            "exit_code": result.returncode,
-            "output": result.stdout.strip(),
-            "error": result.stderr.strip() if result.returncode != 0 else "",
-            "duration_ms": duration_ms,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "tool": tool_name,
-            "status": "error",
-            "exit_code": -1,
-            "output": "",
-            "error": f"Tool execution timed out after {timeout}s",
-            "duration_ms": timeout * 1000,
-        }
-    except Exception as e:
-        return {
-            "tool": tool_name,
-            "status": "error",
-            "exit_code": -1,
-            "output": "",
-            "error": str(e),
-            "duration_ms": 0,
-        }
-
-
-def run_agent_command(command: str, args: str = "") -> dict:
-    """Run an agent orchestrator command."""
+async def run_agent_command(command: str, arg: str = "") -> dict:
     cmd = [BASH_CMD, str(AGENT_SCRIPT), command]
-    if args:
-        cmd.extend(args.split())
+    if arg:
+        cmd += arg.split()
     cmd.append("--json")
-
+    result = await _run_subprocess(cmd, timeout=120)
+    raw = result.get("output", "")
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env={**os.environ, "GATHM_OUTPUT_MODE": "json"}
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"raw_output": raw, "exit_code": result.get("exit_code", -1)}
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+if not HAS_FASTAPI:
+    # Fallback: print helpful error and exit; prevents silent failures
+    print(
+        "ERROR: FastAPI and uvicorn are required.\n"
+        "Install with: pip install fastapi uvicorn pydantic",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+app = FastAPI(
+    title="Gathm Enterprise API",
+    version=API_VERSION,
+    description="Orchestrate security, networking, and data tools via REST.",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+# ---------------------------------------------------------------------------
+# Auth + rate-limit middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def auth_and_ratelimit(request: Request, call_next):
+    path = request.url.path.rstrip("/")
+
+    # Public paths and GUI static assets skip auth
+    is_api = path.startswith("/api/")
+    is_public = path in PUBLIC_PATHS or not is_api
+
+    if is_public:
+        return await call_next(request)
+
+    role = resolve_role(request)
+    if role is None:
+        return JSONResponse(
+            {"error": "Unauthorized", "detail": "Provide: Authorization: Bearer <token>"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
         )
-        output = result.stdout.strip()
-        # Try to parse as JSON
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError:
-            return {"raw_output": output, "exit_code": result.returncode}
-    except Exception as e:
-        return {"error": str(e)}
 
+    # Rate limit: use token as key when auth enabled, else IP
+    auth_header = request.headers.get("Authorization", "")
+    rl_key = auth_header[7:] if auth_header.startswith("Bearer ") else (
+        request.client.host if request.client else "anonymous"
+    )
+    limit = role_rate_limit(role)
+    if not check_rate_limit(rl_key, limit):
+        policies = _get_policies()
+        window = policies.get("rate_limiting", {}).get("window_seconds", 60)
+        return JSONResponse(
+            {"error": "rate_limit_exceeded", "role": role, "limit": limit,
+             "window_seconds": window},
+            status_code=429,
+            headers={"X-RateLimit-Limit": str(limit), "Retry-After": str(window)},
+        )
 
-class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP request handler for the Gathm API."""
+    # Attach role to request state for route handlers
+    request.state.role = role
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    return response
 
-    def _send_json(self, data: dict, status: int = 200):
-        """Send a JSON response."""
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, indent=2).encode())
+# ---------------------------------------------------------------------------
+# Pydantic request models
+# ---------------------------------------------------------------------------
 
-    def _serve_gui_file(self, file_path: str):
-        """Serve a static file from the gui/ directory."""
-        if file_path in ("", "/"):
-            file_path = "/index.html"
-        # Prevent path traversal
-        safe_path = Path(os.path.normpath(file_path.lstrip("/")))
-        if ".." in safe_path.parts:
-            self._send_json({"error": "Forbidden"}, 403)
-            return
-        full_path = GUI_DIR / safe_path
-        if not full_path.is_file():
-            self._send_json({"error": "Not found"}, 404)
-            return
-        mime = MIME_TYPES.get(full_path.suffix, "application/octet-stream")
-        self.send_response(200)
-        self.send_header("Content-Type", mime)
-        self.end_headers()
-        self.wfile.write(full_path.read_bytes())
+class ExecuteRequest(BaseModel):
+    args: list[str] | str = []
+    timeout: int = 120
 
-    def _read_body(self) -> dict:
-        """Read and parse JSON request body."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            return {}
-        body = self.rfile.read(content_length)
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError:
-            return {}
+class QueryRequest(BaseModel):
+    query: str
 
-    def _check_auth(self) -> bool:
-        """Verify API key if GATHM_API_KEY is configured."""
-        if not GATHM_API_KEY:
-            return True  # No auth required
+class TaskRequest(BaseModel):
+    task: str
 
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        if path in PUBLIC_PATHS or not path.startswith("/api/"):
-            return True  # Public endpoints and GUI static files
+class PipelineRequest(BaseModel):
+    pipeline: str
 
-        auth_header = self.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            # Constant-time comparison
-            return secrets.compare_digest(token, GATHM_API_KEY)
-        return False
+class ParallelRequest(BaseModel):
+    tools: str
 
-    def do_OPTIONS(self):
-        """Handle CORS preflight."""
-        self._send_json({})
+class HealRequest(BaseModel):
+    tool: str = "all"
 
-    def do_GET(self):
-        """Handle GET requests."""
-        if not self._check_auth():
-            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
-            return
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path.rstrip("/")
+# ---------------------------------------------------------------------------
+# Helper: enforce tool-level permissions
+# ---------------------------------------------------------------------------
 
-        # GET /api/v1/tools
-        if path == "/api/v1/tools":
-            tools = list_tools()
-            self._send_json({"tools": tools, "count": len(tools)})
+def _check_tool_access(role: str, tool_name: str) -> JSONResponse | None:
+    """Returns a 403 response if the role cannot access the tool, else None."""
+    if not role_has_permission(role, "tool:execute"):
+        return JSONResponse(
+            {"error": "forbidden", "detail": f"Role '{role}' lacks tool:execute permission"},
+            status_code=403,
+        )
+    if tool_name in role_blocked_tools(role):
+        return JSONResponse(
+            {"error": "forbidden", "detail": f"Tool '{tool_name}' is blocked for role '{role}'"},
+            status_code=403,
+        )
+    if tool_name in role_requires_approval(role):
+        return JSONResponse(
+            {"error": "approval_required",
+             "detail": f"Tool '{tool_name}' requires explicit approval for role '{role}'"},
+            status_code=403,
+        )
+    return None
 
-        # GET /api/v1/tools/{name}
-        elif path.startswith("/api/v1/tools/"):
-            tool_name = path.split("/")[-1]
-            manifest = load_tool_manifest(tool_name)
-            if manifest:
-                self._send_json(manifest)
-            else:
-                self._send_json({"error": f"Tool '{tool_name}' not found"}, 404)
+def _get_role(request: Request) -> str:
+    return getattr(request.state, "role", "admin")
 
-        # GET /api/v1/health
-        elif path == "/api/v1/health":
-            result = run_agent_command("health", "all")
-            self._send_json(result)
+# ---------------------------------------------------------------------------
+# Routes: tools
+# ---------------------------------------------------------------------------
 
-        # GET /api/v1/health/{tool}
-        elif path.startswith("/api/v1/health/"):
-            tool_name = path.split("/")[-1]
-            result = run_agent_command("health", tool_name)
-            self._send_json(result)
+@app.get("/api/v1/tools", tags=["tools"])
+async def get_tools():
+    tools = list_tools()
+    return {"tools": tools, "count": len(tools)}
 
-        # GET /api/v1/agent/status
-        elif path == "/api/v1/agent/status":
-            result = run_agent_command("status")
-            self._send_json(result)
+@app.get("/api/v1/tools/{tool_name}", tags=["tools"])
+async def get_tool(tool_name: str, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:discover"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
+    manifest = load_tool_manifest(tool_name)
+    if not manifest:
+        raise HTTPException(404, f"Tool '{tool_name}' not found")
+    return manifest
 
-        # API documentation
-        elif path in ("/api", "/api/v1"):
-            self._send_json({
-                "name": "Gathm Enterprise API",
-                "version": "2.0.0",
-                "auth": "Set GATHM_API_KEY env var to enable Bearer token auth",
-                "endpoints": {
-                    "GET /api/v1/tools": "List all tools",
-                    "GET /api/v1/tools/{name}": "Get tool metadata",
-                    "POST /api/v1/tools/{name}/execute": "Execute a tool",
-                    "GET /api/v1/health": "System health check (public)",
-                    "GET /api/v1/health/{tool}": "Tool health check",
-                    "POST /api/v1/agent/ask": "Natural language query",
-                    "POST /api/v1/agent/plan": "Create execution plan",
-                    "POST /api/v1/agent/engineer": "Engineering agent task",
-                    "POST /api/v1/agent/chain": "Execute tool pipeline",
-                    "POST /api/v1/agent/parallel": "Execute tools in parallel",
-                    "GET /api/v1/agent/status": "Agent status",
-                    "POST /api/v1/agent/heal": "Self-heal tools",
-                }
-            })
+@app.post("/api/v1/tools/{tool_name}/execute", tags=["tools"])
+async def execute(tool_name: str, body: ExecuteRequest, request: Request):
+    role = _get_role(request)
+    denied = _check_tool_access(role, tool_name)
+    if denied:
+        return denied
 
-        # GUI static files (root and any non-API path)
-        else:
-            self._serve_gui_file(parsed.path)
+    # Per-tool rate limit (if configured)
+    tool_limit = tool_rate_limit(tool_name)
+    if tool_limit is not None:
+        rl_key = f"tool:{tool_name}:{request.client.host if request.client else 'anon'}"
+        if not check_rate_limit(rl_key, tool_limit):
+            return JSONResponse(
+                {"error": "rate_limit_exceeded", "tool": tool_name, "limit": tool_limit},
+                status_code=429,
+                headers={"X-RateLimit-Limit": str(tool_limit)},
+            )
 
-    def do_POST(self):
-        """Handle POST requests."""
-        if not self._check_auth():
-            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
-            return
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        body = self._read_body()
+    args = body.args.split() if isinstance(body.args, str) else body.args
+    result = await execute_tool(tool_name, args, body.timeout)
+    return JSONResponse(result, status_code=200 if result["status"] == "success" else 500)
 
-        # POST /api/v1/tools/{name}/execute
-        if path.startswith("/api/v1/tools/") and path.endswith("/execute"):
-            parts = path.split("/")
-            tool_name = parts[4]  # /api/v1/tools/{name}/execute
-            args = body.get("args", [])
-            timeout = body.get("timeout", 120)
+# ---------------------------------------------------------------------------
+# Routes: health (public)
+# ---------------------------------------------------------------------------
 
-            if isinstance(args, str):
-                args = args.split()
+@app.get("/api/v1/health", tags=["health"])
+async def health():
+    return await run_agent_command("health", "all")
 
-            result = execute_tool(tool_name, args, timeout)
-            status = 200 if result["status"] == "success" else 500
-            self._send_json(result, status)
+@app.get("/api/v1/health/{tool_name}", tags=["health"])
+async def health_tool(tool_name: str, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:healthcheck"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:healthcheck permission")
+    return await run_agent_command("health", tool_name)
 
-        # POST /api/v1/agent/ask
-        elif path == "/api/v1/agent/ask":
-            query = body.get("query", "")
-            if not query:
-                self._send_json({"error": "Missing 'query' field"}, 400)
-                return
-            result = run_agent_command("ask", query)
-            self._send_json(result)
+# ---------------------------------------------------------------------------
+# Routes: agent
+# ---------------------------------------------------------------------------
 
-        # POST /api/v1/agent/plan
-        elif path == "/api/v1/agent/plan":
-            task = body.get("task", "")
-            if not task:
-                self._send_json({"error": "Missing 'task' field"}, 400)
-                return
-            result = run_agent_command("plan", task)
-            self._send_json(result)
+@app.post("/api/v1/agent/ask", tags=["agent"])
+async def agent_ask(body: QueryRequest, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await run_agent_command("ask", body.query)
 
-        # POST /api/v1/agent/engineer
-        elif path == "/api/v1/agent/engineer":
-            task = body.get("task", "")
-            if not task:
-                self._send_json({"error": "Missing 'task' field"}, 400)
-                return
-            result = run_agent_command("engineer", task)
-            self._send_json(result)
+@app.post("/api/v1/agent/plan", tags=["agent"])
+async def agent_plan(body: TaskRequest, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await run_agent_command("plan", body.task)
 
-        # POST /api/v1/agent/chain
-        elif path == "/api/v1/agent/chain":
-            pipeline = body.get("pipeline", "")
-            if not pipeline:
-                self._send_json({"error": "Missing 'pipeline' field"}, 400)
-                return
-            result = run_agent_command("chain", pipeline)
-            self._send_json(result)
+@app.post("/api/v1/agent/engineer", tags=["agent"])
+async def agent_engineer(body: TaskRequest, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await run_agent_command("engineer", body.task)
 
-        # POST /api/v1/agent/parallel
-        elif path == "/api/v1/agent/parallel":
-            tools = body.get("tools", "")
-            if not tools:
-                self._send_json({"error": "Missing 'tools' field"}, 400)
-                return
-            result = run_agent_command("parallel", tools)
-            self._send_json(result)
+@app.post("/api/v1/agent/chain", tags=["agent"])
+async def agent_chain(body: PipelineRequest, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await run_agent_command("chain", body.pipeline)
 
-        # POST /api/v1/agent/heal
-        elif path == "/api/v1/agent/heal":
-            tool = body.get("tool", "all")
-            result = run_agent_command("heal", tool)
-            self._send_json(result)
+@app.post("/api/v1/agent/parallel", tags=["agent"])
+async def agent_parallel(body: ParallelRequest, request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await run_agent_command("parallel", body.tools)
 
-        else:
-            self._send_json({"error": "Not found"}, 404)
+@app.get("/api/v1/agent/status", tags=["agent"])
+async def agent_status(request: Request):
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:discover"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
+    return await run_agent_command("status")
 
-    def log_message(self, format, *args):
-        """Custom log format."""
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        sys.stderr.write(f"[{timestamp}] {args[0]} {args[1]} {args[2]}\n")
+@app.post("/api/v1/agent/heal", tags=["agent"])
+async def agent_heal(body: HealRequest, request: Request):
+    role = _get_role(request)
+    # Only admin and agent roles can trigger self-healing
+    if not role_has_permission(role, "tool:execute") or role == "readonly":
+        raise HTTPException(403, f"Role '{role}' cannot trigger self-healing")
+    return await run_agent_command("heal", body.tool)
 
+# ---------------------------------------------------------------------------
+# Routes: API info
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1", tags=["meta"])
+@app.get("/api", tags=["meta"])
+async def api_info():
+    return {
+        "name": "Gathm Enterprise API",
+        "version": API_VERSION,
+        "auth": "Set GATHM_API_KEYS=token:role,... or GATHM_API_KEY=token (admin) to enable",
+        "docs": "/api/docs",
+        "endpoints": {
+            "GET /api/v1/tools": "List all tools",
+            "GET /api/v1/tools/{name}": "Get tool metadata",
+            "POST /api/v1/tools/{name}/execute": "Execute a tool",
+            "GET /api/v1/health": "System health check (public)",
+            "GET /api/v1/health/{tool}": "Tool health check",
+            "POST /api/v1/agent/ask": "Natural language query",
+            "POST /api/v1/agent/plan": "Create execution plan",
+            "POST /api/v1/agent/engineer": "Engineering agent task",
+            "POST /api/v1/agent/chain": "Execute tool pipeline",
+            "POST /api/v1/agent/parallel": "Execute tools in parallel",
+            "GET /api/v1/agent/status": "Agent status",
+            "POST /api/v1/agent/heal": "Self-heal tools",
+        },
+    }
+
+# ---------------------------------------------------------------------------
+# GUI static files (served last so API routes take precedence)
+# ---------------------------------------------------------------------------
+
+if GUI_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(GUI_DIR), html=True), name="gui")
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 def main():
-    """Start the API server."""
     port = DEFAULT_PORT
     host = DEFAULT_HOST
 
-    # Parse command line arguments
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -434,23 +575,25 @@ def main():
         else:
             i += 1
 
-    server = http.server.HTTPServer((host, port), GathmAPIHandler)
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║           Gathm Enterprise API Server            ║
+║       Gathm Enterprise API Server v{API_VERSION}       ║
 ╠══════════════════════════════════════════════════╣
 ║  Host: {host:<41s} ║
 ║  Port: {port:<41d} ║
 ║  GUI:  http://{host}:{port:<25d} ║
 ║  API:  http://{host}:{port}/api/v1{' ' * 16}║
+║  Docs: http://{host}:{port}/api/docs{' ' * 14}║
 ╚══════════════════════════════════════════════════╝
 """)
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        server.shutdown()
+    uvicorn.run(
+        "api.server:app",
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=True,
+    )
 
 
 if __name__ == "__main__":

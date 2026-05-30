@@ -73,6 +73,19 @@ _epoch_ms() {
     fi
 }
 
+# Append a line to a log file under an exclusive lock.
+# Uses flock(1) on Linux/WSL/Termux; falls back to >> (atomic on most POSIX
+# filesystems for small writes) on macOS/BSD where flock may not be present.
+_log_append() {
+    local file="$1"
+    local line="$2"
+    if command -v flock &>/dev/null; then
+        (flock -x 9; printf '%s\n' "$line") 9>>"$file" 2>/dev/null
+    else
+        printf '%s\n' "$line" >> "$file" 2>/dev/null
+    fi
+}
+
 # Core structured log function - outputs JSON
 # Usage: _log LEVEL COMPONENT MESSAGE [extra_json_fields]
 _log() {
@@ -108,7 +121,7 @@ _log() {
             "$timestamp" "$level" "$component" "$message" "$hostname_val" "$pid")
     fi
 
-    echo "$log_entry" >> "$GATHM_LOG_FILE" 2>/dev/null
+    _log_append "$GATHM_LOG_FILE" "$log_entry"
 
     # Also print errors/fatals to stderr
     if [ "$level_num" -ge 3 ]; then
@@ -136,7 +149,7 @@ audit_log() {
     local entry
     entry=$(printf '{"timestamp":"%s","action":"%s","actor":"%s","tool":"%s","details":"%s"}' \
         "$timestamp" "$action" "$actor" "$tool" "$details")
-    echo "$entry" >> "$GATHM_AUDIT_FILE" 2>/dev/null
+    _log_append "$GATHM_AUDIT_FILE" "$entry"
 }
 
 # Metrics log - track tool invocations, latency, success rates
@@ -161,7 +174,7 @@ log_metric() {
         entry=$(printf '{"timestamp":"%s","tool":"%s","duration_ms":%s,"exit_code":%d,"status":"%s"}' \
             "$timestamp" "$tool" "$duration_ms" "$exit_code" "$status")
     fi
-    echo "$entry" >> "$GATHM_METRICS_FILE" 2>/dev/null
+    _log_append "$GATHM_METRICS_FILE" "$entry"
 }
 
 # Timed execution wrapper - runs a command and logs metrics
