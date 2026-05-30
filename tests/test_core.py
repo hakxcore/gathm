@@ -60,6 +60,8 @@ class TestCircuitBreaker(unittest.TestCase):
 export GATHM_HEALTH_DIR="{self._health}"
 export GATHM_LOG_DIR="{self._logs}"
 export GATHM_LOG_LEVEL="ERROR"
+export CB_FAILURE_THRESHOLD=3
+export CB_RECOVERY_TIMEOUT=60
 {_lib("logging", "health")}
 """
         return _bash(preamble + snippet)
