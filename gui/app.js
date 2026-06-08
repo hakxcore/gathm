@@ -1,64 +1,64 @@
-// Gathm AI — app.js
+// Gathm AI -- app.js
 
 const API_BASE = window.GATHM_API_URL || 'http://127.0.0.1:8080';
 
 lucide.createIcons();
 
-// ── Element refs ───────────────────────────────────────────────
-const aiOrb       = document.getElementById('aiOrb');
-const mainOrb     = document.getElementById('mainOrb');
-const freqBars    = document.getElementById('freqBars');
-const botStatus   = document.getElementById('botStatus');
-const chatArea    = document.getElementById('chatArea');
+// -- Element refs ----------------------------------------------------------
+const aiOrb        = document.getElementById('aiOrb');
+const mainOrb      = document.getElementById('mainOrb');
+const freqBars     = document.getElementById('freqBars');
+const botStatus    = document.getElementById('botStatus');
+const chatArea     = document.getElementById('chatArea');
 const messageInput = document.getElementById('messageInput');
-const sendBtn     = document.getElementById('sendBtn');
-const micBtn      = document.getElementById('micBtn');
+const sendBtn      = document.getElementById('sendBtn');
+const micBtn       = document.getElementById('micBtn');
 
-// ── Orb state ──────────────────────────────────────────────────
+// -- Orb state -------------------------------------------------------------
 function setOrbState(state) {
-    if (aiOrb) aiOrb.className = `ai-orb ${state}`;
+    if (aiOrb) aiOrb.className = 'ai-orb ' + state;
 }
 
-// ── Connectivity ───────────────────────────────────────────────
+// -- Connectivity ----------------------------------------------------------
 let isOnline = false;
 
 async function checkConnectivity() {
-    try {
-        // /ping is instant — /health sweeps every tool and would time out.
-        const res = await fetch(`${API_BASE}/api/v1/ping`, {
-            signal: AbortSignal.timeout(4000),
-        });
-        isOnline = res.ok;
-    } catch {
-        isOnline = false;
+    // Try /ping first (instant). Fall back to /api/v1/tools for older
+    // servers that pre-date the /ping endpoint.
+    isOnline = false;
+    for (const p of ['/api/v1/ping', '/api/v1/tools']) {
+        try {
+            const res = await fetch(API_BASE + p, { signal: AbortSignal.timeout(4000) });
+            if (res.ok) { isOnline = true; break; }
+        } catch (_) { /* try next */ }
     }
-    botStatus.textContent = isOnline ? 'Online · Voice & Text' : 'Offline · API not reachable';
+    botStatus.textContent = isOnline ? 'Online - Voice & Text' : 'Offline - API not reachable';
 }
 
 checkConnectivity();
 setInterval(checkConnectivity, 30000);
 
-// ── Scroll ─────────────────────────────────────────────────────
+// -- Scroll ----------------------------------------------------------------
 function scrollToBottom() {
     chatArea.scrollTop = chatArea.scrollHeight;
 }
 
-// ── Time ───────────────────────────────────────────────────────
+// -- Time ------------------------------------------------------------------
 function formatTime() {
     const d = new Date();
     let h = d.getHours(), m = d.getMinutes();
     const ampm = h >= 12 ? 'PM' : 'AM';
     h = h % 12 || 12;
-    return `${h}:${m < 10 ? '0' + m : m} ${ampm}`;
+    return h + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
 }
 
-// ── Messages ───────────────────────────────────────────────────
+// -- Messages --------------------------------------------------------------
 function addMessage(text, sender, cssClass) {
     const wrapper = document.createElement('div');
-    wrapper.className = `message-wrapper ${sender}`;
+    wrapper.className = 'message-wrapper ' + sender;
 
     const msg = document.createElement('div');
-    msg.className = `message ${cssClass || sender + '-text'}`;
+    msg.className = 'message ' + (cssClass || sender + '-text');
 
     const p = document.createElement('p');
     p.textContent = text;
@@ -66,7 +66,7 @@ function addMessage(text, sender, cssClass) {
     wrapper.appendChild(msg);
 
     const time = document.createElement('div');
-    time.className = `message-time ${sender}-time`;
+    time.className = 'message-time ' + sender + '-time';
     time.textContent = formatTime();
 
     chatArea.appendChild(wrapper);
@@ -74,7 +74,7 @@ function addMessage(text, sender, cssClass) {
     scrollToBottom();
 }
 
-// ── Typing indicator ───────────────────────────────────────────
+// -- Typing indicator ------------------------------------------------------
 let typingEl = null;
 
 function showTyping() {
@@ -93,39 +93,41 @@ function showTyping() {
 
 function hideTyping() {
     setOrbState('idle');
-    typingEl?.remove();
-    typingEl = null;
+    if (typingEl) { typingEl.remove(); typingEl = null; }
 }
 
-// ── Render agent reply ─────────────────────────────────────────
-// The /agent/ask endpoint is a tool ROUTER, not a chat LLM. It returns
-// structured JSON; translate it into something human-readable instead of
-// dumping raw JSON into the chat.
+// -- Format API response ---------------------------------------------------
+// /agent/ask now executes the matched tool and returns {status, output}.
+// Translate all response shapes into plain human-readable text.
 function formatAgentReply(data) {
-    // A tool was matched to the query
-    if (data.matched_tool && data.matched_tool !== 'null') {
-        const desc   = data.description ? `\n\n${data.description}` : '';
-        const action = data.action ? `\n\n→ ${data.action}` : `\n\n→ Run: gathm run ${data.matched_tool}`;
-        return `I can help with that using the “${data.matched_tool}” tool.${desc}${action}`;
+    // Tool ran successfully
+    if (data.status === 'success' && data.output) {
+        return data.output;
     }
 
-    // No tool matched — give a friendly, useful nudge instead of an error blob
+    // Tool ran but errored
+    if (data.status === 'error') {
+        const msg = data.error || data.output || 'Tool returned an error.';
+        return (data.tool ? '"' + data.tool + '" error: ' : '') + msg;
+    }
+
+    // No tool matched -- friendly hint
     if (data.error && /no matching tool/i.test(data.error)) {
-        return "I'm a tool-running assistant, so I work best with task requests. " +
-               "Try things like:\n" +
-               "  • weather in Tokyo\n" +
-               "  • dns records for github.com\n" +
-               "  • ip info 8.8.8.8\n" +
-               "  • define serendipity\n" +
-               "  • crypto price bitcoin";
+        return 'I can run tools for you. Try requests like:\n' +
+               '  * weather in Tokyo\n' +
+               '  * dns records for github.com\n' +
+               '  * ip info 8.8.8.8\n' +
+               '  * define serendipity\n' +
+               '  * crypto price bitcoin\n' +
+               '  * news';
     }
 
-    // Any other shape: prefer real output, fall back to the error text
+    // Fallback
     return data.raw_output || data.output || data.result || data.error
         || JSON.stringify(data, null, 2);
 }
 
-// ── Send via API ───────────────────────────────────────────────
+// -- Send via API ----------------------------------------------------------
 let isSending = false;
 
 async function sendMessage() {
@@ -139,7 +141,7 @@ async function sendMessage() {
     showTyping();
 
     try {
-        const res = await fetch(`${API_BASE}/api/v1/agent/ask`, {
+        const res = await fetch(API_BASE + '/api/v1/agent/ask', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: text }),
@@ -148,8 +150,8 @@ async function sendMessage() {
         hideTyping();
 
         if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            addMessage(err.error || `Server error (${res.status})`, 'bot', 'bot-error');
+            const err = await res.json().catch(function() { return {}; });
+            addMessage(err.error || 'Server error (' + res.status + ')', 'bot', 'bot-error');
             return;
         }
 
@@ -159,9 +161,8 @@ async function sendMessage() {
     } catch (err) {
         hideTyping();
         addMessage(
-            isOnline
-                ? `Connection error: ${err.message}`
-                : 'Cannot reach Gathm API. Start the server: gathm-api --port 8080',
+            isOnline ? 'Connection error: ' + err.message
+                     : 'Cannot reach Gathm API. Start the server: gathm-api --port 8080',
             'bot', 'bot-error'
         );
     } finally {
@@ -172,11 +173,13 @@ async function sendMessage() {
 }
 
 sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
+messageInput.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') sendMessage();
+});
 
-// ══════════════════════════════════════════════════════════════
-// Voice mode — Web Audio API drives real frequency visualization
-// ══════════════════════════════════════════════════════════════
+// =========================================================================
+// Voice mode -- Web Audio API drives real frequency visualization
+// =========================================================================
 
 let audioCtx    = null;
 let analyser    = null;
@@ -197,7 +200,7 @@ async function startVoice() {
 
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 64;            // 32 frequency bins
+    analyser.fftSize = 64;
     analyser.smoothingTimeConstant = 0.75;
 
     const src = audioCtx.createMediaStreamSource(micStream);
@@ -207,7 +210,7 @@ async function startVoice() {
     aiOrb.setAttribute('data-live', 'true');
     setOrbState('speaking');
     micBtn.classList.add('active');
-    botStatus.textContent = 'Listening…';
+    botStatus.textContent = 'Listening...';
 
     driveFrequency();
 }
@@ -215,13 +218,12 @@ async function startVoice() {
 function stopVoice() {
     voiceActive = false;
     if (rafId) cancelAnimationFrame(rafId);
-    micStream?.getTracks().forEach(t => t.stop());
-    audioCtx?.close();
+    if (micStream) micStream.getTracks().forEach(function(t) { t.stop(); });
+    if (audioCtx) audioCtx.close();
     audioCtx = null; analyser = null; micStream = null; rafId = null;
 
-    // Reset live transforms
     mainOrb.style.transform = '';
-    bars.forEach(b => { b.style.height = ''; });
+    bars.forEach(function(b) { b.style.height = ''; });
 
     aiOrb.removeAttribute('data-live');
     setOrbState('idle');
@@ -232,26 +234,24 @@ function stopVoice() {
 function driveFrequency() {
     if (!voiceActive || !analyser) return;
 
-    const data = new Uint8Array(analyser.frequencyBinCount); // 32 values
+    const data = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(data);
 
-    // Overall energy → orb scale (1.0 – 1.18)
-    const avg = data.reduce((s, v) => s + v, 0) / data.length;
+    const avg = data.reduce(function(s, v) { return s + v; }, 0) / data.length;
     const scale = 1 + (avg / 255) * 0.18;
-    mainOrb.style.transform = `scale(${scale.toFixed(4)})`;
+    mainOrb.style.transform = 'scale(' + scale.toFixed(4) + ')';
 
-    // Per-band energy → bar heights (4 px – 38 px)
     const step = Math.max(1, Math.floor(data.length / bars.length));
-    bars.forEach((bar, i) => {
-        const val = data[i * step] ?? 0;
+    bars.forEach(function(bar, i) {
+        const val = data[i * step] || 0;
         const h = 4 + (val / 255) * 34;
-        bar.style.height = `${h.toFixed(1)}px`;
+        bar.style.height = h.toFixed(1) + 'px';
     });
 
     rafId = requestAnimationFrame(driveFrequency);
 }
 
-micBtn.addEventListener('click', () => {
+micBtn.addEventListener('click', function() {
     if (voiceActive) stopVoice();
     else startVoice();
 });

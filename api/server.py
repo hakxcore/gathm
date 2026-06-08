@@ -26,6 +26,7 @@ import http.server
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -133,6 +134,36 @@ def list_tools() -> list:
     return tools
 
 
+# Words to remove when extracting a tool's argument from natural language.
+_NL_FILLER = frozenset([
+    "get", "show", "tell", "me", "what", "is", "are", "the", "a", "an",
+    "give", "find", "look", "up", "lookup", "check", "please", "i", "want",
+    "to", "know", "about", "can", "you", "run", "gathm", "use", "do",
+    "for", "in", "at", "on", "from", "of", "and",
+    # common query openers per domain
+    "weather", "forecast", "temperature", "temp",
+    "dns", "records", "record", "query", "lookup",
+    "ip", "address",
+    "define", "definition", "meaning", "word",
+    "crypto", "cryptocurrency", "price", "cost", "value",
+    "news", "latest", "current", "today",
+    "whois", "info", "information",
+    "movie", "film", "song", "lyrics",
+])
+
+
+def _extract_tool_args(query: str, tool_name: str) -> list:
+    """Strip NL filler and the tool name from a query, returning bare args."""
+    filler = _NL_FILLER | {tool_name.lower()}
+    return [w for w in query.split() if w.lower() not in filler]
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKJHABCDFG]')
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub('', text)
+
+
 def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
     """Execute a tool via the agent orchestrator."""
     args = args or []
@@ -153,8 +184,8 @@ def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
             "tool": tool_name,
             "status": "success" if result.returncode == 0 else "error",
             "exit_code": result.returncode,
-            "output": result.stdout.strip(),
-            "error": result.stderr.strip() if result.returncode != 0 else "",
+            "output": _strip_ansi(result.stdout.strip()),
+            "error": _strip_ansi(result.stderr.strip()) if result.returncode != 0 else "",
             "duration_ms": duration_ms,
         }
     except subprocess.TimeoutExpired:
@@ -360,13 +391,32 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(result, status)
 
         # POST /api/v1/agent/ask
+        # Matches a tool from the natural-language query, then runs it.
         elif path == "/api/v1/agent/ask":
-            query = body.get("query", "")
+            query = body.get("query", "").strip()
             if not query:
                 self._send_json({"error": "Missing 'query' field"}, 400)
                 return
-            result = run_agent_command("ask", query)
-            self._send_json(result)
+
+            # Allow explicit "gathm run <tool> [args]" passthrough
+            run_prefix = re.match(r'^(?:gathm\s+)?run\s+(\S+)(.*)', query, re.I)
+            if run_prefix:
+                tool_name = run_prefix.group(1)
+                extra     = run_prefix.group(2).strip().split()
+                self._send_json(execute_tool(tool_name, extra))
+                return
+
+            # Route: find the best-matching tool
+            route = run_agent_command("ask", query)
+            tool_name = route.get("matched_tool")
+
+            if tool_name and tool_name != "null":
+                args = _extract_tool_args(query, tool_name)
+                self._send_json(execute_tool(tool_name, args))
+            else:
+                # No tool matched — return the routing result for the UI to
+                # render as a friendly "I can help with…" message
+                self._send_json(route)
 
         # POST /api/v1/agent/plan
         elif path == "/api/v1/agent/plan":
