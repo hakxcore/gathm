@@ -24,8 +24,9 @@ let isOnline = false;
 
 async function checkConnectivity() {
     try {
-        const res = await fetch(`${API_BASE}/api/v1/health`, {
-            signal: AbortSignal.timeout(5000),
+        // /ping is instant — /health sweeps every tool and would time out.
+        const res = await fetch(`${API_BASE}/api/v1/ping`, {
+            signal: AbortSignal.timeout(4000),
         });
         isOnline = res.ok;
     } catch {
@@ -96,6 +97,34 @@ function hideTyping() {
     typingEl = null;
 }
 
+// ── Render agent reply ─────────────────────────────────────────
+// The /agent/ask endpoint is a tool ROUTER, not a chat LLM. It returns
+// structured JSON; translate it into something human-readable instead of
+// dumping raw JSON into the chat.
+function formatAgentReply(data) {
+    // A tool was matched to the query
+    if (data.matched_tool && data.matched_tool !== 'null') {
+        const desc   = data.description ? `\n\n${data.description}` : '';
+        const action = data.action ? `\n\n→ ${data.action}` : `\n\n→ Run: gathm run ${data.matched_tool}`;
+        return `I can help with that using the “${data.matched_tool}” tool.${desc}${action}`;
+    }
+
+    // No tool matched — give a friendly, useful nudge instead of an error blob
+    if (data.error && /no matching tool/i.test(data.error)) {
+        return "I'm a tool-running assistant, so I work best with task requests. " +
+               "Try things like:\n" +
+               "  • weather in Tokyo\n" +
+               "  • dns records for github.com\n" +
+               "  • ip info 8.8.8.8\n" +
+               "  • define serendipity\n" +
+               "  • crypto price bitcoin";
+    }
+
+    // Any other shape: prefer real output, fall back to the error text
+    return data.raw_output || data.output || data.result || data.error
+        || JSON.stringify(data, null, 2);
+}
+
 // ── Send via API ───────────────────────────────────────────────
 let isSending = false;
 
@@ -125,9 +154,7 @@ async function sendMessage() {
         }
 
         const data = await res.json();
-        const reply = data.raw_output || data.output || data.result
-            || JSON.stringify(data, null, 2);
-        addMessage(reply, 'bot');
+        addMessage(formatAgentReply(data), 'bot');
 
     } catch (err) {
         hideTyping();

@@ -65,7 +65,7 @@ MIME_TYPES = {
 # When set, all requests must include: Authorization: Bearer <key>
 # Health and root endpoints are exempt.
 GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
-PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health"}
+PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
 # GUI static files are also public (any path not starting with /api/)
 
 import hashlib
@@ -288,7 +288,13 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": f"Tool '{tool_name}' not found"}, 404)
 
-        # GET /api/v1/health
+        # GET /api/v1/ping  — lightweight liveness probe used by the GUI.
+        # Unlike /health it does NOT shell out to the orchestrator, so it
+        # returns instantly and never makes the UI look "offline".
+        elif path == "/api/v1/ping":
+            self._send_json({"status": "ok", "service": "gathm-api"})
+
+        # GET /api/v1/health  (full system health — checks every tool, slow)
         elif path == "/api/v1/health":
             result = run_agent_command("health", "all")
             self._send_json(result)
@@ -434,7 +440,10 @@ def main():
         else:
             i += 1
 
-    server = http.server.HTTPServer((host, port), GathmAPIHandler)
+    # ThreadingHTTPServer so a slow request (e.g. the full /health sweep
+    # across all tools) never blocks the GUI from loading or other
+    # requests from being served concurrently.
+    server = http.server.ThreadingHTTPServer((host, port), GathmAPIHandler)
     print(f"""
 ╔══════════════════════════════════════════════════╗
 ║           Gathm Enterprise API Server            ║
