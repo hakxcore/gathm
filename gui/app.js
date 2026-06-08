@@ -6,6 +6,27 @@ const API_BASE = window.GATHM_API_URL || 'http://127.0.0.1:8080';
 // Initialize Lucide icons
 lucide.createIcons();
 
+// ── Orb state management ───────────────────────────────────────
+const aiOrb = document.getElementById('aiOrb');
+
+function setOrbState(state) {
+    if (aiOrb) aiOrb.className = `ai-orb ${state}`;
+}
+
+// Mic button → speaking state while held
+const micBtn = document.querySelector('.mic-btn-outer');
+if (micBtn) {
+    const startSpeaking = () => setOrbState('speaking');
+    const stopSpeaking  = () => setOrbState('idle');
+    micBtn.addEventListener('mousedown',  startSpeaking);
+    micBtn.addEventListener('touchstart', startSpeaking, { passive: true });
+    micBtn.addEventListener('mouseup',    stopSpeaking);
+    micBtn.addEventListener('touchend',   stopSpeaking);
+    micBtn.addEventListener('mouseleave', () => {
+        if (aiOrb && aiOrb.classList.contains('speaking')) stopSpeaking();
+    });
+}
+
 // ── Clock ──────────────────────────────────────────────────────────
 function updateClock() {
     const now = new Date();
@@ -108,6 +129,7 @@ function addMessage(text, sender, cssClass) {
 let typingEl = null;
 
 function showTyping() {
+    setOrbState('thinking');
     const wrapper = document.createElement('div');
     wrapper.className = 'message-wrapper bot';
     wrapper.id = 'typingWrapper';
@@ -123,6 +145,7 @@ function showTyping() {
 }
 
 function hideTyping() {
+    setOrbState('idle');
     if (typingEl) {
         typingEl.remove();
         typingEl = null;
