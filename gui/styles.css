@@ -191,50 +191,257 @@ body {
 /* Avatar Section */
 .avatar-section {
     width: 100%;
-    height: 180px;
+    padding: 16px 0 10px;
     position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 6px;
     margin-top: -20px;
 }
 
 .glow-bg {
     position: absolute;
-    width: 140px;
-    height: 140px;
-    background: radial-gradient(50% 50% at 50% 50%, rgba(74, 123, 247, 0.25) 0%, rgba(123, 92, 246, 0.12) 50%, rgba(0, 0, 0, 0) 100%);
-    filter: blur(20px);
+    width: 200px;
+    height: 200px;
+    background: radial-gradient(50% 50% at 50% 50%, rgba(74, 123, 247, 0.22) 0%, rgba(123, 92, 246, 0.1) 50%, rgba(0, 0, 0, 0) 100%);
+    filter: blur(28px);
     z-index: 0;
-    top: 10px;
+    top: 0;
 }
 
-.avatar {
-    width: 80px;
-    height: 80px;
-    background: linear-gradient(180deg, var(--accent-blue) 0%, var(--accent-purple) 100%);
-    border-radius: 50%;
+/* ─── AI Orb ─────────────────────────────────────────────────── */
+
+.ai-orb {
+    position: relative;
     display: flex;
-    justify-content: center;
+    flex-direction: column;
     align-items: center;
+    gap: 8px;
     z-index: 1;
-    box-shadow: 0 0 30px 5px rgba(74, 123, 247, 0.3);
-    margin-bottom: 15px;
 }
 
-.avatar-icon {
-    width: 40px;
-    height: 40px;
-    color: #fff;
+/* ── Orb wrapper – rings share the same space as the sphere ── */
+
+.orb-wrapper {
+    position: relative;
+    width: 130px;
+    height: 130px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
 }
+
+/* ── Main sphere ─────────────────────────────────────────────── */
+
+.main-orb {
+    width: 130px;
+    height: 130px;
+    border-radius: 50%;
+    position: relative;
+    overflow: hidden;
+    will-change: transform;
+
+    /* Iridescent sphere — matches the reference image */
+    background:
+        radial-gradient(circle at 68% 18%, rgba(255,255,255,0.48) 0%, rgba(255,255,255,0.12) 4%, transparent 9%),
+        radial-gradient(circle at 20% 25%, rgba(0, 228, 255, 0.92) 0%, rgba(0, 178, 232, 0.55) 16%, transparent 37%),
+        radial-gradient(circle at 67% 28%, rgba(80, 42, 255, 1)    0%, rgba(45,  8, 216, 0.72) 21%, transparent 45%),
+        radial-gradient(circle at 38% 63%, rgba(215, 50, 50, 0.95) 0%, rgba(168, 22, 22, 0.52) 23%, transparent 45%),
+        radial-gradient(circle at 60% 76%, rgba(0, 174, 212, 0.62) 0%, transparent 28%),
+        radial-gradient(circle at 74% 68%, rgba(180, 198, 255, 0.12) 0%, transparent 18%),
+        radial-gradient(ellipse at 48% 44%, #060025 0%, #0e0052 24%, #070028 55%, #020010 82%, #010006 100%);
+
+    box-shadow:
+        0 0 48px rgba(60, 100, 255, 0.26),
+        0 0 96px rgba(60, 100, 255, 0.10);
+}
+
+/* Dark glass rim around the edge */
+.main-orb::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, transparent 62%, rgba(4, 3, 18, 0.92) 88%, rgba(2, 1, 9, 1) 100%);
+    pointer-events: none;
+    z-index: 3;
+}
+
+/* Continuously rotating swirl overlay */
+.orb-swirl {
+    position: absolute;
+    width: 200%;
+    height: 200%;
+    top: -50%;
+    left: -50%;
+    background: conic-gradient(
+        from 0deg at 40% 55%,
+        transparent             0deg,
+        rgba(0, 200, 255, 0.2)  35deg,
+        transparent             75deg,
+        rgba(200, 45, 45, 0.2)  155deg,
+        transparent             200deg,
+        rgba(90, 55, 255, 0.15) 270deg,
+        transparent             320deg
+    );
+    z-index: 1;
+    animation: orbSwirl 10s linear infinite;
+    will-change: transform;
+}
+
+/* Static gloss highlight */
+.orb-gloss {
+    position: absolute;
+    width: 42%;
+    height: 32%;
+    top: 10%;
+    left: 12%;
+    background: radial-gradient(ellipse, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0.07) 50%, transparent 100%);
+    border-radius: 50%;
+    z-index: 2;
+    transform: rotate(-22deg);
+    pointer-events: none;
+}
+
+/* ── Expanding rings (speaking state) ──────────────────────── */
+
+.orb-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid rgba(74, 120, 255, 0.5);
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* ── Frequency bars (speaking state) ───────────────────────── */
+
+.freq-bars {
+    display: flex;
+    gap: 3px;
+    align-items: flex-end;
+    height: 22px;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+}
+
+.fb {
+    width: 3px;
+    height: 3px;
+    background: linear-gradient(to top, var(--accent-blue), var(--accent-purple));
+    border-radius: 2px;
+    --bar-h: 14px;
+}
+
+/* ── Keyframes ─────────────────────────────────────────────── */
+
+@keyframes orbSwirl {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes idleBreath {
+    0%, 100% { transform: scale(1); }
+    50%       { transform: scale(1.035); }
+}
+
+@keyframes thinkingGlow {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow: 0 0 48px rgba(60,100,255,0.26), 0 0 96px rgba(60,100,255,0.10);
+    }
+    50% {
+        transform: scale(1.065);
+        box-shadow: 0 0 72px rgba(90,140,255,0.46), 0 0 136px rgba(90,140,255,0.18);
+    }
+}
+
+@keyframes speakingPulse {
+    0%   { transform: scale(1); }
+    8%   { transform: scale(1.08); }
+    15%  { transform: scale(1.03); }
+    23%  { transform: scale(1.11); }
+    31%  { transform: scale(1.05); }
+    38%  { transform: scale(1.13); }
+    46%  { transform: scale(1.04); }
+    54%  { transform: scale(1.09); }
+    62%  { transform: scale(1.02); }
+    69%  { transform: scale(1.10); }
+    77%  { transform: scale(1.06); }
+    85%  { transform: scale(1.12); }
+    92%  { transform: scale(1.03); }
+    100% { transform: scale(1); }
+}
+
+@keyframes ringExpand {
+    0%   { transform: scale(1);   opacity: 0.55; }
+    100% { transform: scale(1.9); opacity: 0; }
+}
+
+@keyframes freqBar {
+    from { height: 3px; }
+    to   { height: var(--bar-h); }
+}
+
+/* ── State: idle ──────────────────────────────────────────── */
+
+.ai-orb.idle .main-orb {
+    animation: idleBreath 5s ease-in-out infinite;
+}
+
+/* ── State: thinking (text chat — ChatGPT/Gemini style) ────── */
+
+.ai-orb.thinking .main-orb {
+    animation: thinkingGlow 1.6s ease-in-out infinite;
+}
+
+.ai-orb.thinking .orb-swirl {
+    animation-duration: 4s;
+}
+
+/* ── State: speaking (voice — frequency visualization) ──────── */
+
+.ai-orb.speaking .main-orb {
+    animation: speakingPulse 2.2s ease-in-out infinite;
+}
+
+.ai-orb.speaking .orb-swirl {
+    animation-duration: 2.5s;
+}
+
+.ai-orb.speaking .orb-ring {
+    animation: ringExpand 2s ease-out infinite;
+}
+.ai-orb.speaking .ring-2 { animation-delay: 0.67s; }
+.ai-orb.speaking .ring-3 { animation-delay: 1.33s; }
+
+.ai-orb.speaking .freq-bars {
+    opacity: 1;
+}
+
+.ai-orb.speaking .fb {
+    animation: freqBar 0.5s ease-in-out infinite alternate;
+}
+/* Unique speed + height per bar for realistic waveform look */
+.ai-orb.speaking .fb:nth-child(1) { animation-duration: 0.52s; --bar-h: 10px; }
+.ai-orb.speaking .fb:nth-child(2) { animation-duration: 0.36s; animation-delay: 0.06s; --bar-h: 18px; }
+.ai-orb.speaking .fb:nth-child(3) { animation-duration: 0.68s; animation-delay: 0.12s; --bar-h: 12px; }
+.ai-orb.speaking .fb:nth-child(4) { animation-duration: 0.42s; animation-delay: 0.08s; --bar-h: 20px; }
+.ai-orb.speaking .fb:nth-child(5) { animation-duration: 0.58s; animation-delay: 0.16s; --bar-h: 15px; }
+.ai-orb.speaking .fb:nth-child(6) { animation-duration: 0.33s; animation-delay: 0.04s; --bar-h: 20px; }
+.ai-orb.speaking .fb:nth-child(7) { animation-duration: 0.62s; animation-delay: 0.10s; --bar-h: 11px; }
+.ai-orb.speaking .fb:nth-child(8) { animation-duration: 0.45s; animation-delay: 0.14s; --bar-h: 17px; }
+
+/* ─────────────────────────────────────────────────────────────── */
 
 .bot-name {
     font-family: 'Plus Jakarta Sans', sans-serif;
     font-weight: 700;
     font-size: 16px;
     z-index: 1;
-    margin-bottom: 4px;
 }
 
 .bot-status {
