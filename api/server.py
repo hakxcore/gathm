@@ -26,6 +26,7 @@ import http.server
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,8 @@ GATHM_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
 GUI_DIR = GATHM_ROOT / "gui"
 AGENT_SCRIPT = GATHM_ROOT / "agent" / "orchestrator.sh"
+PILOT_DIR = GATHM_ROOT / "pilot"
+CHAT_SCRIPT = PILOT_DIR / "chat_once.py"
 DEFAULT_PORT = 8080
 DEFAULT_HOST = "127.0.0.1"
 
@@ -133,6 +136,36 @@ def list_tools() -> list:
     return tools
 
 
+# Words to remove when extracting a tool's argument from natural language.
+_NL_FILLER = frozenset([
+    "get", "show", "tell", "me", "what", "is", "are", "the", "a", "an",
+    "give", "find", "look", "up", "lookup", "check", "please", "i", "want",
+    "to", "know", "about", "can", "you", "run", "gathm", "use", "do",
+    "for", "in", "at", "on", "from", "of", "and",
+    # common query openers per domain
+    "weather", "forecast", "temperature", "temp",
+    "dns", "records", "record", "query", "lookup",
+    "ip", "address",
+    "define", "definition", "meaning", "word",
+    "crypto", "cryptocurrency", "price", "cost", "value",
+    "news", "latest", "current", "today",
+    "whois", "info", "information",
+    "movie", "film", "song", "lyrics",
+])
+
+
+def _extract_tool_args(query: str, tool_name: str) -> list:
+    """Strip NL filler and the tool name from a query, returning bare args."""
+    filler = _NL_FILLER | {tool_name.lower()}
+    return [w for w in query.split() if w.lower() not in filler]
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKJHABCDFG]')
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub('', text)
+
+
 def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
     """Execute a tool via the agent orchestrator."""
     args = args or []
@@ -153,8 +186,8 @@ def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
             "tool": tool_name,
             "status": "success" if result.returncode == 0 else "error",
             "exit_code": result.returncode,
-            "output": result.stdout.strip(),
-            "error": result.stderr.strip() if result.returncode != 0 else "",
+            "output": _strip_ansi(result.stdout.strip()),
+            "error": _strip_ansi(result.stderr.strip()) if result.returncode != 0 else "",
             "duration_ms": duration_ms,
         }
     except subprocess.TimeoutExpired:
@@ -175,6 +208,54 @@ def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
             "error": str(e),
             "duration_ms": 0,
         }
+
+
+def _pilot_python() -> str:
+    """Return the Pilot venv's Python (which has langchain), else fall back."""
+    candidates = [
+        PILOT_DIR / "venv" / "bin" / "python3",
+        PILOT_DIR / "venv" / "bin" / "python",
+        PILOT_DIR / "venv" / "Scripts" / "python.exe",  # Windows
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return sys.executable  # last resort (may lack langchain → handled gracefully)
+
+
+def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict:
+    """Run the real Pilot LLM agent for one turn and return its reply.
+
+    Shells out to pilot/chat_once.py using the Pilot venv's Python so the
+    stdlib-only API server stays dependency-free. Returns {"reply": ...} on
+    success, or {"error": ...} which the caller can fall back on.
+    """
+    if not CHAT_SCRIPT.exists():
+        return {"error": "chat agent not installed (pilot/chat_once.py missing)"}
+
+    payload = json.dumps({"query": query, "history": history or []})
+    try:
+        result = subprocess.run(
+            [_pilot_python(), str(CHAT_SCRIPT)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PILOT_DIR),
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"agent timed out after {timeout}s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+    out = (result.stdout or "").strip()
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        tail = (result.stderr or "").strip().splitlines()
+        return {"error": "agent returned no parseable response",
+                "detail": tail[-1] if tail else out[:200]}
 
 
 def run_agent_command(command: str, args: str = "") -> dict:
@@ -359,14 +440,57 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             status = 200 if result["status"] == "success" else 500
             self._send_json(result, status)
 
-        # POST /api/v1/agent/ask
-        elif path == "/api/v1/agent/ask":
-            query = body.get("query", "")
+        # POST /api/v1/agent/chat
+        # Conversational LLM agent (Pilot: LangGraph + Ollama/Gemini). It
+        # understands the message, decides whether to chat or call a tool,
+        # runs the tool, and writes a natural-language reply. Falls back to
+        # the keyword router if the LLM runtime is unavailable.
+        elif path == "/api/v1/agent/chat":
+            query = body.get("query", "").strip()
             if not query:
                 self._send_json({"error": "Missing 'query' field"}, 400)
                 return
-            result = run_agent_command("ask", query)
-            self._send_json(result)
+
+            history = body.get("history", [])
+            result = run_chat_agent(query, history)
+
+            if "reply" in result:
+                self._send_json(result)
+            else:
+                # LLM agent unavailable — degrade to the keyword router so the
+                # GUI still responds, and tell the client why.
+                fallback = run_agent_command("ask", query)
+                fallback["agent"] = "router-fallback"
+                fallback["chat_error"] = result.get("error", "unknown")
+                self._send_json(fallback)
+
+        # POST /api/v1/agent/ask
+        # Matches a tool from the natural-language query, then runs it.
+        elif path == "/api/v1/agent/ask":
+            query = body.get("query", "").strip()
+            if not query:
+                self._send_json({"error": "Missing 'query' field"}, 400)
+                return
+
+            # Allow explicit "gathm run <tool> [args]" passthrough
+            run_prefix = re.match(r'^(?:gathm\s+)?run\s+(\S+)(.*)', query, re.I)
+            if run_prefix:
+                tool_name = run_prefix.group(1)
+                extra     = run_prefix.group(2).strip().split()
+                self._send_json(execute_tool(tool_name, extra))
+                return
+
+            # Route: find the best-matching tool
+            route = run_agent_command("ask", query)
+            tool_name = route.get("matched_tool")
+
+            if tool_name and tool_name != "null":
+                args = _extract_tool_args(query, tool_name)
+                self._send_json(execute_tool(tool_name, args))
+            else:
+                # No tool matched — return the routing result for the UI to
+                # render as a friendly "I can help with…" message
+                self._send_json(route)
 
         # POST /api/v1/agent/plan
         elif path == "/api/v1/agent/plan":
