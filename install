@@ -1529,7 +1529,9 @@ main() {
     install_ollama "$platform"
     install_llmfit_and_select_model
 
-    install_engineer_deps
+    # TODO(engineer): temporarily disabled — re-enable when resuming the
+    # engineer agent. Uncomment the line below to restore engineer setup.
+    # install_engineer_deps
     install_pilot_deps
     install_playwright_browser
     setup_shortcuts "$platform"
