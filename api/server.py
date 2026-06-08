@@ -61,7 +61,11 @@ MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
 }
+
+VOICE_SCRIPT = PILOT_DIR / "voice.py"
 
 # API Authentication
 # Set GATHM_API_KEY environment variable to enable API key authentication.
@@ -258,6 +262,56 @@ def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict
                 "detail": tail[-1] if tail else out[:200]}
 
 
+def run_voice_transcribe(audio_bytes: bytes, timeout: int = 60) -> dict:
+    """Send audio bytes to voice.py transcribe, return {"text":"..."} or {"error":"..."}."""
+    if not VOICE_SCRIPT.exists():
+        return {"error": "voice module not found (pilot/voice.py missing)"}
+    try:
+        result = subprocess.run(
+            [_pilot_python(), str(VOICE_SCRIPT), "transcribe"],
+            input=audio_bytes,
+            capture_output=True,
+            timeout=timeout,
+            cwd=str(PILOT_DIR),
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"transcription timed out after {timeout}s"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    out = (result.stdout or b"").strip()
+    try:
+        return json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        stderr_tail = (result.stderr or b"").decode(errors="replace").strip().splitlines()
+        return {"error": "transcription failed", "detail": stderr_tail[-1] if stderr_tail else ""}
+
+
+def run_voice_speak(text: str, timeout: int = 30) -> bytes | None:
+    """Synthesize speech for text. Returns raw mp3 bytes or None on failure."""
+    if not VOICE_SCRIPT.exists():
+        return None
+    payload = json.dumps({"text": text}).encode()
+    try:
+        result = subprocess.run(
+            [_pilot_python(), str(VOICE_SCRIPT), "speak"],
+            input=payload,
+            capture_output=True,
+            timeout=timeout,
+            cwd=str(PILOT_DIR),
+            env={**os.environ},
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        return None
+
+    if result.returncode == 0 and result.stdout:
+        # Verify it looks like audio, not a JSON error payload
+        if not result.stdout.startswith(b"{"):
+            return result.stdout
+    return None
+
+
 def run_agent_command(command: str, args: str = "") -> dict:
     """Run an agent orchestrator command."""
     cmd = [BASH_CMD, str(AGENT_SCRIPT), command]
@@ -296,6 +350,15 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode())
 
+    def _send_audio(self, audio_bytes: bytes, mime: str = "audio/mpeg"):
+        """Send raw audio bytes."""
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(audio_bytes)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(audio_bytes)
+
     def _serve_gui_file(self, file_path: str):
         """Serve a static file from the gui/ directory."""
         if file_path in ("", "/"):
@@ -325,6 +388,13 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             return json.loads(body)
         except json.JSONDecodeError:
             return {}
+
+    def _read_raw_body(self) -> bytes:
+        """Read raw request body bytes."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            return b""
+        return self.rfile.read(content_length)
 
     def _check_auth(self) -> bool:
         """Verify API key if GATHM_API_KEY is configured."""
@@ -533,6 +603,31 @@ class GathmAPIHandler(http.server.BaseHTTPRequestHandler):
             tool = body.get("tool", "all")
             result = run_agent_command("heal", tool)
             self._send_json(result)
+
+        # POST /api/v1/voice/transcribe
+        # Accepts raw audio bytes (webm/wav/ogg from MediaRecorder).
+        # Returns {"text": "...", "language": "en"} or {"error": "..."}.
+        elif path == "/api/v1/voice/transcribe":
+            audio = self._read_raw_body()
+            if not audio:
+                self._send_json({"error": "no audio data"}, 400)
+                return
+            result = run_voice_transcribe(audio)
+            status = 200 if "text" in result else 500
+            self._send_json(result, status)
+
+        # POST /api/v1/voice/speak
+        # Accepts {"text": "..."}, returns mp3 audio bytes.
+        elif path == "/api/v1/voice/speak":
+            text = body.get("text", "").strip()
+            if not text:
+                self._send_json({"error": "missing 'text' field"}, 400)
+                return
+            audio = run_voice_speak(text)
+            if audio:
+                self._send_audio(audio)
+            else:
+                self._send_json({"error": "TTS unavailable (install edge-tts or piper)"}, 503)
 
         else:
             self._send_json({"error": "Not found"}, 404)

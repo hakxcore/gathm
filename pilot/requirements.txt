@@ -9,3 +9,5 @@ prompt_toolkit>=3.0
 requests
 beautifulsoup4
 playwright
+faster-whisper
+edge-tts
