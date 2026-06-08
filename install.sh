@@ -1310,6 +1310,10 @@ start_gui_server() {
     done
 
     warn "GUI server did not respond in time — check $_log_dir/gathm-gui.log"
+    if [[ -s "$_log_dir/gathm-gui.log" ]]; then
+        echo -e "${YELLOW}    ── last lines of gathm-gui.log ──${RESET}"
+        tail -n 15 "$_log_dir/gathm-gui.log" 2>/dev/null | sed 's/^/      /'
+    fi
     return 1
 }
 
