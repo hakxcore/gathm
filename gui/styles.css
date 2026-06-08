@@ -381,6 +381,8 @@ body {
 .message p {
     font-size: 14px;
     line-height: 1.55;
+    white-space: pre-wrap;   /* preserve newlines / bullet lists in replies */
+    word-break: break-word;
 }
 
 .bot-text {
