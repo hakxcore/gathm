@@ -97,38 +97,28 @@ function hideTyping() {
 }
 
 // -- Format API response ---------------------------------------------------
-// /agent/ask now executes the matched tool and returns {status, output}.
-// Translate all response shapes into plain human-readable text.
+// The /agent/chat endpoint returns {reply} from the LLM agent. If the agent
+// is unavailable the server falls back to the keyword router, so we still
+// handle those shapes gracefully.
 function formatAgentReply(data) {
-    // Tool ran successfully
-    if (data.status === 'success' && data.output) {
-        return data.output;
+    if (data.reply) return data.reply;                    // LLM agent answer
+    if (data.status === 'success' && data.output) return data.output;
+    if (data.matched_tool && data.matched_tool !== 'null') {
+        return 'I can help with that using the "' + data.matched_tool + '" tool.' +
+               (data.description ? '\n\n' + data.description : '');
     }
-
-    // Tool ran but errored
-    if (data.status === 'error') {
-        const msg = data.error || data.output || 'Tool returned an error.';
-        return (data.tool ? '"' + data.tool + '" error: ' : '') + msg;
-    }
-
-    // No tool matched -- friendly hint
     if (data.error && /no matching tool/i.test(data.error)) {
-        return 'I can run tools for you. Try requests like:\n' +
-               '  * weather in Tokyo\n' +
-               '  * dns records for github.com\n' +
-               '  * ip info 8.8.8.8\n' +
-               '  * define serendipity\n' +
-               '  * crypto price bitcoin\n' +
-               '  * news';
+        return "I couldn't find a tool for that. Try: weather in Tokyo, " +
+               "dns github.com, ip info 8.8.8.8, define serendipity.";
     }
-
-    // Fallback
     return data.raw_output || data.output || data.result || data.error
         || JSON.stringify(data, null, 2);
 }
 
 // -- Send via API ----------------------------------------------------------
 let isSending = false;
+let history = [];                 // conversation memory for multi-turn context
+const HISTORY_MAX = 12;           // keep the last N turns
 
 async function sendMessage() {
     const text = messageInput.value.trim();
@@ -141,10 +131,10 @@ async function sendMessage() {
     showTyping();
 
     try {
-        const res = await fetch(API_BASE + '/api/v1/agent/ask', {
+        const res = await fetch(API_BASE + '/api/v1/agent/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: text }),
+            body: JSON.stringify({ query: text, history: history }),
         });
 
         hideTyping();
@@ -156,7 +146,15 @@ async function sendMessage() {
         }
 
         const data = await res.json();
-        addMessage(formatAgentReply(data), 'bot');
+        const reply = formatAgentReply(data);
+        addMessage(reply, 'bot');
+
+        // Remember this turn so follow-ups have context
+        history.push({ role: 'user', content: text });
+        history.push({ role: 'assistant', content: reply });
+        if (history.length > HISTORY_MAX * 2) {
+            history = history.slice(-HISTORY_MAX * 2);
+        }
 
     } catch (err) {
         hideTyping();
