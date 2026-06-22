@@ -36,6 +36,7 @@ import json
 import os
 import platform
 import secrets
+import re
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,33 @@ POLICIES_FILE = GATHM_ROOT / "config" / "policies.yaml"
 
 DEFAULT_PORT = int(os.environ.get("GATHM_PORT", 8080))
 DEFAULT_HOST = os.environ.get("GATHM_HOST", "127.0.0.1")
+PILOT_DIR = GATHM_ROOT / "pilot"
+CHAT_SCRIPT = PILOT_DIR / "chat_once.py"
+DEFAULT_PORT = 8080
+DEFAULT_HOST = "127.0.0.1"
+
+# MIME types for static GUI files
+MIME_TYPES = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
+
+# API Authentication
+# Set GATHM_API_KEY environment variable to enable API key authentication.
+# When set, all requests must include: Authorization: Bearer <key>
+# Health and root endpoints are exempt.
+GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
+PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
+# GUI static files are also public (any path not starting with /api/)
+
+import hashlib
+import secrets
 
 API_VERSION = "3.0.0"
 
@@ -248,6 +276,43 @@ async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None =
     env = {**os.environ, "GATHM_OUTPUT_MODE": "json"}
     if extra_env:
         env.update(extra_env)
+
+# Words to remove when extracting a tool's argument from natural language.
+_NL_FILLER = frozenset([
+    "get", "show", "tell", "me", "what", "is", "are", "the", "a", "an",
+    "give", "find", "look", "up", "lookup", "check", "please", "i", "want",
+    "to", "know", "about", "can", "you", "run", "gathm", "use", "do",
+    "for", "in", "at", "on", "from", "of", "and",
+    # common query openers per domain
+    "weather", "forecast", "temperature", "temp",
+    "dns", "records", "record", "query", "lookup",
+    "ip", "address",
+    "define", "definition", "meaning", "word",
+    "crypto", "cryptocurrency", "price", "cost", "value",
+    "news", "latest", "current", "today",
+    "whois", "info", "information",
+    "movie", "film", "song", "lyrics",
+])
+
+
+def _extract_tool_args(query: str, tool_name: str) -> list:
+    """Strip NL filler and the tool name from a query, returning bare args."""
+    filler = _NL_FILLER | {tool_name.lower()}
+    return [w for w in query.split() if w.lower() not in filler]
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKJHABCDFG]')
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub('', text)
+
+
+def execute_tool(tool_name: str, args: list = None, timeout: int = 120) -> dict:
+    """Execute a tool via the agent orchestrator."""
+    args = args or []
+    cmd = [BASH_CMD, str(AGENT_SCRIPT), "run", tool_name] + args
+
+    start_time = time.time()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -262,6 +327,26 @@ async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None =
             await proc.communicate()
             return {"status": "error", "exit_code": -1, "output": "",
                     "error": f"Timed out after {timeout}s", "duration_ms": timeout * 1000}
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        return {
+            "tool": tool_name,
+            "status": "success" if result.returncode == 0 else "error",
+            "exit_code": result.returncode,
+            "output": _strip_ansi(result.stdout.strip()),
+            "error": _strip_ansi(result.stderr.strip()) if result.returncode != 0 else "",
+            "duration_ms": duration_ms,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "tool": tool_name,
+            "status": "error",
+            "exit_code": -1,
+            "output": "",
+            "error": f"Tool execution timed out after {timeout}s",
+            "duration_ms": timeout * 1000,
+        }
+    except Exception as e:
         return {
             "status": "success" if proc.returncode == 0 else "error",
             "exit_code": proc.returncode,
@@ -280,6 +365,56 @@ async def execute_tool(tool_name: str, args: list[str], timeout: int = 120) -> d
     return result
 
 async def run_agent_command(command: str, arg: str = "") -> dict:
+def _pilot_python() -> str:
+    """Return the Pilot venv's Python (which has langchain), else fall back."""
+    candidates = [
+        PILOT_DIR / "venv" / "bin" / "python3",
+        PILOT_DIR / "venv" / "bin" / "python",
+        PILOT_DIR / "venv" / "Scripts" / "python.exe",  # Windows
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return sys.executable  # last resort (may lack langchain → handled gracefully)
+
+
+def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict:
+    """Run the real Pilot LLM agent for one turn and return its reply.
+
+    Shells out to pilot/chat_once.py using the Pilot venv's Python so the
+    stdlib-only API server stays dependency-free. Returns {"reply": ...} on
+    success, or {"error": ...} which the caller can fall back on.
+    """
+    if not CHAT_SCRIPT.exists():
+        return {"error": "chat agent not installed (pilot/chat_once.py missing)"}
+
+    payload = json.dumps({"query": query, "history": history or []})
+    try:
+        result = subprocess.run(
+            [_pilot_python(), str(CHAT_SCRIPT)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(PILOT_DIR),
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"agent timed out after {timeout}s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+    out = (result.stdout or "").strip()
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        tail = (result.stderr or "").strip().splitlines()
+        return {"error": "agent returned no parseable response",
+                "detail": tail[-1] if tail else out[:200]}
+
+
+def run_agent_command(command: str, args: str = "") -> dict:
+    """Run an agent orchestrator command."""
     cmd = [BASH_CMD, str(AGENT_SCRIPT), command]
     if arg:
         cmd += arg.split()
@@ -507,6 +642,71 @@ async def auth_and_ratelimit(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-RateLimit-Limit"] = str(limit)
     return response
+    def do_GET(self):
+        """Handle GET requests."""
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        # GET /api/v1/tools
+        if path == "/api/v1/tools":
+            tools = list_tools()
+            self._send_json({"tools": tools, "count": len(tools)})
+
+        # GET /api/v1/tools/{name}
+        elif path.startswith("/api/v1/tools/"):
+            tool_name = path.split("/")[-1]
+            manifest = load_tool_manifest(tool_name)
+            if manifest:
+                self._send_json(manifest)
+            else:
+                self._send_json({"error": f"Tool '{tool_name}' not found"}, 404)
+
+        # GET /api/v1/ping  — lightweight liveness probe used by the GUI.
+        # Unlike /health it does NOT shell out to the orchestrator, so it
+        # returns instantly and never makes the UI look "offline".
+        elif path == "/api/v1/ping":
+            self._send_json({"status": "ok", "service": "gathm-api"})
+
+        # GET /api/v1/health  (full system health — checks every tool, slow)
+        elif path == "/api/v1/health":
+            result = run_agent_command("health", "all")
+            self._send_json(result)
+
+        # GET /api/v1/health/{tool}
+        elif path.startswith("/api/v1/health/"):
+            tool_name = path.split("/")[-1]
+            result = run_agent_command("health", tool_name)
+            self._send_json(result)
+
+        # GET /api/v1/agent/status
+        elif path == "/api/v1/agent/status":
+            result = run_agent_command("status")
+            self._send_json(result)
+
+        # API documentation
+        elif path in ("/api", "/api/v1"):
+            self._send_json({
+                "name": "Gathm Enterprise API",
+                "version": "2.0.0",
+                "auth": "Set GATHM_API_KEY env var to enable Bearer token auth",
+                "endpoints": {
+                    "GET /api/v1/tools": "List all tools",
+                    "GET /api/v1/tools/{name}": "Get tool metadata",
+                    "POST /api/v1/tools/{name}/execute": "Execute a tool",
+                    "GET /api/v1/health": "System health check (public)",
+                    "GET /api/v1/health/{tool}": "Tool health check",
+                    "POST /api/v1/agent/ask": "Natural language query",
+                    "POST /api/v1/agent/plan": "Create execution plan",
+                    "POST /api/v1/agent/engineer": "Engineering agent task",
+                    "POST /api/v1/agent/chain": "Execute tool pipeline",
+                    "POST /api/v1/agent/parallel": "Execute tools in parallel",
+                    "GET /api/v1/agent/status": "Agent status",
+                    "POST /api/v1/agent/heal": "Self-heal tools",
+                }
+            })
 
 # ---------------------------------------------------------------------------
 # Pydantic request models
@@ -515,6 +715,122 @@ async def auth_and_ratelimit(request: Request, call_next):
 class ExecuteRequest(BaseModel):
     args: list[str] | str = []
     timeout: int = 120
+    def do_POST(self):
+        """Handle POST requests."""
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized. Provide: Authorization: Bearer <api_key>"}, 401)
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        body = self._read_body()
+
+        # POST /api/v1/tools/{name}/execute
+        if path.startswith("/api/v1/tools/") and path.endswith("/execute"):
+            parts = path.split("/")
+            tool_name = parts[4]  # /api/v1/tools/{name}/execute
+            args = body.get("args", [])
+            timeout = body.get("timeout", 120)
+
+            if isinstance(args, str):
+                args = args.split()
+
+            result = execute_tool(tool_name, args, timeout)
+            status = 200 if result["status"] == "success" else 500
+            self._send_json(result, status)
+
+        # POST /api/v1/agent/chat
+        # Conversational LLM agent (Pilot: LangGraph + Ollama/Gemini). It
+        # understands the message, decides whether to chat or call a tool,
+        # runs the tool, and writes a natural-language reply. Falls back to
+        # the keyword router if the LLM runtime is unavailable.
+        elif path == "/api/v1/agent/chat":
+            query = body.get("query", "").strip()
+            if not query:
+                self._send_json({"error": "Missing 'query' field"}, 400)
+                return
+
+            history = body.get("history", [])
+            result = run_chat_agent(query, history)
+
+            if "reply" in result:
+                self._send_json(result)
+            else:
+                # LLM agent unavailable — degrade to the keyword router so the
+                # GUI still responds, and tell the client why.
+                fallback = run_agent_command("ask", query)
+                fallback["agent"] = "router-fallback"
+                fallback["chat_error"] = result.get("error", "unknown")
+                self._send_json(fallback)
+
+        # POST /api/v1/agent/ask
+        # Matches a tool from the natural-language query, then runs it.
+        elif path == "/api/v1/agent/ask":
+            query = body.get("query", "").strip()
+            if not query:
+                self._send_json({"error": "Missing 'query' field"}, 400)
+                return
+
+            # Allow explicit "gathm run <tool> [args]" passthrough
+            run_prefix = re.match(r'^(?:gathm\s+)?run\s+(\S+)(.*)', query, re.I)
+            if run_prefix:
+                tool_name = run_prefix.group(1)
+                extra     = run_prefix.group(2).strip().split()
+                self._send_json(execute_tool(tool_name, extra))
+                return
+
+            # Route: find the best-matching tool
+            route = run_agent_command("ask", query)
+            tool_name = route.get("matched_tool")
+
+            if tool_name and tool_name != "null":
+                args = _extract_tool_args(query, tool_name)
+                self._send_json(execute_tool(tool_name, args))
+            else:
+                # No tool matched — return the routing result for the UI to
+                # render as a friendly "I can help with…" message
+                self._send_json(route)
+
+        # POST /api/v1/agent/plan
+        elif path == "/api/v1/agent/plan":
+            task = body.get("task", "")
+            if not task:
+                self._send_json({"error": "Missing 'task' field"}, 400)
+                return
+            result = run_agent_command("plan", task)
+            self._send_json(result)
+
+        # POST /api/v1/agent/engineer
+        elif path == "/api/v1/agent/engineer":
+            task = body.get("task", "")
+            if not task:
+                self._send_json({"error": "Missing 'task' field"}, 400)
+                return
+            result = run_agent_command("engineer", task)
+            self._send_json(result)
+
+        # POST /api/v1/agent/chain
+        elif path == "/api/v1/agent/chain":
+            pipeline = body.get("pipeline", "")
+            if not pipeline:
+                self._send_json({"error": "Missing 'pipeline' field"}, 400)
+                return
+            result = run_agent_command("chain", pipeline)
+            self._send_json(result)
+
+        # POST /api/v1/agent/parallel
+        elif path == "/api/v1/agent/parallel":
+            tools = body.get("tools", "")
+            if not tools:
+                self._send_json({"error": "Missing 'tools' field"}, 400)
+                return
+            result = run_agent_command("parallel", tools)
+            self._send_json(result)
+
+        # POST /api/v1/agent/heal
+        elif path == "/api/v1/agent/heal":
+            tool = body.get("tool", "all")
+            result = run_agent_command("heal", tool)
+            self._send_json(result)
 
 class QueryRequest(BaseModel):
     query: str
@@ -866,6 +1182,10 @@ def main():
         else:
             i += 1
 
+    # ThreadingHTTPServer so a slow request (e.g. the full /health sweep
+    # across all tools) never blocks the GUI from loading or other
+    # requests from being served concurrently.
+    server = http.server.ThreadingHTTPServer((host, port), GathmAPIHandler)
     print(f"""
 ╔══════════════════════════════════════════════════╗
 ║       Gathm Enterprise API Server v{API_VERSION}       ║

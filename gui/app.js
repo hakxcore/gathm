@@ -1,121 +1,90 @@
-// Gathm AI GUI — app.js
-// Connects to the Gathm API server (default: http://127.0.0.1:8080)
+// Gathm AI -- app.js
 
 const API_BASE = window.GATHM_API_URL || 'http://127.0.0.1:8080';
 
-// Initialize Lucide icons
 lucide.createIcons();
 
-// ── Clock ──────────────────────────────────────────────────────────
-function updateClock() {
-    const now = new Date();
-    let hours = now.getHours();
-    let minutes = now.getMinutes();
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12 || 12;
-    minutes = minutes < 10 ? '0' + minutes : minutes;
-    document.getElementById('clock').textContent = hours + ':' + minutes;
-}
-setInterval(updateClock, 1000);
-updateClock();
+// -- Element refs ----------------------------------------------------------
+const aiOrb        = document.getElementById('aiOrb');
+const mainOrb      = document.getElementById('mainOrb');
+const freqBars     = document.getElementById('freqBars');
+const botStatus    = document.getElementById('botStatus');
+const chatArea     = document.getElementById('chatArea');
+const messageInput = document.getElementById('messageInput');
+const sendBtn      = document.getElementById('sendBtn');
+const micBtn       = document.getElementById('micBtn');
 
-// ── Connectivity check ─────────────────────────────────────────────
-const onlineDot = document.getElementById('onlineDot');
-const botStatus = document.getElementById('botStatus');
+// -- Orb state -------------------------------------------------------------
+function setOrbState(state) {
+    if (aiOrb) aiOrb.className = 'ai-orb ' + state;
+}
+
+// -- Connectivity ----------------------------------------------------------
 let isOnline = false;
 
 async function checkConnectivity() {
-    try {
-        const res = await fetch(`${API_BASE}/api/v1/health`, {
-            method: 'GET',
-            signal: AbortSignal.timeout(5000),
-        });
-        isOnline = res.ok;
-    } catch {
-        isOnline = false;
+    // Try /ping first (instant). Fall back to /api/v1/tools for older
+    // servers that pre-date the /ping endpoint.
+    isOnline = false;
+    for (const p of ['/api/v1/ping', '/api/v1/tools']) {
+        try {
+            const res = await fetch(API_BASE + p, { signal: AbortSignal.timeout(4000) });
+            if (res.ok) { isOnline = true; break; }
+        } catch (_) { /* try next */ }
     }
-    updateStatusUI();
+    botStatus.textContent = isOnline ? 'Online - Voice & Text' : 'Offline - API not reachable';
 }
 
-function updateStatusUI() {
-    if (isOnline) {
-        onlineDot.classList.remove('offline');
-        botStatus.textContent = 'Online · Voice & Text';
-    } else {
-        onlineDot.classList.add('offline');
-        botStatus.textContent = 'Offline · API not reachable';
-    }
-}
-
-// Check on load and every 30 seconds
 checkConnectivity();
 setInterval(checkConnectivity, 30000);
 
-// ── Scroll helper ──────────────────────────────────────────────────
+// -- Scroll ----------------------------------------------------------------
 function scrollToBottom() {
-    const scrollArea = document.getElementById('chatScroll');
-    scrollArea.scrollTop = scrollArea.scrollHeight;
+    chatArea.scrollTop = chatArea.scrollHeight;
 }
 
-// ── Layout padding for fixed input area ────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
-    const inputAreaHeight = document.querySelector('.input-area').offsetHeight;
-    document.getElementById('chatArea').style.paddingBottom = `${inputAreaHeight + 20}px`;
-    scrollToBottom();
-});
-
-// ── Time formatting ────────────────────────────────────────────────
+// -- Time ------------------------------------------------------------------
 function formatTime() {
-    const now = new Date();
-    let hours = now.getHours();
-    let minutes = now.getMinutes();
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12 || 12;
-    minutes = minutes < 10 ? '0' + minutes : minutes;
-    return `${hours}:${minutes} ${ampm}`;
+    const d = new Date();
+    let h = d.getHours(), m = d.getMinutes();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return h + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
 }
 
-// ── Message rendering ──────────────────────────────────────────────
-const messageInput = document.getElementById('messageInput');
-const sendBtn = document.getElementById('sendBtn');
-const chatArea = document.getElementById('chatArea');
-
+// -- Messages --------------------------------------------------------------
 function addMessage(text, sender, cssClass) {
-    const messageWrapper = document.createElement('div');
-    messageWrapper.className = `message-wrapper ${sender}`;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message-wrapper ' + sender;
 
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${cssClass || sender + '-text'}`;
+    const msg = document.createElement('div');
+    msg.className = 'message ' + (cssClass || sender + '-text');
 
     const p = document.createElement('p');
     p.textContent = text;
-    messageDiv.appendChild(p);
+    msg.appendChild(p);
+    wrapper.appendChild(msg);
 
-    messageWrapper.appendChild(messageDiv);
+    const time = document.createElement('div');
+    time.className = 'message-time ' + sender + '-time';
+    time.textContent = formatTime();
 
-    const timeDiv = document.createElement('div');
-    timeDiv.className = `message-time ${sender}-time`;
-    timeDiv.textContent = formatTime();
-
-    chatArea.appendChild(messageWrapper);
-    chatArea.appendChild(timeDiv);
+    chatArea.appendChild(wrapper);
+    chatArea.appendChild(time);
     scrollToBottom();
-
-    lucide.createIcons();
 }
 
-// ── Typing indicator ───────────────────────────────────────────────
+// -- Typing indicator ------------------------------------------------------
 let typingEl = null;
 
 function showTyping() {
+    setOrbState('thinking');
     const wrapper = document.createElement('div');
     wrapper.className = 'message-wrapper bot';
     wrapper.id = 'typingWrapper';
-
     const indicator = document.createElement('div');
     indicator.className = 'typing-indicator';
     indicator.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
-
     wrapper.appendChild(indicator);
     chatArea.appendChild(wrapper);
     scrollToBottom();
@@ -123,20 +92,38 @@ function showTyping() {
 }
 
 function hideTyping() {
-    if (typingEl) {
-        typingEl.remove();
-        typingEl = null;
-    }
+    setOrbState('idle');
+    if (typingEl) { typingEl.remove(); typingEl = null; }
 }
 
-// ── Send message via API ───────────────────────────────────────────
+// -- Format API response ---------------------------------------------------
+// The /agent/chat endpoint returns {reply} from the LLM agent. If the agent
+// is unavailable the server falls back to the keyword router, so we still
+// handle those shapes gracefully.
+function formatAgentReply(data) {
+    if (data.reply) return data.reply;                    // LLM agent answer
+    if (data.status === 'success' && data.output) return data.output;
+    if (data.matched_tool && data.matched_tool !== 'null') {
+        return 'I can help with that using the "' + data.matched_tool + '" tool.' +
+               (data.description ? '\n\n' + data.description : '');
+    }
+    if (data.error && /no matching tool/i.test(data.error)) {
+        return "I couldn't find a tool for that. Try: weather in Tokyo, " +
+               "dns github.com, ip info 8.8.8.8, define serendipity.";
+    }
+    return data.raw_output || data.output || data.result || data.error
+        || JSON.stringify(data, null, 2);
+}
+
+// -- Send via API ----------------------------------------------------------
 let isSending = false;
+let history = [];                 // conversation memory for multi-turn context
+const HISTORY_MAX = 12;           // keep the last N turns
 
 async function sendMessage() {
     const text = messageInput.value.trim();
     if (!text || isSending) return;
 
-    // Add user message
     addMessage(text, 'user');
     messageInput.value = '';
     isSending = true;
@@ -144,36 +131,38 @@ async function sendMessage() {
     showTyping();
 
     try {
-        const res = await fetch(`${API_BASE}/api/v1/agent/ask`, {
+        const res = await fetch(API_BASE + '/api/v1/agent/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: text }),
+            body: JSON.stringify({ query: text, history: history }),
         });
 
         hideTyping();
 
         if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            addMessage(err.error || `Server error (${res.status})`, 'bot', 'bot-error');
+            const err = await res.json().catch(function() { return {}; });
+            addMessage(err.error || 'Server error (' + res.status + ')', 'bot', 'bot-error');
             return;
         }
 
         const data = await res.json();
-
-        // The agent returns either raw_output or structured response
-        const reply = data.raw_output
-            || data.output
-            || data.result
-            || JSON.stringify(data, null, 2);
-
+        const reply = formatAgentReply(data);
         addMessage(reply, 'bot');
+
+        // Remember this turn so follow-ups have context
+        history.push({ role: 'user', content: text });
+        history.push({ role: 'assistant', content: reply });
+        if (history.length > HISTORY_MAX * 2) {
+            history = history.slice(-HISTORY_MAX * 2);
+        }
+
     } catch (err) {
         hideTyping();
-        if (!isOnline) {
-            addMessage('Cannot reach the Gathm API. Start the server: gathm-api --port 8080', 'bot', 'bot-error');
-        } else {
-            addMessage(`Connection error: ${err.message}`, 'bot', 'bot-error');
-        }
+        addMessage(
+            isOnline ? 'Connection error: ' + err.message
+                     : 'Cannot reach Gathm API. Start the server: gathm-api --port 8080',
+            'bot', 'bot-error'
+        );
     } finally {
         isSending = false;
         sendBtn.disabled = false;
@@ -182,8 +171,85 @@ async function sendMessage() {
 }
 
 sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        sendMessage();
+messageInput.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') sendMessage();
+});
+
+// =========================================================================
+// Voice mode -- Web Audio API drives real frequency visualization
+// =========================================================================
+
+let audioCtx    = null;
+let analyser    = null;
+let micStream   = null;
+let rafId       = null;
+let voiceActive = false;
+
+const bars = Array.from(freqBars.querySelectorAll('.fb'));
+
+async function startVoice() {
+    try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+        botStatus.textContent = 'Microphone access denied';
+        setTimeout(checkConnectivity, 3000);
+        return;
     }
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    analyser.smoothingTimeConstant = 0.75;
+
+    const src = audioCtx.createMediaStreamSource(micStream);
+    src.connect(analyser);
+
+    voiceActive = true;
+    aiOrb.setAttribute('data-live', 'true');
+    setOrbState('speaking');
+    micBtn.classList.add('active');
+    botStatus.textContent = 'Listening...';
+
+    driveFrequency();
+}
+
+function stopVoice() {
+    voiceActive = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (micStream) micStream.getTracks().forEach(function(t) { t.stop(); });
+    if (audioCtx) audioCtx.close();
+    audioCtx = null; analyser = null; micStream = null; rafId = null;
+
+    mainOrb.style.transform = '';
+    bars.forEach(function(b) { b.style.height = ''; });
+
+    aiOrb.removeAttribute('data-live');
+    setOrbState('idle');
+    micBtn.classList.remove('active');
+    checkConnectivity();
+}
+
+function driveFrequency() {
+    if (!voiceActive || !analyser) return;
+
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+
+    const avg = data.reduce(function(s, v) { return s + v; }, 0) / data.length;
+    const scale = 1 + (avg / 255) * 0.18;
+    mainOrb.style.transform = 'scale(' + scale.toFixed(4) + ')';
+
+    const step = Math.max(1, Math.floor(data.length / bars.length));
+    bars.forEach(function(bar, i) {
+        const val = data[i * step] || 0;
+        const h = 4 + (val / 255) * 34;
+        bar.style.height = h.toFixed(1) + 'px';
+    });
+
+    rafId = requestAnimationFrame(driveFrequency);
+}
+
+micBtn.addEventListener('click', function() {
+    if (voiceActive) stopVoice();
+    else startVoice();
 });

@@ -64,7 +64,10 @@ INDIAN_GREEN = "\033[38;5;28m"
 ASHOKA_BLUE = "\033[38;5;20m"
 RESET = "\033[0m"
 
-# TUI module
+# TUI module — try the package-relative import first, then the flat one
+# (Pilot is launched as `python main.py`, so `pilot` may not be on sys.path).
+# A genuinely missing dependency (e.g. `rich`) is reported cleanly instead
+# of crashing with a raw ModuleNotFoundError traceback.
 try:
     from pilot.tui import (
         render_welcome, print_prompt, render_response, print_tool_exec,
@@ -74,13 +77,24 @@ try:
         console,
     )
 except ImportError:
-    from tui import (  # type: ignore[no-redef]
-        render_welcome, print_prompt, render_response, print_tool_exec,
-        print_status_bar, render_help, render_tools_list, render_error,
-        render_goodbye, check_connectivity,
-        start_waiting, stop_waiting, print_user_message, get_user_input,
-        console,
-    )
+    try:
+        from tui import (  # type: ignore[no-redef]
+            render_welcome, print_prompt, render_response, print_tool_exec,
+            print_status_bar, render_help, render_tools_list, render_error,
+            render_goodbye, check_connectivity,
+            start_waiting, stop_waiting, print_user_message, get_user_input,
+            console,
+        )
+    except ImportError as exc:
+        missing = getattr(exc, "name", None) or str(exc)
+        sys.stderr.write(
+            f"\nPilot can't start — a required dependency is missing: {missing}\n\n"
+            "Install Pilot's dependencies and try again:\n"
+            "    pip install -r pilot/requirements.txt\n"
+            "or re-run the installer:\n"
+            "    bash install.sh\n\n"
+        )
+        raise SystemExit(1)
 
 
 TOOL_ALIASES = {

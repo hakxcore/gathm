@@ -1310,6 +1310,11 @@ start_gui_server() {
     done
 
     warn "GUI server did not respond in time — check $_log_dir/gathm-gui.log"
+    if [[ -s "$_log_dir/gathm-gui.log" ]]; then
+        echo -e "${YELLOW}    ── last lines of gathm-gui.log ──${RESET}"
+        tail -n 15 "$_log_dir/gathm-gui.log" 2>/dev/null | sed 's/^/      /'
+    fi
+
     return 1
 }
 
@@ -1524,7 +1529,9 @@ main() {
     install_ollama "$platform"
     install_llmfit_and_select_model
 
-    install_engineer_deps
+    # TODO(engineer): temporarily disabled — re-enable when resuming the
+    # engineer agent. Uncomment the line below to restore engineer setup.
+    # install_engineer_deps
     install_pilot_deps
     install_playwright_browser
     setup_shortcuts "$platform"
