@@ -3,7 +3,7 @@
 
 agent:
   name: "gathm"
-  version: "1.0.0"
+  version: "3.0.0"
   description: "Gathm AI Agent - Autonomous tool management and execution"
 
   # Agent capabilities
@@ -80,6 +80,8 @@ secrets:
   # Add more API keys as needed
 
 # Fallback chain definitions
+# Each tool maps to at most one fallback. No cycles allowed — the executor
+# enforces a max depth of 2 to prevent infinite recursion.
 fallbacks:
   geo: ipinfo
-  ipinfo: geo
+  # ipinfo has no fallback; it is the terminal fallback for geo

@@ -26,38 +26,33 @@ except ImportError as e:
 ENGINEER_DIR = Path(__file__).resolve().parent
 GATHM_ROOT = ENGINEER_DIR.parent
 
-# --- Exclusive Claude Configuration ---
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+# --- Unified LLM provider (single source of truth for backend/model config) ---
+sys.path.insert(0, str(GATHM_ROOT))
+try:
+    from lib.llm import LLMConfig, LLMProvider as _LLMProvider
+    _llm_config = LLMConfig.from_env()
+except Exception:
+    _llm_config = None
 
 def get_model_client():
-    """Smart model selection: Claude when API key is available, Ollama as fallback."""
-    if ANTHROPIC_API_KEY:
-        try:
-            from autogen_ext.models.anthropic import AnthropicChatCompletionClient
-            print("[*] Engineer using Claude API (Anthropic)")
-            return AnthropicChatCompletionClient(
-                model="claude-sonnet-4-6",
-                api_key=ANTHROPIC_API_KEY,
-            )
-        except Exception as e:
-            print(f"[!] Claude init failed ({e}), falling back to Ollama")
+    """Return an AutoGen model client via the unified LLM provider."""
+    if _llm_config is not None:
+        provider = _LLMProvider(_llm_config)
+        print(f"[*] Engineer using {_llm_config.backend.upper()} — {_llm_config.model}")
+        return provider.autogen_model_client()
 
-    from autogen_ext.models.openai import OpenAIChatCompletionClient
-    print(f"[*] Engineer using local model ({OLLAMA_MODEL}) via Ollama")
+    # Fallback if lib.llm failed to import
+    from autogen_ext.models.openai import OpenAIChatCompletionClient  # type: ignore[import]
+    model = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    print(f"[*] Engineer using Ollama (fallback) — {model}")
     return OpenAIChatCompletionClient(
-        model=OLLAMA_MODEL,
-        base_url=OLLAMA_BASE_URL,
+        model=model,
+        base_url=base_url,
         api_key="NotRequired",
-        model_info={
-            "vision": False,
-            "function_calling": True,
-            "json_output": True,
-            "family": "unknown",
-            "structured_output": False,
-            "multiple_system_messages": True,
-        }
+        model_info={"vision": False, "function_calling": True, "json_output": True,
+                    "family": "unknown", "structured_output": False,
+                    "multiple_system_messages": True},
     )
 
 def _build_codebase_context() -> str:

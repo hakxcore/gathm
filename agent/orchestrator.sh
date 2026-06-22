@@ -28,7 +28,7 @@ source "$GATHM_ROOT/lib/schema.bash"
 source "$GATHM_ROOT/lib/cache.bash"
 source "$GATHM_ROOT/lib/ratelimit.bash"
 
-AGENT_VERSION="2.0.0"
+AGENT_VERSION="3.0.0"
 AGENT_NAME="gathm"
 AGENT_STATE_DIR="${HOME}/.gathm/agent"
 AGENT_MEMORY_FILE="${AGENT_STATE_DIR}/memory.json"

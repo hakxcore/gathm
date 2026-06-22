@@ -16,7 +16,6 @@ except ModuleNotFoundError:
 LANGCHAIN_IMPORT_ERROR: Optional[Exception] = None
 LANGCHAIN_AVAILABLE = True
 try:
-    from langchain_ollama import ChatOllama
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
     from langgraph.graph import StateGraph, END
 except ModuleNotFoundError as exc:
@@ -25,19 +24,8 @@ except ModuleNotFoundError as exc:
     AIMessage = Any  # type: ignore[assignment]
     BaseMessage = Any  # type: ignore[assignment]
     HumanMessage = Any  # type: ignore[assignment]
-    ChatOllama = None  # type: ignore[assignment]
     StateGraph = None  # type: ignore[assignment]
     END = "__END__"
-
-# Optional: Google Gemini backend
-GOOGLE_GENAI_AVAILABLE = False
-ChatGoogleGenerativeAI: Any = None
-try:
-    from langchain_google_genai import ChatGoogleGenerativeAI as _ChatGGAI
-    ChatGoogleGenerativeAI = _ChatGGAI
-    GOOGLE_GENAI_AVAILABLE = True
-except ModuleNotFoundError:
-    pass
 
 # Load environment variables
 load_dotenv()
@@ -47,56 +35,26 @@ PILOT_DIR = Path(__file__).resolve().parent
 GATHM_ROOT = PILOT_DIR.parent
 TOOLS_DIR = GATHM_ROOT / "tools"
 
-def _resolve_backend() -> str:
-    """Return 'ollama' or 'gemini' from env/config, defaulting to 'ollama'."""
-    env_val = os.getenv("GATHM_LLM_BACKEND", "").lower().strip()
-    if env_val in ("ollama", "gemini"):
-        return env_val
-    backend_file = Path.home() / ".gathm" / "llm_backend"
-    if backend_file.is_file():
-        stored = backend_file.read_text().strip().lower()
-        if stored in ("ollama", "gemini"):
-            return stored
-    return "ollama"
+# --- Unified LLM provider (single source of truth for backend/model config) ---
+sys.path.insert(0, str(GATHM_ROOT))
+try:
+    from lib.llm import LLMConfig, LLMProvider
+    _llm_config = LLMConfig.from_env()
+    LLM_BACKEND = _llm_config.backend
+    OLLAMA_MODEL = _llm_config.model
+except Exception:
+    LLM_BACKEND = os.getenv("GATHM_LLM_BACKEND", "ollama")
+    OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
+    _llm_config = None
 
-# Model priority: env var > ~/.gathm/model (install.sh) > hardcoded default
-def _resolve_model() -> str:
-    backend = _resolve_backend()
-    if backend == "gemini":
-        env_model = os.getenv("GATHM_GEMINI_MODEL") or os.getenv("GEMINI_MODEL")
-        if env_model:
-            return env_model
-        model_file = Path.home() / ".gathm" / "model"
-        if model_file.is_file():
-            stored = model_file.read_text().strip()
-            if stored:
-                return stored
-        return "gemini-2.0-flash-lite"
-    else:
-        env_model = os.getenv("GATHM_OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL")
-        if env_model:
-            return env_model
-        model_file = Path.home() / ".gathm" / "model"
-        if model_file.is_file():
-            stored = model_file.read_text().strip()
-            if stored:
-                return stored
-        return "gemma3:12b"
-
-LLM_BACKEND = _resolve_backend()
-OLLAMA_MODEL = _resolve_model()
 PILOT_MAX_HISTORY = int(os.getenv("PILOT_MAX_HISTORY", "12"))
 
 def _build_llm():
-    """Instantiate the correct LangChain LLM for the configured backend."""
-    if LLM_BACKEND == "gemini":
-        if not GOOGLE_GENAI_AVAILABLE:
-            raise RuntimeError(
-                "Google Generative AI SDK not installed. "
-                "Run: pip install langchain-google-genai"
-            )
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        return ChatGoogleGenerativeAI(model=OLLAMA_MODEL, google_api_key=api_key)
+    """Instantiate the LangChain chat model via the unified LLM provider."""
+    if _llm_config is not None:
+        return LLMProvider(_llm_config).langchain_chat_model()
+    # Fallback if lib.llm failed to import
+    from langchain_ollama import ChatOllama  # type: ignore[import]
     return ChatOllama(model=OLLAMA_MODEL)
 
 # Colors (kept for non-TUI code paths)
@@ -394,11 +352,6 @@ def _require_langchain_runtime() -> None:
         raise RuntimeError(
             "Pilot AI runtime dependencies are missing. "
             "Install pilot/requirements.txt and retry" + detail
-        )
-    if LLM_BACKEND == "gemini" and not GOOGLE_GENAI_AVAILABLE:
-        raise RuntimeError(
-            "Google Generative AI SDK not installed. "
-            "Run: pip install langchain-google-genai"
         )
 
 # System prompt for models without native tool support

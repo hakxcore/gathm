@@ -2,10 +2,10 @@
 # Gathm Enterprise - Health Check Framework
 # Provides health checking capabilities for all tools
 
-SCRIPT_DIR_HEALTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+SCRIPT_DIR_HEALTH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."\ &>/dev/null && pwd)"
 source "$SCRIPT_DIR_HEALTH/lib/logging.bash" 2>/dev/null
 
-GATHM_HEALTH_DIR="${HOME}/.gathm/health"
+GATHM_HEALTH_DIR="${GATHM_HEALTH_DIR:-${HOME}/.gathm/health}"
 GATHM_HEALTH_CACHE_TTL=300  # 5 minutes cache
 
 # Circuit breaker states
@@ -150,15 +150,21 @@ cb_get_state() {
 }
 
 # Circuit Breaker - Record a success
+# Uses the canonical subshell+flock pattern so all parent-shell variables
+# are inherited without complex quoting, and the lock is released on exit.
 cb_record_success() {
     local tool="$1"
     local state_file="$GATHM_HEALTH_DIR/cb_${tool}.state"
+    local lock_file="${state_file}.lock"
 
-    cat > "$state_file" << EOF
-state=$CB_STATE_CLOSED
-failures=0
-last_failure=0
-EOF
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 9
+            printf 'state=%s\nfailures=0\nlast_failure=0\n' "$CB_STATE_CLOSED" > "$state_file"
+        ) 9>>"$lock_file"
+    else
+        printf 'state=%s\nfailures=0\nlast_failure=0\n' "$CB_STATE_CLOSED" > "$state_file"
+    fi
     log_debug "circuit_breaker" "Circuit closed for tool: $tool"
 }
 
@@ -166,26 +172,47 @@ EOF
 cb_record_failure() {
     local tool="$1"
     local state_file="$GATHM_HEALTH_DIR/cb_${tool}.state"
+    local lock_file="${state_file}.lock"
     local now
     now=$(date +%s)
 
-    local failures=0
-    if [[ -f "$state_file" ]]; then
-        failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 9
+            local failures=0
+            if [[ -f "$state_file" ]]; then
+                failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+                failures="${failures:-0}"
+            fi
+            failures=$(( failures + 1 ))
+            local state="$CB_STATE_CLOSED"
+            if (( failures >= CB_FAILURE_THRESHOLD )); then
+                state="$CB_STATE_OPEN"
+            fi
+            printf 'state=%s\nfailures=%d\nlast_failure=%s\n' \
+                "$state" "$failures" "$now" > "$state_file"
+        ) 9>>"$lock_file"
+    else
+        # No flock — best-effort write (still correct for single-process use)
+        local failures=0
+        if [[ -f "$state_file" ]]; then
+            failures=$(grep "^failures=" "$state_file" | cut -d= -f2)
+            failures="${failures:-0}"
+        fi
+        failures=$(( failures + 1 ))
+        local state="$CB_STATE_CLOSED"
+        if (( failures >= CB_FAILURE_THRESHOLD )); then
+            state="$CB_STATE_OPEN"
+        fi
+        printf 'state=%s\nfailures=%d\nlast_failure=%s\n' \
+            "$state" "$failures" "$now" > "$state_file"
     fi
-    failures=$((failures + 1))
 
-    local state="$CB_STATE_CLOSED"
-    if (( failures >= CB_FAILURE_THRESHOLD )); then
-        state="$CB_STATE_OPEN"
-        log_warn "circuit_breaker" "Circuit OPEN for tool: $tool (failures: $failures)"
+    local cur_state
+    cur_state=$(grep "^state=" "$state_file" 2>/dev/null | cut -d= -f2 || echo "$CB_STATE_CLOSED")
+    if [[ "$cur_state" == "$CB_STATE_OPEN" ]]; then
+        log_warn "circuit_breaker" "Circuit OPEN for tool: $tool"
     fi
-
-    cat > "$state_file" << EOF
-state=$state
-failures=$failures
-last_failure=$now
-EOF
 }
 
 # Circuit Breaker - Check if tool is allowed to execute
