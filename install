@@ -34,6 +34,143 @@ ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
 warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
 fail()  { echo -e "${RED}[-]${RESET} $1"; }
 
+# ── Progress reporting ───────────────────────────────────────────────
+# Each top-level install phase calls `step_begin LABEL` and ends with
+# step_done / step_skip / step_fail. We track every step so we can
+# print a summary at the end and show the user where they are in the
+# overall flow ("[Step 6/11] Installing Ollama..."). Without this,
+# long silent steps (Ollama download, apt update) look frozen.
+#
+# Indexed arrays only — macOS still ships bash 3.2 without assoc arrays.
+_GATHM_TOTAL_STEPS=11
+_GATHM_STEP_IDX=0
+_GATHM_STEP_LABELS=()
+_GATHM_STEP_STATES=()
+_GATHM_STEP_ELAPSED=()
+_GATHM_STEP_T0=0
+
+# Format integer seconds as "Xm YYs" or "Ys"
+_format_elapsed() {
+    local s=$1
+    if (( s >= 60 )); then
+        printf '%dm %02ds' $(( s / 60 )) $(( s % 60 ))
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+# Mark a step as starting and print a clear header. Always print a
+# header so even silent steps reveal where the script is currently working.
+step_begin() {
+    local label="$1"
+    _GATHM_STEP_IDX=$((_GATHM_STEP_IDX + 1))
+    _GATHM_STEP_LABELS[$((_GATHM_STEP_IDX - 1))]="$label"
+    _GATHM_STEP_STATES[$((_GATHM_STEP_IDX - 1))]="running"
+    _GATHM_STEP_ELAPSED[$((_GATHM_STEP_IDX - 1))]=""
+    _GATHM_STEP_T0=$SECONDS
+    echo ""
+    echo -e "${BOLD}${CYAN}━━ [Step ${_GATHM_STEP_IDX}/${_GATHM_TOTAL_STEPS}] ${label} ━━${RESET}"
+}
+
+_step_finalize() {
+    local state="$1"
+    local idx=$(( _GATHM_STEP_IDX - 1 ))
+    local elapsed=$(( SECONDS - _GATHM_STEP_T0 ))
+    _GATHM_STEP_STATES[$idx]="$state"
+    _GATHM_STEP_ELAPSED[$idx]=$(_format_elapsed "$elapsed")
+}
+
+step_done() {
+    _step_finalize "done"
+    local idx=$(( _GATHM_STEP_IDX - 1 ))
+    ok "${1:-Done} ${YELLOW}(${_GATHM_STEP_ELAPSED[$idx]})${RESET}"
+}
+step_skip() {
+    _step_finalize "skipped"
+    warn "${1:-Skipped}"
+}
+step_fail() {
+    _step_finalize "failed"
+    local idx=$(( _GATHM_STEP_IDX - 1 ))
+    fail "${1:-Failed} ${YELLOW}(${_GATHM_STEP_ELAPSED[$idx]})${RESET}"
+}
+
+# Print a final summary table of every step run.
+step_summary() {
+    local n=${#_GATHM_STEP_LABELS[@]}
+    (( n == 0 )) && return 0
+    echo ""
+    echo -e "${BOLD}Install summary${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local i icon color
+    for (( i = 0; i < n; i++ )); do
+        case "${_GATHM_STEP_STATES[$i]}" in
+            done)    icon="✓"; color="$GREEN" ;;
+            failed)  icon="✗"; color="$RED" ;;
+            skipped) icon="–"; color="$YELLOW" ;;
+            *)       icon="?"; color="$RESET" ;;
+        esac
+        printf '  %b%s%b  %-44s  %b%s%b\n' \
+            "$color" "$icon" "$RESET" \
+            "${_GATHM_STEP_LABELS[$i]}" \
+            "$YELLOW" "${_GATHM_STEP_ELAPSED[$i]:-—}" "$RESET"
+    done
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# Run a command with a live spinner that shows elapsed time + the
+# latest log line. Useful for silent operations (apt update, pip install)
+# where suppressing output otherwise makes the script look frozen.
+#
+# Usage:  run_with_spinner "Installing pilot deps" -- pip install -r req.txt
+# Returns the command's exit status. On failure, prints the last 10 log lines.
+# Falls back to plain `info; cmd` when stdout is not a TTY.
+_SPINNER_FRAMES='|/-\'
+run_with_spinner() {
+    local label="$1"; shift
+    [[ "${1:-}" == "--" ]] && shift
+
+    if [[ ! -t 1 ]] || [[ "${TERM:-dumb}" == "dumb" ]]; then
+        info "$label..."
+        "$@"
+        return $?
+    fi
+
+    local log_file
+    log_file=$(mktemp 2>/dev/null) || log_file="/tmp/gathm-spinner.$$"
+
+    ( "$@" ) >"$log_file" 2>&1 &
+    local cmd_pid=$!
+
+    local t0=$SECONDS frame_i=0 frame_count=${#_SPINNER_FRAMES}
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        local frame=${_SPINNER_FRAMES:$(( frame_i % frame_count )):1}
+        local elapsed=$(( SECONDS - t0 ))
+        local last_line
+        last_line=$(tail -n 1 "$log_file" 2>/dev/null \
+            | tr -cd '\11\12\15\40-\176' | tr '\r' ' ' | head -c 70)
+        printf '\r\033[2K  %b%s%b %s %b[%s]%b %b%s%b' \
+            "$CYAN" "$frame" "$RESET" \
+            "$label" \
+            "$YELLOW" "$(_format_elapsed $elapsed)" "$RESET" \
+            "$BLUE" "${last_line:- }" "$RESET"
+        sleep 0.2
+        frame_i=$((frame_i + 1))
+    done
+
+    wait "$cmd_pid" 2>/dev/null
+    local rc=$?
+    printf '\r\033[2K'
+
+    if (( rc != 0 )); then
+        echo -e "    ${RED}Last 10 lines of output:${RESET}"
+        tail -n 10 "$log_file" 2>/dev/null | sed 's/^/    /'
+    fi
+
+    rm -f "$log_file" 2>/dev/null
+    return $rc
+}
+
 # ── Python version gate ──────────────────────────────────────────────
 # Pilot, api/server.py, and engineer all require Python 3.8+.
 # We check (and optionally auto-install) Python early, before touching
@@ -589,71 +726,97 @@ setup_termux_storage() {
 # --- Install Ollama (local LLM runtime) ---
 install_ollama() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        warn "Skipping Ollama install (offline)"
+        step_skip "Ollama install skipped (offline)"
         return 0
     fi
 
     if command -v ollama &>/dev/null; then
-        ok "Ollama already installed ($(ollama --version 2>&1 | head -1))"
+        step_done "Ollama already installed ($(ollama --version 2>&1 | head -1))"
         start_ollama_serve
         return 0
     fi
 
-    info "Installing Ollama (local LLM runtime)..."
     local platform="$1"
+
+    # Pre-cache sudo credentials. The official Ollama installer calls sudo
+    # several times (writing /usr/local/bin, registering systemd units). If
+    # sudo prompts mid-download the install can sit waiting for a password
+    # behind a wall of curl output — looking exactly like a hung script.
+    if [[ "$platform" != "windows" && "$platform" != "termux" ]] \
+            && command -v sudo &>/dev/null \
+            && ! sudo -n true 2>/dev/null; then
+        info "Caching sudo credentials so the Ollama installer doesn't pause for a password later..."
+        sudo -v 2>/dev/null || warn "sudo credential cache failed — installer may prompt mid-run"
+    fi
+
+    info "Downloads ~700MB (plus GPU drivers if a GPU is detected)."
+    info "Typical time: 3-15 min depending on your connection. Live progress below."
+    echo ""
+
+    local t0=$SECONDS
+    local install_rc=0
 
     case "$platform" in
         macos)
             if command -v brew &>/dev/null; then
-                brew install ollama 2>/dev/null || true
+                run_with_spinner "Installing Ollama via Homebrew" -- \
+                    brew install ollama || install_rc=$?
             else
-                curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || true
+                # Foreground so user sees curl + install.sh progress directly.
+                curl -fsSL https://ollama.com/install.sh | sh || install_rc=$?
             fi
             ;;
         termux)
-            pkg install -y ollama 2>/dev/null || true
+            run_with_spinner "Installing Ollama via pkg" -- \
+                pkg install -y ollama || install_rc=$?
             ;;
         windows)
             # Try package managers first, then fall back to the official installer exe
             if command -v winget &>/dev/null; then
-                info "Installing Ollama via winget..."
-                winget install --id Ollama.Ollama --accept-source-agreements \
-                    --accept-package-agreements --silent 2>/dev/null || true
+                run_with_spinner "Installing Ollama via winget" -- \
+                    winget install --id Ollama.Ollama --accept-source-agreements \
+                        --accept-package-agreements --silent || install_rc=$?
             elif command -v scoop &>/dev/null; then
                 info "Installing Ollama via scoop..."
                 scoop bucket add extras 2>/dev/null || true
-                scoop install extras/ollama 2>/dev/null || true
+                run_with_spinner "scoop install ollama" -- \
+                    scoop install extras/ollama || install_rc=$?
             elif command -v choco &>/dev/null; then
-                info "Installing Ollama via Chocolatey..."
-                choco install ollama -y 2>/dev/null || true
+                run_with_spinner "Installing Ollama via Chocolatey" -- \
+                    choco install ollama -y || install_rc=$?
             else
                 # Download and run the official silent installer
                 info "Downloading OllamaSetup.exe (official installer)..."
                 local _tmp_dir; _tmp_dir=$(mktemp -d 2>/dev/null || echo "$TEMP/gathm_$$")
                 mkdir -p "$_tmp_dir" 2>/dev/null || true
                 local _setup_exe="$_tmp_dir/OllamaSetup.exe"
-                if curl -fsSL "https://ollama.com/download/OllamaSetup.exe" \
-                        -o "$_setup_exe" 2>/dev/null; then
-                    # /SILENT runs without UI; no admin rights required
-                    "$_setup_exe" /SILENT 2>/dev/null || true
+                if curl -fL --progress-bar "https://ollama.com/download/OllamaSetup.exe" \
+                        -o "$_setup_exe"; then
+                    info "Running OllamaSetup.exe /SILENT..."
+                    "$_setup_exe" /SILENT || install_rc=$?
                     rm -f "$_setup_exe" 2>/dev/null || true
                 else
+                    install_rc=1
                     warn "Could not download Ollama installer."
                     warn "Install manually from: https://ollama.com/download/windows"
                 fi
             fi
             ;;
         *)
-            # Linux (all distros), WSL
-            curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || true
+            # Linux (all distros), WSL — keep install.sh in the foreground so the
+            # user sees its real-time progress messages (downloading bundle, setting
+            # up systemd, etc.) instead of staring at a silent screen.
+            curl -fsSL https://ollama.com/install.sh | sh || install_rc=$?
             ;;
     esac
 
+    local elapsed=$(( SECONDS - t0 ))
+
     if command -v ollama &>/dev/null; then
-        ok "Ollama installed"
+        step_done "Ollama installed in $(_format_elapsed $elapsed)"
         start_ollama_serve
     else
-        warn "Ollama installation failed — install manually from https://ollama.com"
+        step_fail "Ollama installation failed after $(_format_elapsed $elapsed) — install manually from https://ollama.com"
     fi
 }
 
@@ -1509,35 +1672,78 @@ main() {
     # Expose platform globally so sub-functions (e.g. Gemini fallback) can use it
     _GATHM_PLATFORM="$platform"
 
-    # Check internet first — determines what we can install
+    # Total visible steps: connectivity, python, storage, deps, files, ollama,
+    # llm-model, pilot-deps, playwright, shortcuts, verify. Stays at 11 so the
+    # "[Step N/11]" counter is stable across platforms; setup_termux_storage
+    # short-circuits to step_skip on non-Termux to keep numbering honest.
+    _GATHM_TOTAL_STEPS=11
+
+    step_begin "Checking internet connectivity"
     check_internet
+    if [[ "$GATHM_ONLINE" == "true" ]]; then
+        step_done "Network reachable"
+    else
+        step_skip "Offline — online-only steps will be skipped"
+    fi
 
     # Verify Python 3.8+ is present before touching the venv or pip.
     # This runs before install_deps so a missing Python surfaces immediately
     # with a clear message rather than a cryptic venv failure later.
+    step_begin "Verifying Python toolchain (3.8+)"
     check_and_install_python "$platform"
+    step_done "Python toolchain ready"
 
-    setup_termux_storage "$platform"
+    step_begin "Configuring Termux storage (Termux only)"
+    if [[ "$platform" == "termux" ]]; then
+        setup_termux_storage "$platform"
+        step_done "Storage configured"
+    else
+        step_skip "Not on Termux — nothing to do"
+    fi
+
+    step_begin "Installing OS dependencies"
     install_deps "$platform"
+    step_done "OS dependencies installed"
+
+    step_begin "Staging gathm files"
     setup_files
+    step_done "Files staged"
 
     # Install Ollama + pull the best available model first.
     # Pilot needs a running LLM to function, so we set up the AI runtime
     # before installing Python deps — this also means the model is ready
     # by the time Pilot starts for the first time.
     # If Ollama cannot be installed, falls back to Google Gemini free tier.
+    step_begin "Installing Ollama (local LLM runtime)"
     install_ollama "$platform"
+    # install_ollama emits step_done / step_skip / step_fail itself.
+
+    step_begin "Selecting LLM model"
     install_llmfit_and_select_model
+    step_done "LLM model configuration complete"
 
     # TODO(engineer): temporarily disabled — re-enable when resuming the
     # engineer agent. Uncomment the line below to restore engineer setup.
     # install_engineer_deps
+    step_begin "Installing Pilot AI Python dependencies"
     install_pilot_deps
+    step_done "Pilot AI dependencies installed"
+
+    step_begin "Installing Playwright browser engine"
     install_playwright_browser
+    step_done "Browser engine ready"
+
+    step_begin "Installing shell shortcuts"
     setup_shortcuts "$platform"
+    step_done "Shortcuts installed"
 
     reload_shell_config
+
+    step_begin "Running final verification"
     verify || true   # non-zero return just means warnings; never abort setup
+    step_done "Verification complete"
+
+    step_summary
 
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
