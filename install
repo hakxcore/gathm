@@ -585,7 +585,7 @@ check_internet() {
         ok "Network: ${GREEN}Online${RESET}"
     else
         GATHM_ONLINE="false"
-        warn "Network: ${RED}Offline${RESET} — skipping online-only steps (Ollama, llmfit)"
+        warn "Network: ${RED}Offline${RESET} — skipping online-only steps (Ollama)"
     fi
 }
 
@@ -926,97 +926,44 @@ setup_gemini_fallback() {
     ok "Gemini configured! Model: gemini-2.0-flash-lite (free tier)"
 }
 
-# --- Install llmfit binary ---
-# Tries in order:
-#   1. Already on PATH                      (instant)
-#   2. Homebrew tap  (macOS / Linux brew)   (recommended for macOS)
-#   3. Pre-built GitHub release binary      (no Rust needed, ~2 MB)
-#      → copied to $LOCAL_BIN  AND  $SCRIPT_DIR/llmfit for offline use
-#   4. cargo install                        (last resort, needs Rust)
-_install_llmfit() {
-    local platform="$1"
-
-    # ── 1. Already installed ──────────────────────────────────────────
-    if command -v llmfit &>/dev/null; then
-        ok "llmfit already installed ($(llmfit --version 2>/dev/null | head -1))"
-        return 0
-    fi
-
-    # ── 2. Homebrew (macOS primary; also works on Linux with brew) ────
-    if command -v brew &>/dev/null; then
-        info "Installing llmfit via Homebrew..."
-        brew tap AlexsJones/llmfit 2>/dev/null || true
-        if brew install llmfit 2>/dev/null; then
-            ok "llmfit installed via Homebrew"
+# Detect total system RAM in MB.  Prints the value on stdout; prints 0
+# and returns 1 if it can't determine.  Reads /proc/meminfo on Linux,
+# WSL and Termux; falls back to `sysctl` on macOS.
+_detect_total_ram_mb() {
+    local mem_kb
+    if [[ -r /proc/meminfo ]]; then
+        mem_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+        if [[ -n "$mem_kb" && "$mem_kb" -gt 0 ]]; then
+            echo $(( mem_kb / 1024 ))
             return 0
         fi
     fi
-
-    # ── 3. Pre-built GitHub release binary ───────────────────────────
-    local arch; arch=$(uname -m 2>/dev/null || echo "x86_64")
-    case "$arch" in
-        arm64|aarch64) arch="aarch64" ;;
-        *)             arch="x86_64"  ;;
-    esac
-
-    # Map platform → Rust target triple
-    local target
-    case "$platform" in
-        macos)   target="${arch}-apple-darwin"       ;;
-        alpine)  target="${arch}-unknown-linux-musl" ;;  # musl, not gnu
-        windows) target="${arch}-pc-windows-msvc"    ;;
-        *)       target="${arch}-unknown-linux-gnu"  ;;  # Debian/Fedora/Arch/WSL/Termux
-    esac
-
-    # Resolve the latest release tag from GitHub API
-    local version=""
-    version=$(curl -fsSL \
-        "https://api.github.com/repos/AlexsJones/llmfit/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 | cut -d'"' -f4) || true
-
-    if [[ -n "$version" ]]; then
-        local ext="tar.gz"; [[ "$platform" == "windows" ]] && ext="zip"
-        local fname="llmfit-${version}-${target}.${ext}"
-        local url="https://github.com/AlexsJones/llmfit/releases/download/${version}/${fname}"
-        local tmp_dir; tmp_dir=$(mktemp -d)
-
-        info "Downloading llmfit ${version} for ${target}..."
-        if curl -fsSL "$url" -o "$tmp_dir/$fname"; then
-            if [[ "$ext" == "zip" ]]; then
-                unzip -q "$tmp_dir/$fname" -d "$tmp_dir" 2>/dev/null || true
-            else
-                tar -xzf "$tmp_dir/$fname" -C "$tmp_dir" 2>/dev/null || true
-            fi
-
-            local bin_name="llmfit"; [[ "$platform" == "windows" ]] && bin_name="llmfit.exe"
-            local extracted; extracted=$(find "$tmp_dir" -name "$bin_name" -type f 2>/dev/null | head -1)
-            if [[ -n "$extracted" ]]; then
-                mkdir -p "$LOCAL_BIN"
-                cp "$extracted" "$LOCAL_BIN/$bin_name"
-                chmod +x "$LOCAL_BIN/$bin_name" 2>/dev/null || true
-                # Also copy into the gathm source dir so it's available for offline runs
-                cp "$LOCAL_BIN/$bin_name" "$SCRIPT_DIR/$bin_name" 2>/dev/null || true
-                rm -rf "$tmp_dir"
-                ok "llmfit ${version} installed → $LOCAL_BIN/$bin_name"
-                return 0
-            fi
-        fi
-        rm -rf "$tmp_dir"
-        warn "Pre-built binary download failed for target: ${target}"
-    else
-        warn "Could not resolve latest llmfit release (GitHub API unreachable?)"
-    fi
-
-    # ── 4. cargo install (requires Rust toolchain) ────────────────────
-    if command -v cargo &>/dev/null; then
-        info "Installing llmfit via cargo (this may take a few minutes)..."
-        if cargo install llmfit 2>/dev/null; then
-            ok "llmfit installed via cargo"
+    if command -v sysctl &>/dev/null; then
+        local mem_bytes
+        mem_bytes=$(sysctl -n hw.memsize 2>/dev/null)
+        if [[ -n "$mem_bytes" && "$mem_bytes" -gt 0 ]]; then
+            echo $(( mem_bytes / 1024 / 1024 ))
             return 0
         fi
     fi
+    echo 0
+    return 1
+}
 
-    return 1  # all methods failed
+# Pick an Ollama model tag based on system RAM.
+# Conservative tiers — assumes pure CPU inference and leaves headroom
+# for the OS.  Override at any time by writing $HOME/.gathm/model or
+# setting GATHM_OLLAMA_MODEL in the env before running ./install.
+_recommend_model_for_hardware() {
+    local ram_mb
+    ram_mb=$(_detect_total_ram_mb)
+    if   (( ram_mb < 1 ));     then echo "gemma3:4b"      # detection failed
+    elif (( ram_mb < 4096 ));  then echo "gemma3:1b"      # phone / small VM
+    elif (( ram_mb < 8192 ));  then echo "gemma3:4b"      # ≤8 GB
+    elif (( ram_mb < 16384 )); then echo "llama3.1:8b"    # 8–16 GB
+    elif (( ram_mb < 32768 )); then echo "qwen2.5:14b"    # 16–32 GB
+    else                            echo "qwen2.5:32b"    # 32 GB+
+    fi
 }
 
 # Pull the best ollama model.
@@ -1095,10 +1042,14 @@ _pull_ollama_model() {
     fi
 }
 
-# --- Install llmfit and select best model ---
-install_llmfit_and_select_model() {
+# --- Pick a local model and pull it ---
+# Selection priority (highest wins):
+#   1. GATHM_OLLAMA_MODEL env var (explicit override)
+#   2. $HOME/.gathm/model        (sticky choice from a previous run)
+#   3. _recommend_model_for_hardware (RAM-tier heuristic)
+select_and_pull_llm_model() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        warn "Skipping llmfit (offline) — checking local models"
+        warn "Offline — checking for already-pulled local models"
         _pull_ollama_model ""
         return 0
     fi
@@ -1109,85 +1060,28 @@ install_llmfit_and_select_model() {
         return 0
     fi
 
-    info "Installing llmfit (hardware-aware LLM recommender)..."
-    local platform="${_GATHM_PLATFORM:-linux}"
+    local recommended=""
 
-    if _install_llmfit "$platform" && command -v llmfit &>/dev/null; then
-        info "Analyzing hardware to find the best local model..."
-
-        # llmfit recommend --json outputs: {"system": {...}, "models": [...]}
-        # Each model has: "name" (HuggingFace), "runtime" ("ollama"/"mlx"/etc.),
-        # "runtime_label" (Ollama pull tag, e.g. "llama3.1:8b")
-        #
-        # IMPORTANT: llmfit uses a TUI framework that can corrupt terminal state
-        # even when running non-interactively.  We work around this by:
-        #   1. Writing output to a temp file instead of $() — llmfit sees
-        #      stdout is NOT a TTY so it falls back to plain JSON output,
-        #      avoiding TUI initialisation entirely
-        #   2. Calling stty sane — restores any terminal settings llmfit
-        #      may have changed (e.g. raw-mode flags from init code)
-        # Note: do NOT pass </dev/null — that also disables JSON output.
-        local llmfit_output="" recommended=""
-        local _llmfit_tmp _llmfit_err
-        _llmfit_tmp=$(mktemp 2>/dev/null || echo "/tmp/llmfit_out_$$")
-        _llmfit_err=$(mktemp 2>/dev/null || echo "/tmp/llmfit_err_$$")
-        # json=true is the default for recommend; -n defaults to 5.
-        # Capturing stderr separately lets us surface diagnostics when
-        # llmfit produces no stdout output.
-        ( llmfit recommend -n 5 >"$_llmfit_tmp" 2>"$_llmfit_err" ) || true
-        stty sane 2>/dev/null || true   # restore terminal after llmfit
-        llmfit_output=$(cat "$_llmfit_tmp" 2>/dev/null) || true
-        # If no stdout, show first line of stderr as a hint
-        if [[ -z "$llmfit_output" ]]; then
-            local _llmfit_hint; _llmfit_hint=$(head -1 "$_llmfit_err" 2>/dev/null | tr -d '\r\n')
-            [[ -n "$_llmfit_hint" ]] && warn "llmfit: $_llmfit_hint"
-        fi
-        rm -f "$_llmfit_tmp" "$_llmfit_err" 2>/dev/null || true
-
-        if [[ -n "$llmfit_output" ]]; then
-            if command -v jq &>/dev/null; then
-                # Prefer runtime_label (Ollama tag) for the first Ollama-compatible model;
-                # fall back to .models as top-level array (older llmfit versions)
-                recommended=$(echo "$llmfit_output" | jq -r '
-                    (
-                        (.models // .) | map(select(.runtime == "ollama" or .runtime == null))
-                        | .[0] | (.runtime_label // .name)
-                    ) // empty
-                ' 2>/dev/null)
-            else
-                local pcmd; pcmd=$(_python_cmd)
-                if [[ -n "$pcmd" ]]; then
-                    recommended=$("$pcmd" -c "
-import json, sys
-try:
-    d = json.loads(sys.stdin.read())
-    models = d.get('models', d) if isinstance(d, dict) else d
-    if isinstance(models, list):
-        for m in models:
-            rt = m.get('runtime', 'ollama')
-            if rt in ('ollama', None, ''):
-                tag = m.get('runtime_label') or m.get('name', '')
-                if tag:
-                    print(tag)
-                    break
-except Exception:
-    pass
-" <<< "$llmfit_output" 2>/dev/null)
-                fi
-            fi
-        fi
-
-        if [[ -n "$recommended" ]]; then
-            ok "Best model for your hardware: $recommended"
-            _pull_ollama_model "$recommended"
-        else
-            warn "Could not determine best model from llmfit — checking local models"
-            _pull_ollama_model ""
-        fi
-    else
-        warn "llmfit not available — checking local models / falling back to gemma3:4b"
-        _pull_ollama_model ""
+    if [[ -n "${GATHM_OLLAMA_MODEL:-}" ]]; then
+        recommended="$GATHM_OLLAMA_MODEL"
+        info "Using model from GATHM_OLLAMA_MODEL: $recommended"
+    elif [[ -s "$HOME/.gathm/model" ]]; then
+        recommended=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
+        [[ -n "$recommended" ]] && info "Using previously-selected model: $recommended"
     fi
+
+    if [[ -z "$recommended" ]]; then
+        local ram_mb
+        ram_mb=$(_detect_total_ram_mb)
+        recommended=$(_recommend_model_for_hardware)
+        if (( ram_mb > 0 )); then
+            info "Hardware: ${ram_mb} MB RAM detected → ${recommended}"
+        else
+            info "Could not detect RAM — defaulting to ${recommended}"
+        fi
+    fi
+
+    _pull_ollama_model "$recommended"
 }
 
 # Save selected model to config
@@ -1719,7 +1613,7 @@ main() {
     # install_ollama emits step_done / step_skip / step_fail itself.
 
     step_begin "Selecting LLM model"
-    install_llmfit_and_select_model
+    select_and_pull_llm_model
     step_done "LLM model configuration complete"
 
     # TODO(engineer): temporarily disabled — re-enable when resuming the
