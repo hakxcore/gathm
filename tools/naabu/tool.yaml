@@ -2,6 +2,7 @@ name: naabu
 version: "3.0.0"
 description: "ProjectDiscovery naabu wrapper for fast host port scanning"
 category: security
+requires_internet: true
 
 dependencies:
   system: [naabu]

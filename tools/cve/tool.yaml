@@ -2,6 +2,7 @@ name: cve
 version: "3.0.0"
 description: "CVE vulnerability lookup with severity, dates, and summary details"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

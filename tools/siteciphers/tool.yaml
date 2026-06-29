@@ -2,6 +2,7 @@ name: siteciphers
 version: "3.0.0"
 description: "Checks which SSL/TLS ciphers are enabled or disabled for a given HTTPS site."
 category: security
+requires_internet: true
 
 dependencies:
   system: [openssl]

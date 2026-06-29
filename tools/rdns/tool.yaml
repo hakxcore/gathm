@@ -2,6 +2,7 @@ name: rdns
 version: "3.0.0"
 description: "Reverse DNS lookup (PTR) for IPv4/IPv6 addresses"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [python3]

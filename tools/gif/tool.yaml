@@ -2,6 +2,7 @@ name: gif
 version: "3.0.0"
 description: "View animated GIFs in the terminal"
 category: media
+requires_internet: true
 
 dependencies:
   system: [curl]

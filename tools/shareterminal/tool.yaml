@@ -2,6 +2,7 @@ name: shareterminal
 version: "3.0.0"
 description: "Instantly share your terminal session with others via tmate (SSH + web browser) or upterm"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]

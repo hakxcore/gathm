@@ -2,6 +2,7 @@ name: cheat
 version: "3.0.0"
 description: "Programming language cheatsheets and command references"
 category: data
+requires_internet: true
 author: hakxcore
 
 dependencies:

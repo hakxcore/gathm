@@ -2,6 +2,7 @@ name: katana
 version: "3.0.0"
 description: "ProjectDiscovery katana wrapper for crawling and endpoint discovery"
 category: security
+requires_internet: true
 
 dependencies:
   system: [katana]

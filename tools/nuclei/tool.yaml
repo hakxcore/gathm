@@ -2,6 +2,7 @@ name: nuclei
 version: "3.0.0"
 description: "ProjectDiscovery nuclei wrapper for template-based vulnerability scanning"
 category: security
+requires_internet: true
 
 dependencies:
   system: [nuclei]

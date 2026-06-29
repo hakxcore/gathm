@@ -2,6 +2,7 @@ name: pwned
 version: "3.0.0"
 description: "Check if your email/account has been compromised in data breaches"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl]

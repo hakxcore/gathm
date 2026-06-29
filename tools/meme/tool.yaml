@@ -2,6 +2,7 @@ name: meme
 version: "3.0.0"
 description: "Meme generator from the command line"
 category: media
+requires_internet: true
 
 dependencies:
   system: [curl]

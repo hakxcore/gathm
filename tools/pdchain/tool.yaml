@@ -2,6 +2,7 @@ name: pdchain
 version: "3.0.0"
 description: "Meta-tool pipeline for ProjectDiscovery recon/scanning workflow"
 category: security
+requires_internet: true
 
 dependencies:
   system: [bash]

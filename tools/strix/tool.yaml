@@ -2,6 +2,7 @@ name: strix
 version: "3.0.0"
 description: "Wrapper for local strix binary to expose it through gathm"
 category: utility
+requires_internet: false  # thin wrapper around a locally-installed strix binary
 
 dependencies:
   system: [strix]

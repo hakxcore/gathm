@@ -2,6 +2,7 @@ name: dnssec
 version: "3.0.0"
 description: "DNSSEC checker for DS/DNSKEY presence and resolver validation flags"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

@@ -2,6 +2,7 @@ name: robotsaudit
 version: "3.0.0"
 description: "robots.txt analyzer for crawl directives, sitemaps, and sensitive path hints"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

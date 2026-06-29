@@ -2,6 +2,7 @@ name: jukebox
 version: "3.0.0"
 description: "Music player interface for the terminal"
 category: media
+requires_internet: true
 
 dependencies:
   system: [telnet]

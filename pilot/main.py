@@ -4,6 +4,7 @@ import subprocess
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Any, List, Optional, TypedDict
 
@@ -188,6 +189,52 @@ def get_tool_description(tool_name):
             pass
     return f"Run the {tool_name} tool"
 
+# Tools whose manifest sets `requires_internet: false` work offline. We cache
+# the parsed value per tool since the manifest set is static during a session.
+_REQUIRES_INTERNET_CACHE: dict[str, bool] = {}
+
+def tool_requires_internet(tool_name: str) -> bool:
+    """Whether a tool needs an internet connection for its core function.
+
+    Reads `requires_internet` from the tool's manifest. Defaults to True for
+    anything we can't read (built-ins, missing/garbled manifest) so we never
+    offer a tool offline that would just fail — the conservative choice.
+    """
+    if tool_name in _REQUIRES_INTERNET_CACHE:
+        return _REQUIRES_INTERNET_CACHE[tool_name]
+
+    result = True  # safe default
+    if tool_name not in BUILTIN_TOOLS:
+        yaml_path = TOOLS_DIR / tool_name / "tool.yaml"
+        if yaml_path.is_file():
+            try:
+                for line in yaml_path.read_text().splitlines():
+                    s = line.strip()
+                    if s.startswith("requires_internet:"):
+                        val = s.split(":", 1)[1].split("#", 1)[0].strip()
+                        val = val.strip('"').strip("'").lower()
+                        result = val not in ("false", "no", "0", "off")
+                        break
+            except Exception:
+                pass
+
+    _REQUIRES_INTERNET_CACHE[tool_name] = result
+    return result
+
+# Connectivity can change mid-session, but check_connectivity() opens a socket
+# with a 3s timeout — too costly to call on every model turn. Cache the result
+# for a short window so an offline session pays that cost at most once per TTL.
+_CONN_CACHE: dict[str, float | str] = {"status": "", "ts": 0.0}
+_CONN_TTL_SECONDS = 30.0
+
+def current_connectivity() -> str:
+    """Return 'online'/'offline', cached for _CONN_TTL_SECONDS."""
+    now = time.monotonic()
+    if not _CONN_CACHE["status"] or (now - float(_CONN_CACHE["ts"])) > _CONN_TTL_SECONDS:
+        _CONN_CACHE["status"] = check_connectivity()
+        _CONN_CACHE["ts"] = now
+    return str(_CONN_CACHE["status"])
+
 def _looks_number(value: str) -> bool:
     return bool(re.match(r"^-?\d+(\.\d+)?$", value.strip()))
 
@@ -360,12 +407,37 @@ def call_model(state: AgentState):
 
     # Re-discover tools to ensure we have the latest descriptions
     available_tools = discover_tools()
-    tool_descriptions = "\n".join([f"- {name}: {get_tool_description(name)}" for name in available_tools])
+
+    # When offline, flag tools that need internet so the model doesn't try
+    # them (and can tell the user why). Online, the list is left clean.
+    offline = current_connectivity() == "offline"
+    tool_lines = []
+    offline_only = []
+    for name in available_tools:
+        desc = get_tool_description(name)
+        if offline and tool_requires_internet(name):
+            tool_lines.append(f"- {name}: {desc}  [UNAVAILABLE — needs internet]")
+        else:
+            tool_lines.append(f"- {name}: {desc}")
+            if offline:
+                offline_only.append(name)
+    tool_descriptions = "\n".join(tool_lines)
+
+    offline_notice = ""
+    if offline:
+        usable = ", ".join(offline_only) if offline_only else "none"
+        offline_notice = f"""
+NETWORK STATUS: You are currently OFFLINE.
+Tools marked "[UNAVAILABLE — needs internet]" will fail right now — do NOT call them.
+If the user asks for something that needs an unavailable tool, briefly explain it
+requires an internet connection and offer to retry once they're back online.
+Tools you CAN use offline: {usable}.
+"""
 
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
 You have access to the following gathm tools:
 {tool_descriptions}
-
+{offline_notice}
 CRITICAL RULES:
 0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
 1. To use a tool, you MUST use the exact format:

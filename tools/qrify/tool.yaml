@@ -2,6 +2,7 @@ name: qrify
 version: "3.0.0"
 description: "QR code generation and decoding"
 category: utility
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

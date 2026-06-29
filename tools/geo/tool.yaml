@@ -2,6 +2,7 @@ name: geo
 version: "3.0.0"
 description: "Provides WAN/LAN IP, router, DNS, MAC, and geolocation data"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]

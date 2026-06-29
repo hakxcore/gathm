@@ -2,6 +2,7 @@ name: httpx
 version: "3.0.0"
 description: "ProjectDiscovery httpx wrapper for HTTP endpoint probing"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [httpx]

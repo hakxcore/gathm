@@ -2,6 +2,7 @@ name: weather
 version: "3.0.0"
 description: "Provides a 3 day forecast on your current location or a specified location"
 category: data
+requires_internet: true
 
 dependencies:
   system: [curl]

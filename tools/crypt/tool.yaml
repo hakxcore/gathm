@@ -2,6 +2,7 @@ name: crypt
 version: "3.0.0"
 description: "AES-256 file encryption and decryption using OpenSSL"
 category: security
+requires_internet: false  # openssl file encryption/decryption runs locally
 
 dependencies:
   system: [openssl]

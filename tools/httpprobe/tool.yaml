@@ -2,6 +2,7 @@ name: httpprobe
 version: "3.0.0"
 description: "HTTP(S) endpoint probe with status code, headers, IP, and latency"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]

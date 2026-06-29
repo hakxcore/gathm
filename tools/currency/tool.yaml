@@ -2,6 +2,7 @@ name: currency
 version: "3.0.0"
 description: "Real-time currency converter supporting multiple global currencies."
 category: finance
+requires_internet: true
 
 dependencies:
   system: [curl, bc]

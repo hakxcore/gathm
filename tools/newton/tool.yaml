@@ -2,6 +2,7 @@ name: newton
 version: "3.0.0"
 description: "Advanced numerical and symbolic MATH engine. Use this for: simplify, factor, derive (calculus), integrate, cos, sin, tan, log, etc. For example: 'newton derive x^2' or 'newton simplify 2x+2x'."
 category: science
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

@@ -2,6 +2,7 @@ name: define
 version: "3.0.0"
 description: "Word definitions, meanings, and examples"
 category: data
+requires_internet: true
 
 dependencies:
   system: [curl, jq]

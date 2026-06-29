@@ -2,6 +2,7 @@ name: dns
 version: "3.0.0"
 description: "DNS record lookup (A/AAAA/CNAME/MX/TXT/NS/etc.) via DNS-over-HTTPS"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

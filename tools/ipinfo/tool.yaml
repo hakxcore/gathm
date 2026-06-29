@@ -2,6 +2,7 @@ name: ipinfo
 version: "3.0.0"
 description: "IP address information and geolocation lookup"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]
