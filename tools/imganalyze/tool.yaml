@@ -2,6 +2,7 @@ name: imganalyze
 version: "3.0.0"
 description: "Basic image analysis: metadata, OCR text extraction, and object identification"
 category: utility
+requires_internet: false  # EXIF metadata, tesseract OCR and local Ollama vision — all local
 
 dependencies:
   system: [python3]

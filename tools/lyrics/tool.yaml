@@ -2,6 +2,7 @@ name: lyrics
 version: "3.0.0"
 description: "Song lyrics fetcher by artist and title"
 category: media
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

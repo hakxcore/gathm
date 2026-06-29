@@ -2,6 +2,7 @@ name: wafdetect
 version: "3.0.0"
 description: "Likely WAF/CDN detector using HTTP header and response fingerprinting"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl]

@@ -2,6 +2,7 @@ name: subfinder
 version: "3.0.0"
 description: "ProjectDiscovery subfinder wrapper for passive subdomain discovery"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [subfinder]

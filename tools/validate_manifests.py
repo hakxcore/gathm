@@ -108,6 +108,11 @@ class ToolManifest(BaseModel):
 
     dependencies: Dependencies = Field(default_factory=Dependencies)
     apis: list[ApiDep] = []
+    # Whether the tool needs an internet connection for its core function.
+    # Consumed by Pilot to decide which tools are usable while offline.
+    # Defaults to True so a new tool is treated as online-only until proven
+    # otherwise — safer than silently offering a tool that will fail offline.
+    requires_internet: bool = True
     input_schema: Optional[InputSchema] = None
     output_schema: Optional[OutputSchema] = None
     fallback_tool: Optional[str] = None

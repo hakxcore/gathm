@@ -2,6 +2,7 @@ name: googler
 version: "3.0.0"
 description: "Google search from the command line. Use -j for JSON output and --np for non-interactive mode."
 category: data
+requires_internet: true
 
 dependencies:
   system: [python3]

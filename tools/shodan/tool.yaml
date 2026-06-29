@@ -2,6 +2,7 @@ name: shodan
 version: "3.0.0"
 description: "Shodan search engine for network device scanning and research"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl]

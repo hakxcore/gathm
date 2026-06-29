@@ -2,6 +2,7 @@ name: dnsx
 version: "3.0.0"
 description: "ProjectDiscovery dnsx wrapper for DNS resolution and probing"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [dnsx]

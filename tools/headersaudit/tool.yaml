@@ -2,6 +2,7 @@ name: headersaudit
 version: "3.0.0"
 description: "HTTP security headers audit with coverage score and missing-header report"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

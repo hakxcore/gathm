@@ -2,6 +2,7 @@ name: whois
 version: "3.0.0"
 description: "WHOIS lookup for domain/IP registration with RDAP fallback"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [whois]

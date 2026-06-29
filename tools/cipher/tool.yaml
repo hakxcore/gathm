@@ -2,6 +2,7 @@ name: cipher
 version: "3.0.0"
 description: "Base32 and Base64 text encoding and decoding"
 category: security
+requires_internet: false  # base64/base32 encode-decode runs entirely locally
 
 dependencies:
   system: [base64]

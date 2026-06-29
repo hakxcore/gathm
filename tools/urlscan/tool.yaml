@@ -2,6 +2,7 @@ name: urlscan
 version: "3.0.0"
 description: "URLScan public intelligence search for URLs/domains and verdict metadata"
 category: security
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

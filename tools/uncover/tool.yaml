@@ -2,6 +2,7 @@ name: uncover
 version: "3.0.0"
 description: "ProjectDiscovery uncover wrapper for search-engine asset discovery"
 category: security
+requires_internet: true
 
 dependencies:
   system: [uncover]

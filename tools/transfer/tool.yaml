@@ -2,6 +2,7 @@ name: transfer
 version: "3.0.0"
 description: "File upload and download via transfer.sh"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]

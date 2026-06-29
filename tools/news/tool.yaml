@@ -2,6 +2,7 @@ name: news
 version: "3.0.0"
 description: "Latest news headlines from the terminal"
 category: data
+requires_internet: true
 
 dependencies:
   system: [curl]

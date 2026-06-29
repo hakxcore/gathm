@@ -2,6 +2,7 @@ name: movie
 version: "3.0.0"
 description: "Movie information lookup including ratings, plot, and cast"
 category: data
+requires_internet: true
 
 dependencies:
   system: [curl, python3]

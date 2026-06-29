@@ -2,6 +2,7 @@ name: maltego
 version: "3.0.0"
 description: "Maltego integration helper for CSV entities, enrichment bundles, and app launch"
 category: utility
+requires_internet: true
 
 dependencies:
   system: [python3]

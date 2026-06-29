@@ -2,6 +2,7 @@ name: shorturl
 version: "3.0.0"
 description: "URL shortening and expansion service"
 category: networking
+requires_internet: true
 
 dependencies:
   system: [curl]

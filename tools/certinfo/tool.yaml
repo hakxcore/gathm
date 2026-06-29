@@ -2,6 +2,7 @@ name: certinfo
 version: "3.0.0"
 description: "TLS certificate inspector (issuer, expiry, SAN, fingerprint)"
 category: security
+requires_internet: true
 
 dependencies:
   system: [openssl, python3]
