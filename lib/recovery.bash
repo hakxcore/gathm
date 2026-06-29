@@ -3,7 +3,7 @@
 # Handles automatic failure recovery, retries, and fallback chains
 # Cross-platform: Linux, macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
-SCRIPT_DIR_RECOVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."\ &>/dev/null && pwd)"
+SCRIPT_DIR_RECOVERY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 source "$SCRIPT_DIR_RECOVERY/lib/logging.bash" 2>/dev/null
 source "$SCRIPT_DIR_RECOVERY/lib/health.bash" 2>/dev/null
 

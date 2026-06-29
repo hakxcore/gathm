@@ -324,7 +324,8 @@ class TestAPIRateLimit(unittest.TestCase):
     """Tests the sliding-window rate limiter in api/server.py."""
 
     def _fresh_key(self) -> str:
-        return f"test-{time.time()}-{id(self)}"
+        import uuid
+        return f"test-{uuid.uuid4().hex}"
 
     def test_allows_requests_under_limit(self):
         key = self._fresh_key()

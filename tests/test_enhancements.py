@@ -78,7 +78,7 @@ class TestInputSanitization(_HomeSandboxTestCase):
 
     def test_allows_normal_input(self):
         # Normal arguments should pass sanitization (tool may still fail but not due to sanitization)
-        result = self._run_agent("run", "weather", "London", expect_success=False)
+        result = self._run_agent("run", "todo", "list", expect_success=True)
         # We only check it doesn't fail on sanitization - tool may fail for other reasons
         self.assertNotIn("blocked", result.stderr.lower())
         self.assertNotIn("traversal", result.stderr.lower())
@@ -139,7 +139,7 @@ class TestAgentVersion(_HomeSandboxTestCase):
 
     def test_version_is_2(self):
         result = self._run_agent("--version")
-        self.assertIn("2.0.0", result.stdout)
+        self.assertIn("3.0.0", result.stdout)
 
     def test_help_includes_new_commands(self):
         result = self._run_agent("--help")
@@ -160,7 +160,7 @@ class TestAgentVersion(_HomeSandboxTestCase):
         output = result.stdout.strip()
         data = json.loads(output)
         self.assertEqual(data["agent"].strip(), "gathm")
-        self.assertEqual(data["version"].strip(), "2.0.0")
+        self.assertEqual(data["version"].strip(), "3.0.0")
 
 
 class TestCacheCommands(_HomeSandboxTestCase):
@@ -268,19 +268,23 @@ class TestAPIServerImports(unittest.TestCase):
 
     def test_server_importable(self):
         import importlib.util
+        import sys
         server_path = PROJECT_ROOT / "api" / "server.py"
         spec = importlib.util.spec_from_file_location("server", server_path)
         self.assertIsNotNone(spec)
         module = importlib.util.module_from_spec(spec)
+        sys.modules["server"] = module
         spec.loader.exec_module(module)
         self.assertTrue(hasattr(module, "GathmAPIHandler"))
         self.assertTrue(hasattr(module, "GATHM_API_KEY"))
 
     def test_server_has_auth_method(self):
         import importlib.util
+        import sys
         server_path = PROJECT_ROOT / "api" / "server.py"
         spec = importlib.util.spec_from_file_location("server", server_path)
         module = importlib.util.module_from_spec(spec)
+        sys.modules["server"] = module
         spec.loader.exec_module(module)
         handler = module.GathmAPIHandler
         self.assertTrue(hasattr(handler, "_check_auth"))
