@@ -14,7 +14,7 @@ Environment variables (in priority order):
   GOOGLE_API_KEY      or GEMINI_API_KEY              (enables gemini backend)
   OLLAMA_BASE_URL                                    (default: http://localhost:11434/v1)
 
-File-based overrides (set by install.sh or 'gathm pilot --set-model'):
+File-based overrides (set by install or 'gathm pilot --set-model'):
   ~/.gathm/model           model name override
   ~/.gathm/llm_backend     backend override
 """

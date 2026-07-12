@@ -28,7 +28,7 @@ if ! "$PYTHON" -c "import rich" 2>/dev/null; then
     echo "Install them with:" >&2
     echo "    pip install -r pilot/requirements.txt" >&2
     echo "or re-run the installer:" >&2
-    echo "    bash install.sh" >&2
+    echo "    ./install" >&2
     exit 1
 fi
 

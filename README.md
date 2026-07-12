@@ -51,24 +51,24 @@ gathm/
 
 ## Installation
 
-Installation is intentionally unified. `install.sh` detects the environment and applies the correct setup internally.
+Installation is intentionally unified. `./install` detects the environment and applies the correct setup internally.
 
 ```bash
 git clone https://github.com/hakxcore/gathm.git
 cd gathm
-bash install.sh
+./install
 ```
 
 ### Verify Install
 
 ```bash
-bash install.sh --check
+./install --check
 ```
 
 ### Uninstall
 
 ```bash
-bash install.sh --uninstall
+./install --uninstall
 ```
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).

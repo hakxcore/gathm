@@ -4,9 +4,9 @@
 #  Works on: Linux (all distros), macOS, WSL, Git Bash
 #
 #  Usage:
-#    bash install.sh              # Auto-detect platform & install
-#    bash install.sh --check      # Just verify environment
-#    bash install.sh --uninstall  # Remove symlinks & data
+#    ./install              # Auto-detect platform & install
+#    ./install --check      # Just verify environment
+#    ./install --uninstall  # Remove symlinks & data
 # ============================================================
 
 set -euo pipefail
@@ -244,7 +244,7 @@ check_and_install_python() {
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Install Homebrew first: https://brew.sh"
-                fail "Then run: brew install python3 && bash install.sh"
+                fail "Then run: brew install python3 && ./install"
                 exit 1
             fi
             ;;
@@ -256,7 +256,7 @@ check_and_install_python() {
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Download from: https://www.python.org/downloads/"
-                fail "After installing, re-run: bash install.sh"
+                fail "After installing, re-run: ./install"
                 exit 1
             fi
             ;;
@@ -271,7 +271,7 @@ check_and_install_python() {
         ok "Python installed: $($pcmd --version 2>&1)"
     else
         fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ could not be installed automatically."
-        fail "Please install it manually and re-run: bash install.sh"
+        fail "Please install it manually and re-run: ./install"
         exit 1
     fi
 }
@@ -514,9 +514,9 @@ _ensure_venv() {
             return 1
         fi
         info "Creating Pilot Python venv at $GATHM_VENV..."
-        # On Termux, use --system-site-packages so the venv inherits
-        # pkg-installed native packages (numpy, etc.) that can't be
-        # compiled from source on Android/aarch64.
+        # On Termux, use --system-site-packages so the venv inherits any
+        # pkg-installed native packages that can't be compiled from source
+        # on Android/aarch64.
         local venv_opts=""
         [[ "${_GATHM_PLATFORM:-}" == "termux" ]] && venv_opts="--system-site-packages"
         "$python_cmd" -m venv $venv_opts "$GATHM_VENV" || {
@@ -575,7 +575,7 @@ _engineer_venv_pip() {
 _setup_cleanup() {
     echo ""
     warn "Setup interrupted. Partial installation may exist."
-    warn "Re-run 'bash install.sh' to resume, or 'bash install.sh --uninstall' to clean up."
+    warn "Re-run './install' to resume, or './install --uninstall' to clean up."
     exit 130
 }
 trap _setup_cleanup INT TERM
@@ -644,10 +644,10 @@ install_deps() {
         termux)
             pkg update -y 2>/dev/null || true
             pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
-            # numpy has no manylinux wheel for Android/aarch64 and can't compile from
-            # source (patchelf/ninja fail). Install the pre-built Termux package so pip
-            # sees it as already satisfied and skips the source build.
-            pkg install -y python-numpy 2>/dev/null || true
+            # Note: python-numpy used to be installed here to satisfy
+            # langchain-community, but Pilot no longer depends on it (see
+            # pilot/requirements.txt), so we skip it — building/compiling numpy
+            # on Android was the slow, noisy step and it is no longer needed.
             # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
             # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
             # this ensures manylinux fallback wheels also load correctly.
@@ -1578,18 +1578,6 @@ PY
         fi
     fi
 
-    # ── numpy: on Termux this is pkg-installed and its py3compile step is
-    #    noisy; check the package actually imports rather than trusting logs. ──
-    if [[ "$plat" == "termux" ]]; then
-        if { [[ -x "$pilot_py" ]] && "$pilot_py" -c "import numpy" 2>/dev/null; } \
-                || python3 -c "import numpy" 2>/dev/null; then
-            ok "numpy"
-        else
-            warn "numpy not importable"
-            note_missing "numpy" "pkg install python-numpy"
-        fi
-    fi
-
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
         ok "Agent orchestrator"
@@ -1661,7 +1649,7 @@ main() {
         --uninstall|-u)
             uninstall; exit 0 ;;
         --help|-h)
-            echo "Usage: bash install.sh [OPTION]"
+            echo "Usage: ./install [OPTION]"
             echo ""
             echo "Options:"
             echo "  (default)     Auto-detect platform and install"

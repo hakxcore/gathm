@@ -37,14 +37,14 @@ detect_platform() {
 
 PLATFORM=$(detect_platform)
 
-# ── What install.sh actually puts on disk ────────────────────────────
+# ── What install actually puts on disk ───────────────────────────────
 LOCAL_BIN="$HOME/.local/bin"
 DATA_DIR="$HOME/.gathm"
 PILOT_VENV="$SCRIPT_DIR/pilot/venv"
 
 SHORTCUTS=("$LOCAL_BIN/gathm" "$LOCAL_BIN/gathm-agent" "$LOCAL_BIN/gathm-api")
 
-# Shell RC files that may contain the PATH entry added by install.sh
+# Shell RC files that may contain the PATH entry added by install
 RC_FILES=(
     "$HOME/.zshrc"
     "$HOME/.bashrc"
@@ -102,7 +102,7 @@ fi
 _strip_path_entry() {
     local rc="$1"
     [[ ! -f "$rc" ]] && return
-    # Remove the two lines install.sh adds:
+    # Remove the two lines install adds:
     #   # Gathm Framework
     #   export PATH="$HOME/.local/bin:$PATH"
     local tmp

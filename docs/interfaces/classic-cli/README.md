@@ -31,7 +31,7 @@ bash gathm
 Install via project setup:
 
 ```bash
-bash install.sh
+./install
 ```
 
 ## Notes

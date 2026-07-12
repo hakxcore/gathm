@@ -93,7 +93,7 @@ except ImportError:
             "Install Pilot's dependencies and try again:\n"
             "    pip install -r pilot/requirements.txt\n"
             "or re-run the installer:\n"
-            "    bash install.sh\n\n"
+            "    ./install\n\n"
         )
         raise SystemExit(1)
 
