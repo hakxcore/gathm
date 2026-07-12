@@ -310,6 +310,29 @@ _soabi_patch_dir() {
     done < <(find "$dir" -name "*.so" 2>/dev/null)
 }
 
+# Stage shared libs that a manylinux wheel bundled in a <pkg>.libs/ directory
+# onto the Termux linker's default search path ($PREFIX/lib), so Bionic can
+# resolve them even though it ignores the wheel's DT_RUNPATH. Also creates the
+# plain libgcc_s.so.1 soname (Termux dropped the standalone `libgcc` package,
+# so nothing else provides it). No-op off Termux or when nothing was bundled.
+_termux_stage_bundled_libs() {
+    local site_packages="$1"
+    [[ -n "${PREFIX:-}" && -d "$PREFIX/lib" ]] || return 0
+
+    local _libsdir
+    while IFS= read -r _libsdir; do
+        [[ -n "$_libsdir" ]] || continue
+        cp -f "$_libsdir"/*.so* "$PREFIX/lib/" 2>/dev/null || true
+        # Ensure an unversioned-hash libgcc_s.so.1 exists (wheels ship it as
+        # libgcc_s-<hash>.so.1; other libs may DT_NEEDED the plain soname).
+        local _gcc
+        _gcc=$(find "$_libsdir" -name "libgcc_s*.so*" 2>/dev/null | head -1)
+        if [[ -n "$_gcc" && ! -e "$PREFIX/lib/libgcc_s.so.1" ]]; then
+            cp -f "$_gcc" "$PREFIX/lib/libgcc_s.so.1" 2>/dev/null || true
+        fi
+    done < <(find "$site_packages" -maxdepth 1 -type d -name "*.libs" 2>/dev/null)
+}
+
 # Download, extract, and SOABI-patch pydantic-core for Termux.
 # Called from _create_termux_native_stubs and _repair_pydantic_core_soabi.
 _install_pydantic_core_termux() {
@@ -359,6 +382,16 @@ with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
 " "$_whl" "$_ext" 2>/dev/null
             _soabi_patch_dir "$python_cmd" "$_ext"
             cp -r "$_ext/"* "$site_packages/"
+            # manylinux wheels bundle their shared-lib deps (notably
+            # libgcc_s.so.1) into a pydantic_core.libs/ dir and rely on the
+            # ELF DT_RUNPATH ($ORIGIN/../pydantic_core.libs) to find them at
+            # load time. Android's Bionic linker does not reliably honour that
+            # RUNPATH, so `import pydantic_core` fails with:
+            #   dlopen failed: library "libgcc_s-<hash>.so.1" not found
+            # Copy the bundled libs onto $PREFIX/lib (always searched by the
+            # Termux linker) and expose the plain libgcc_s.so.1 soname. For a
+            # musllinux wheel there is no .libs dir, so this is a no-op.
+            _termux_stage_bundled_libs "$site_packages"
             ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
         else
             warn "pydantic-core wheel download failed — pip install will likely fail"
@@ -1307,6 +1340,35 @@ install_pilot_deps() {
             warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
         fi
     fi
+
+    # The GUI/API server (api/server.py) needs FastAPI + uvicorn. Install them
+    # into the same venv Pilot uses so the GUI actually starts.
+    _install_gui_deps
+}
+
+# Install the FastAPI + uvicorn stack the GUI/API server needs, into the pilot
+# venv. On Termux we install plain uvicorn (NOT uvicorn[standard]) because the
+# [standard] extras pull in uvloop + httptools (C extensions) and watchfiles
+# (Rust) — none of which have Android/aarch64 wheels, so they'd try to compile
+# from source and stall the install. Plain uvicorn is pure Python and works.
+_install_gui_deps() {
+    _ensure_venv
+    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        if _venv_pip install fastapi uvicorn; then
+            ok "GUI dependencies installed (fastapi, uvicorn)"
+        else
+            warn "GUI dependency install failed — GUI won't start. Retry: pip install fastapi uvicorn"
+        fi
+    else
+        local api_req="$SCRIPT_DIR/api/requirements.txt"
+        if [[ -f "$api_req" ]] && _venv_pip -r "$api_req"; then
+            ok "GUI dependencies installed (fastapi, uvicorn[standard])"
+        elif _venv_pip install fastapi uvicorn; then
+            ok "GUI dependencies installed (fastapi, uvicorn)"
+        else
+            warn "GUI dependency install failed — GUI won't start. Retry: pip install -r api/requirements.txt"
+        fi
+    fi
 }
 
 # --- Install browser engine for Pilot's browser control feature ---
@@ -1433,9 +1495,17 @@ GUI_PORT=8080
 GUI_URL="http://127.0.0.1:${GUI_PORT}"
 
 start_gui_server() {
+    # Prefer the pilot venv's Python — that's where FastAPI + uvicorn were
+    # installed. Fall back to system python only if the venv is unavailable.
     local python_cmd=""
-    command -v python3 &>/dev/null && python_cmd="python3"
-    command -v python &>/dev/null && [[ -z "$python_cmd" ]] && python_cmd="python"
+    _init_venv
+    if [[ -n "$GATHM_VENV" && -x "$GATHM_VENV/bin/python3" ]]; then
+        python_cmd="$GATHM_VENV/bin/python3"
+    elif command -v python3 &>/dev/null; then
+        python_cmd="python3"
+    elif command -v python &>/dev/null; then
+        python_cmd="python"
+    fi
 
     if [[ -z "$python_cmd" ]]; then
         warn "Python not found — cannot start GUI server"
@@ -1614,27 +1684,43 @@ verify() {
     esac
 
     # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
+    # We actually IMPORT each module (not just find_spec) so a native library
+    # that fails to load — e.g. pydantic_core missing libgcc_s.so.1 on Termux —
+    # is caught here instead of only blowing up when Pilot starts.
     _init_venv
     local pilot_py="$GATHM_VENV/bin/python3"
     if [[ -x "$pilot_py" ]]; then
         local missing_mods
         missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
-import importlib.util as u
 # import name -> pip package name
 mods = {
-    "langchain_core": "langchain-core", "langgraph": "langgraph",
-    "rich": "rich", "dotenv": "python-dotenv",
+    "pydantic_core": "pydantic", "langchain_core": "langchain-core",
+    "langgraph": "langgraph", "rich": "rich", "dotenv": "python-dotenv",
     "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
     "requests": "requests",
 }
-print(" ".join(pkg for m, pkg in mods.items() if u.find_spec(m) is None))
+missing = []
+for m, pkg in mods.items():
+    try:
+        __import__(m)
+    except Exception:
+        missing.append(pkg)
+print(" ".join(missing))
 PY
 )
         if [[ -z "$missing_mods" ]]; then
             ok "Pilot runtime (venv + dependencies)"
         else
-            warn "Pilot runtime missing: $missing_mods"
+            warn "Pilot runtime missing/broken: $missing_mods"
             note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
+        fi
+
+        # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
+        if "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
+            ok "GUI server dependencies (fastapi, uvicorn)"
+        else
+            warn "GUI server dependencies missing (GUI won't start; Pilot CLI still works)"
+            note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"
         fi
     else
         warn "Pilot venv not found"
