@@ -488,6 +488,81 @@ PYEOF
         ok "orjson stub created (pure Python, Termux-compatible)"
     fi
 
+    # zstandard stub ---------------------------------------------------------
+    # zstandard is a C extension pulled in transitively by langsmith (a
+    # langchain-core dependency). It has no Android/aarch64 wheel on PyPI, so
+    # pip falls back to compiling libzstd from source on-device, which is very
+    # slow and appears to hang. langsmith only uses it to compress trace
+    # uploads to LangSmith — a feature Pilot leaves disabled (no API key) — so
+    # a stub that imports cleanly is fully compatible in practice.
+    #
+    # Guarded on an import check: if Termux's real prebuilt zstandard is
+    # already importable (e.g. `pkg install python-zstandard`), we use that
+    # and skip the stub rather than shadowing it.
+    if ! "$python_cmd" -c "import zstandard" 2>/dev/null; then
+        mkdir -p "$site_packages/zstandard"
+        cat > "$site_packages/zstandard/__init__.py" << 'PYEOF'
+# Termux stub: the `zstandard` C extension has no Android/aarch64 wheel and
+# building libzstd from source on-device is prohibitively slow. It is pulled
+# in only by `langsmith` to compress trace uploads, which Pilot leaves
+# disabled, so this stub is never exercised in normal use. It imports cleanly;
+# the compression methods raise (rather than silently emit malformed data) if
+# something ever does try to use them.
+__version__ = "0.23.0"
+
+MAX_COMPRESSION_LEVEL = 22
+FRAME_HEADER = b"\x28\xb5\x2f\xfd"
+
+class ZstdError(Exception):
+    pass
+
+_MSG = ("zstandard is stubbed on this Termux build; "
+        "LangSmith trace compression is unavailable.")
+
+class ZstdCompressor:
+    def __init__(self, *args, **kwargs):
+        pass
+    def compress(self, data):
+        raise ZstdError(_MSG)
+    def compressobj(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+    def stream_writer(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+    def stream_reader(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+
+class ZstdDecompressor:
+    def __init__(self, *args, **kwargs):
+        pass
+    def decompress(self, data, *args, **kwargs):
+        raise ZstdError(_MSG)
+    def decompressobj(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+    def stream_reader(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+    def stream_writer(self, *args, **kwargs):
+        raise ZstdError(_MSG)
+
+def compress(data, level=3):
+    raise ZstdError(_MSG)
+
+def decompress(data, *args, **kwargs):
+    raise ZstdError(_MSG)
+
+def open(*args, **kwargs):
+    raise ZstdError(_MSG)
+
+def __getattr__(name):
+    # Any other symbol langsmith probes → a placeholder that only errors if
+    # actually called, so the import itself never fails.
+    def _placeholder(*args, **kwargs):
+        raise ZstdError(_MSG)
+    return _placeholder
+PYEOF
+        _write_stub_distinfo "$site_packages" "zstandard" "0.23.0" "zstandard"
+        ok "zstandard stub created (Termux-compatible; trace compression disabled)"
+    fi
+
     # pydantic-core: force manylinux_2_17_aarch64 wheel -------------------
     # pydantic v2 cannot function without pydantic-core (pure Rust, no Python
     # fallback).  Termux Python's SOABI is "cpython-312" (no arch suffix), so
@@ -648,6 +723,11 @@ install_deps() {
             # langchain-community, but Pilot no longer depends on it (see
             # pilot/requirements.txt), so we skip it — building/compiling numpy
             # on Android was the slow, noisy step and it is no longer needed.
+            # Best-effort real zstandard: langsmith (a langchain-core dep) pulls
+            # it in, and building it from source on-device is very slow. If
+            # Termux ships a prebuilt binding we use it; otherwise the venv gets
+            # a pure-Python stub in _create_termux_native_stubs. (zstd = C lib.)
+            pkg install -y zstd python-zstandard 2>/dev/null || true
             # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
             # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
             # this ensures manylinux fallback wheels also load correctly.
