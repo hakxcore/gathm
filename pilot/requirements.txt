@@ -1,5 +1,10 @@
-langchain
-langchain-community
+# Pilot imports only the split LangChain packages: langchain_core,
+# langchain_ollama and langgraph. The `langchain` meta-package and
+# `langchain-community` are intentionally NOT listed — nothing in Pilot
+# imports them, and langchain-community drags in numpy + aiohttp, which
+# have no prebuilt Android wheels and try to compile from source on Termux
+# (the numpy build hangs for a long time / never finishes). Keeping this
+# list minimal keeps the install fast and Termux-friendly.
 langchain-core
 langchain-ollama
 langgraph

@@ -4,9 +4,9 @@
 #  Works on: Linux (all distros), macOS, WSL, Git Bash
 #
 #  Usage:
-#    bash install.sh              # Auto-detect platform & install
-#    bash install.sh --check      # Just verify environment
-#    bash install.sh --uninstall  # Remove symlinks & data
+#    ./install              # Auto-detect platform & install
+#    ./install --check      # Just verify environment
+#    ./install --uninstall  # Remove symlinks & data
 # ============================================================
 
 set -euo pipefail
@@ -48,6 +48,13 @@ _GATHM_STEP_LABELS=()
 _GATHM_STEP_STATES=()
 _GATHM_STEP_ELAPSED=()
 _GATHM_STEP_T0=0
+
+# Optional components that are missing or degraded. verify() fills this and
+# prints a "Still missing" section so nothing important is lost in scrollback
+# (e.g. a numpy compile failure or an un-pulled Ollama model on Termux).
+# Each entry is "component|how to fix".
+_GATHM_MISSING=()
+note_missing() { _GATHM_MISSING+=("$1|$2"); }
 
 # Format integer seconds as "Xm YYs" or "Ys"
 _format_elapsed() {
@@ -237,7 +244,7 @@ check_and_install_python() {
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Install Homebrew first: https://brew.sh"
-                fail "Then run: brew install python3 && bash install.sh"
+                fail "Then run: brew install python3 && ./install"
                 exit 1
             fi
             ;;
@@ -249,7 +256,7 @@ check_and_install_python() {
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Download from: https://www.python.org/downloads/"
-                fail "After installing, re-run: bash install.sh"
+                fail "After installing, re-run: ./install"
                 exit 1
             fi
             ;;
@@ -264,7 +271,7 @@ check_and_install_python() {
         ok "Python installed: $($pcmd --version 2>&1)"
     else
         fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ could not be installed automatically."
-        fail "Please install it manually and re-run: bash install.sh"
+        fail "Please install it manually and re-run: ./install"
         exit 1
     fi
 }
@@ -507,9 +514,9 @@ _ensure_venv() {
             return 1
         fi
         info "Creating Pilot Python venv at $GATHM_VENV..."
-        # On Termux, use --system-site-packages so the venv inherits
-        # pkg-installed native packages (numpy, etc.) that can't be
-        # compiled from source on Android/aarch64.
+        # On Termux, use --system-site-packages so the venv inherits any
+        # pkg-installed native packages that can't be compiled from source
+        # on Android/aarch64.
         local venv_opts=""
         [[ "${_GATHM_PLATFORM:-}" == "termux" ]] && venv_opts="--system-site-packages"
         "$python_cmd" -m venv $venv_opts "$GATHM_VENV" || {
@@ -568,7 +575,7 @@ _engineer_venv_pip() {
 _setup_cleanup() {
     echo ""
     warn "Setup interrupted. Partial installation may exist."
-    warn "Re-run 'bash install.sh' to resume, or 'bash install.sh --uninstall' to clean up."
+    warn "Re-run './install' to resume, or './install --uninstall' to clean up."
     exit 130
 }
 trap _setup_cleanup INT TERM
@@ -637,10 +644,10 @@ install_deps() {
         termux)
             pkg update -y 2>/dev/null || true
             pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
-            # numpy has no manylinux wheel for Android/aarch64 and can't compile from
-            # source (patchelf/ninja fail). Install the pre-built Termux package so pip
-            # sees it as already satisfied and skips the source build.
-            pkg install -y python-numpy 2>/dev/null || true
+            # Note: python-numpy used to be installed here to satisfy
+            # langchain-community, but Pilot no longer depends on it (see
+            # pilot/requirements.txt), so we skip it — building/compiling numpy
+            # on Android was the slow, noisy step and it is no longer needed.
             # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
             # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
             # this ensures manylinux fallback wheels also load correctly.
@@ -701,6 +708,12 @@ install_deps() {
 }
 
 # --- Termux storage permissions (no-op on non-Termux) ---
+#
+# Granting the Android storage permission can make Termux kill and restart
+# its session, which aborts this installer. To keep that from costing the
+# user any real work, this step runs FIRST (before any heavy install) and is
+# fully idempotent: once $HOME/storage exists it returns instantly, so a
+# post-restart re-run of ./install sails straight past it.
 setup_termux_storage() {
     local platform="$1"
     [[ "$platform" != "termux" ]] && return 0
@@ -710,16 +723,29 @@ setup_termux_storage() {
         return 0
     fi
 
-    if [[ ! -d "$HOME/storage" ]]; then
-        info "Requesting Termux storage permission..."
-        termux-setup-storage 2>/dev/null || true
-        sleep 2
+    # Already granted → nothing to do. This is the fast path that makes a
+    # re-run after a Termux restart smooth.
+    if [[ -d "$HOME/storage" ]]; then
+        ok "Termux storage already configured"
+        return 0
     fi
+
+    warn "Termux is about to ask for the storage permission."
+    warn "Granting it may restart Termux and interrupt this installer."
+    warn "If that happens, just run ${BOLD}./install${RESET}${YELLOW} again — it resumes and"
+    warn "skips every step that already finished (including this one)."
+    # Give the user a few seconds to read this before the Android dialog pops.
+    sleep 4
+
+    info "Requesting Termux storage permission..."
+    termux-setup-storage 2>/dev/null || true
+    sleep 2
 
     if [[ -d "$HOME/storage" ]]; then
         ok "Termux storage configured"
     else
-        warn "Termux storage folder not detected. You can run: termux-setup-storage"
+        warn "Storage folder not detected yet."
+        warn "If Termux restarted, re-run ./install — it will pick up from here."
     fi
 }
 
@@ -1428,13 +1454,15 @@ launch_post_install() {
 # --- Verify everything ---
 verify() {
     local errors=0
+    local plat="${_GATHM_PLATFORM:-$(detect_platform)}"
+    _GATHM_MISSING=()   # reset the optional-components list for this run
 
     echo ""
     echo -e "${BOLD}Verification${RESET}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Platform
-    ok "Platform: $(detect_platform) | $(uname -s) | Bash ${BASH_VERSION:-?}"
+    ok "Platform: $plat | $(uname -s) | Bash ${BASH_VERSION:-?}"
 
     # Core commands
     for cmd in bash curl jq git; do
@@ -1484,15 +1512,71 @@ verify() {
                 ok "LLM backend: Ollama ($(ollama --version 2>&1 | head -1))"
             else
                 warn "LLM backend: Ollama not installed (optional — needed for Pilot AI)"
+                note_missing "Ollama runtime" "curl -fsSL https://ollama.com/install.sh | sh  (or pkg install ollama on Termux)"
             fi
-            if [[ -f "$HOME/.gathm/model" ]]; then
-                ok "LLM model: $(cat "$HOME/.gathm/model")"
+            # Confirm the configured model is actually downloaded, not just named.
+            local want_model=""
+            [[ -f "$HOME/.gathm/model" ]] && want_model=$(cat "$HOME/.gathm/model" 2>/dev/null | tr -d '[:space:]')
+            if [[ -n "$want_model" ]]; then
+                if command -v ollama &>/dev/null \
+                        && ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$want_model"; then
+                    ok "LLM model pulled: $want_model"
+                else
+                    warn "LLM model '$want_model' not downloaded yet"
+                    note_missing "Ollama model $want_model" "ollama pull $want_model"
+                fi
             fi
             ;;
         *)
             warn "LLM backend: not configured (Pilot AI unavailable)"
+            note_missing "LLM backend" "re-run ./install while online, or set a Gemini key"
             ;;
     esac
+
+    # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
+    _init_venv
+    local pilot_py="$GATHM_VENV/bin/python3"
+    if [[ -x "$pilot_py" ]]; then
+        local missing_mods
+        missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
+import importlib.util as u
+# import name -> pip package name
+mods = {
+    "langchain_core": "langchain-core", "langgraph": "langgraph",
+    "rich": "rich", "dotenv": "python-dotenv",
+    "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
+    "requests": "requests",
+}
+print(" ".join(pkg for m, pkg in mods.items() if u.find_spec(m) is None))
+PY
+)
+        if [[ -z "$missing_mods" ]]; then
+            ok "Pilot runtime (venv + dependencies)"
+        else
+            warn "Pilot runtime missing: $missing_mods"
+            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
+        fi
+    else
+        warn "Pilot venv not found"
+        note_missing "Pilot venv" "re-run ./install (creates pilot/venv from requirements.txt)"
+    fi
+
+    # ── Browser engine (powers Pilot's 'browser' tool) ──
+    if [[ "$plat" == "termux" ]]; then
+        if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+            ok "Browser engine (system Chromium)"
+        else
+            warn "Chromium not installed (browser control limited to open/fetch)"
+            note_missing "Chromium (browser tool)" "pkg install tur-repo x11-repo && pkg install chromium"
+        fi
+    else
+        if [[ -x "$GATHM_VENV/bin/playwright" ]] && "$pilot_py" -c "import playwright" 2>/dev/null; then
+            ok "Browser engine (Playwright)"
+        else
+            warn "Playwright browser not fully installed (browser control limited)"
+            note_missing "Playwright Chromium" "playwright install chromium"
+        fi
+    fi
 
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
@@ -1502,10 +1586,24 @@ verify() {
     fi
 
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if [[ $errors -eq 0 ]]; then
+
+    # Optional / degraded components — Gathm still runs, these add features.
+    if (( ${#_GATHM_MISSING[@]} > 0 )); then
+        echo -e "${BOLD}${YELLOW}Still missing${RESET} (optional — core Gathm works without these):"
+        local item comp fix
+        for item in "${_GATHM_MISSING[@]}"; do
+            comp="${item%%|*}"; fix="${item#*|}"
+            printf '  %b○ %-22s%b  fix: %s\n' "$YELLOW" "$comp" "$RESET" "$fix"
+        done
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+
+    if [[ $errors -eq 0 && ${#_GATHM_MISSING[@]} -eq 0 ]]; then
         ok "All checks passed!"
+    elif [[ $errors -eq 0 ]]; then
+        ok "Core install OK — ${#_GATHM_MISSING[@]} optional item(s) missing (see above)"
     else
-        fail "$errors issue(s) found"
+        fail "$errors required issue(s) found"
     fi
     return $errors
 }
@@ -1551,7 +1649,7 @@ main() {
         --uninstall|-u)
             uninstall; exit 0 ;;
         --help|-h)
-            echo "Usage: bash install.sh [OPTION]"
+            echo "Usage: ./install [OPTION]"
             echo ""
             echo "Options:"
             echo "  (default)     Auto-detect platform and install"
@@ -1566,11 +1664,23 @@ main() {
     # Expose platform globally so sub-functions (e.g. Gemini fallback) can use it
     _GATHM_PLATFORM="$platform"
 
-    # Total visible steps: connectivity, python, storage, deps, files, ollama,
-    # llm-model, pilot-deps, playwright, shortcuts, verify. Stays at 11 so the
-    # "[Step N/11]" counter is stable across platforms; setup_termux_storage
-    # short-circuits to step_skip on non-Termux to keep numbering honest.
-    _GATHM_TOTAL_STEPS=11
+    # Visible step count. Termux has one extra step (storage permission),
+    # which runs first so a permission-grant restart costs no real work.
+    # Steps: [storage] connectivity, python, deps, files, ollama, llm-model,
+    # pilot-deps, playwright, shortcuts, verify.
+    if [[ "$platform" == "termux" ]]; then
+        _GATHM_TOTAL_STEPS=11
+    else
+        _GATHM_TOTAL_STEPS=10
+    fi
+
+    # Termux storage permission FIRST: granting it can restart Termux, so we
+    # do it before any heavy work. It's idempotent, so a re-run skips it.
+    if [[ "$platform" == "termux" ]]; then
+        step_begin "Configuring Termux storage"
+        setup_termux_storage "$platform"
+        step_done "Storage configured"
+    fi
 
     step_begin "Checking internet connectivity"
     check_internet
@@ -1586,14 +1696,6 @@ main() {
     step_begin "Verifying Python toolchain (3.8+)"
     check_and_install_python "$platform"
     step_done "Python toolchain ready"
-
-    step_begin "Configuring Termux storage (Termux only)"
-    if [[ "$platform" == "termux" ]]; then
-        setup_termux_storage "$platform"
-        step_done "Storage configured"
-    else
-        step_skip "Not on Termux — nothing to do"
-    fi
 
     step_begin "Installing OS dependencies"
     install_deps "$platform"
@@ -1642,6 +1744,27 @@ main() {
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
     echo ""
+
+    # Pilot clears the screen when it launches, so persist the "still missing"
+    # report to a file and leave a short pointer here — the last thing the user
+    # sees before hand-off. verify() populated _GATHM_MISSING just above.
+    if (( ${#_GATHM_MISSING[@]} > 0 )); then
+        local report="$HOME/.gathm/install_report.txt"
+        mkdir -p "$HOME/.gathm" 2>/dev/null || true
+        {
+            echo "Gathm install — still missing (optional, core Gathm works without these):"
+            local _m
+            for _m in "${_GATHM_MISSING[@]}"; do
+                echo "  - ${_m%%|*}"
+                echo "      fix: ${_m#*|}"
+            done
+        } > "$report" 2>/dev/null || true
+
+        warn "${#_GATHM_MISSING[@]} optional component(s) still missing (core Gathm works)."
+        echo -e "     Saved to ${CYAN}$report${RESET}"
+        echo -e "     Re-check anytime with: ${BOLD}./install --check${RESET}"
+        echo ""
+    fi
 
     # Start GUI + hand off to Pilot in the current terminal
     launch_post_install "$platform"
