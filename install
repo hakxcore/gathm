@@ -342,6 +342,28 @@ _termux_stage_bundled_libs() {
     return 0
 }
 
+# Rewrite a manylinux extension's library search path to ABSOLUTE dirs Bionic
+# will actually search. Android's linker does NOT expand $ORIGIN in the wheel's
+# DT_RUNPATH, and it does not search $PREFIX/lib for a dlopen'd .so's deps — so
+# staging libgcc alone isn't enough; the .so has to point at an absolute path.
+# We use --force-rpath (DT_RPATH) for the widest Android-linker compatibility.
+# $1 = the .so to patch. Searches for patchelf; no-op if unavailable.
+_termux_patch_rpath() {
+    local so="$1"
+    [[ -f "$so" ]] || return 1
+    if ! command -v patchelf >/dev/null 2>&1; then
+        pkg install -y patchelf >/dev/null 2>&1 || true
+    fi
+    command -v patchelf >/dev/null 2>&1 || return 1
+
+    # Point at $PREFIX/lib (where _termux_stage_bundled_libs copied libgcc) and
+    # the wheel's own .libs dir, both absolute.
+    local rpath="$PREFIX/lib"
+    local libsdir; libsdir=$(dirname "$so")/../$(basename "$(dirname "$so")").libs
+    [[ -d "$libsdir" ]] && rpath="$PREFIX/lib:$(cd "$libsdir" && pwd)"
+    patchelf --force-rpath --set-rpath "$rpath" "$so" 2>/dev/null
+}
+
 # Download, extract, and SOABI-patch pydantic-core for Termux.
 # Called from _create_termux_native_stubs and _repair_pydantic_core_soabi.
 _install_pydantic_core_termux() {
@@ -401,6 +423,11 @@ with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
             # Termux linker) and expose the plain libgcc_s.so.1 soname. For a
             # musllinux wheel there is no .libs dir, so this is a no-op.
             _termux_stage_bundled_libs "$site_packages"
+            # And point the extension's RPATH at those absolute dirs, because
+            # Bionic won't find libgcc via the wheel's $ORIGIN-relative RUNPATH.
+            local _pcso
+            _pcso=$(find "$site_packages/pydantic_core" -name "_pydantic_core*.so" 2>/dev/null | head -1)
+            [[ -n "$_pcso" ]] && _termux_patch_rpath "$_pcso"
             ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
         else
             warn "pydantic-core wheel download failed — pip install will likely fail"
@@ -760,7 +787,9 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
+            # patchelf: needed to rewrite the RPATH of manylinux .so files
+            # (e.g. pydantic-core) to an absolute path Bionic will search.
+            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 patchelf 2>/dev/null || true
             # Note: python-numpy used to be installed here to satisfy
             # langchain-community, but Pilot no longer depends on it (see
             # pilot/requirements.txt), so we skip it — building/compiling numpy
@@ -1344,13 +1373,19 @@ install_pilot_deps() {
         # $PREFIX/lib and retry — loudly, so any remaining failure is visible
         # here instead of only when Pilot launches.
         if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-            warn "pydantic-core native lib not loading — staging bundled libs..."
+            warn "pydantic-core native lib not loading — staging libs + fixing RPATH..."
             _termux_stage_bundled_libs "$GATHM_VENV"
+            # The decisive step: Bionic ignores the wheel's $ORIGIN RUNPATH and
+            # won't search $PREFIX/lib for a dlopen'd .so's deps, so rewrite the
+            # extension's RPATH to absolute dirs with patchelf.
+            local _pcso2
+            _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
+            [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
             if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-                ok "pydantic-core now loads (staged libgcc_s into \$PREFIX/lib)"
+                ok "pydantic-core now loads (RPATH fixed → \$PREFIX/lib)"
             else
                 warn "pydantic-core STILL failing to load its native library:"
-                "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -2 | sed 's/^/    /'
+                "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
             fi
         else
             ok "pydantic-core loads"
