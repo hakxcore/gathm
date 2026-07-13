@@ -1143,6 +1143,58 @@ _recommend_model_for_hardware() {
     fi
 }
 
+# Free space (MB) on the filesystem holding $1. The target dir may not exist
+# yet (Ollama creates it on first pull), so we walk up to the nearest existing
+# parent. Uses `df -Pk` (POSIX 1K blocks, single line per fs). 0 = unknown.
+_detect_free_disk_mb() {
+    local path="$1"
+    while [[ -n "$path" && "$path" != "/" && ! -d "$path" ]]; do
+        path=$(dirname "$path")
+    done
+    [[ -d "$path" ]] || path="$HOME"
+    local avail_k
+    avail_k=$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {print $4; exit}')
+    if [[ -n "$avail_k" && "$avail_k" =~ ^[0-9]+$ ]]; then
+        echo $(( avail_k / 1024 ))
+        return 0
+    fi
+    echo 0
+    return 1
+}
+
+# Approximate on-disk size (MB) of an Ollama model, keyed off the parameter
+# suffix (Q4 quantisation). Estimates run a little high on purpose so the
+# storage gate errs toward caution. Unknown tags get a conservative default.
+_model_size_mb() {
+    case "$1" in
+        *:1b|*:2b)          echo 1200  ;;
+        *:3b|*:4b)          echo 3800  ;;
+        *:7b|*:8b|*:9b)     echo 5500  ;;
+        *:12b|*:13b|*:14b)  echo 9500  ;;
+        *:27b|*:30b|*:32b)  echo 21000 ;;
+        *:70b|*:72b)        echo 43000 ;;
+        *)                  echo 6000  ;;
+    esac
+}
+
+# Given a preferred model and free disk (MB), return the model to actually pull:
+#   - the preferred one if it fits (size + headroom),
+#   - else the largest model from the ladder that fits (a downgrade),
+#   - else empty (nothing fits).
+_largest_model_that_fits() {
+    local preferred="$1" free_mb="$2" headroom=1024
+    if (( free_mb >= $(_model_size_mb "$preferred") + headroom )); then
+        echo "$preferred"; return 0
+    fi
+    local m
+    for m in "qwen2.5:32b" "qwen2.5:14b" "llama3.1:8b" "gemma3:4b" "gemma3:1b"; do
+        if (( free_mb >= $(_model_size_mb "$m") + headroom )); then
+            echo "$m"; return 0
+        fi
+    done
+    echo ""; return 1
+}
+
 # Pull the best ollama model.
 #   $1 (optional) — preferred model tag (e.g. "llama3.1:8b")
 #
@@ -1255,6 +1307,43 @@ select_and_pull_llm_model() {
             info "Hardware: ${ram_mb} MB RAM detected → ${recommended}"
         else
             info "Could not detect RAM — defaulting to ${recommended}"
+        fi
+    fi
+
+    # ── Storage gate ─────────────────────────────────────────────────
+    # An Ollama model is 1–20+ GB. If the chosen model is already pulled we
+    # need no space; otherwise make sure it fits before starting a long
+    # download — downgrading to the largest model that fits, or skipping the
+    # pull entirely when there isn't room for even the smallest.
+    local pulled_models
+    pulled_models=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -v '^$' || true)
+
+    if [[ -n "$recommended" ]] && echo "$pulled_models" | grep -qF "$recommended"; then
+        _pull_ollama_model "$recommended"   # already on disk — no space needed
+        return 0
+    fi
+
+    local models_dir="${OLLAMA_MODELS:-$HOME/.ollama/models}"
+    local free_mb; free_mb=$(_detect_free_disk_mb "$models_dir")
+    if (( free_mb > 0 )); then
+        local fitted; fitted=$(_largest_model_that_fits "$recommended" "$free_mb")
+        if [[ -z "$fitted" ]]; then
+            local smallest_mb; smallest_mb=$(_model_size_mb "gemma3:1b")
+            if [[ -n "$pulled_models" ]]; then
+                warn "Only ${free_mb} MB free — too little to download a model; using one already on disk."
+                _pull_ollama_model ""        # reuse whatever is present
+            else
+                warn "Only ${free_mb} MB free — not enough for any model (smallest ≈ ${smallest_mb} MB)."
+                warn "Skipping model download. Free up space, then run: ollama pull gemma3:1b"
+                _save_model_config "$recommended"   # record intent; verify() will flag it
+            fi
+            return 0
+        fi
+        if [[ "$fitted" != "$recommended" ]]; then
+            warn "Only ${free_mb} MB free — choosing ${fitted} instead of ${recommended} to fit storage"
+            recommended="$fitted"
+        else
+            info "Storage: ${free_mb} MB free — room for ${recommended} (≈ $(_model_size_mb "$recommended") MB + headroom)"
         fi
     fi
 
@@ -1737,7 +1826,14 @@ verify() {
                     ok "LLM model pulled: $want_model"
                 else
                     warn "LLM model '$want_model' not downloaded yet"
-                    note_missing "Ollama model $want_model" "ollama pull $want_model"
+                    # If the shortfall is storage, say so and adjust the fix hint.
+                    local _free_mb; _free_mb=$(_detect_free_disk_mb "${OLLAMA_MODELS:-$HOME/.ollama/models}")
+                    if (( _free_mb > 0 && _free_mb < $(_model_size_mb "$want_model") + 1024 )); then
+                        note_missing "Ollama model $want_model (only ${_free_mb} MB free)" \
+                            "free up storage, then: ollama pull $want_model"
+                    else
+                        note_missing "Ollama model $want_model" "ollama pull $want_model"
+                    fi
                 fi
             fi
             ;;
