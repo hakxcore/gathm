@@ -438,6 +438,35 @@ with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
     rm -rf "$_pc_tmp"
 }
 
+# Switch the venv over to Termux's Bionic-native pydantic / pydantic-core.
+# This is the reliable path on Termux: PyPI's manylinux/musllinux pydantic-core
+# wheels are glibc/musl binaries that Android's Bionic linker cannot load
+# (it reports the bundled glibc libgcc_s as "not found"). Termux packages a
+# native build, so we install it and remove any broken wheel-installed copy
+# from the venv so the pkg version (visible via --system-site-packages) wins.
+# Returns 0 only if pydantic + pydantic_core import cleanly afterwards.
+_termux_use_native_pydantic_core() {
+    command -v pkg >/dev/null 2>&1 || return 1
+    info "Using Termux-native pydantic-core (Bionic build)..."
+    pkg install -y python-pydantic python-pydantic-core >/dev/null 2>&1 || true
+
+    # Only proceed if the native build actually IMPORTS on the system Python —
+    # otherwise we'd strip the venv's copies for nothing. (A native Bionic build
+    # loads fine; a missing/again-glibc one would not.)
+    python3 -c "import pydantic_core" 2>/dev/null || return 1
+
+    # Remove the venv's own (broken, glibc) pydantic + pydantic-core so the
+    # system-site-packages native build is the one that gets imported. pydantic
+    # and pydantic-core are version-locked, so replace them as a pair.
+    local sp
+    sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+    if [[ -n "$sp" ]]; then
+        rm -rf "$sp"/pydantic_core "$sp"/pydantic_core-*.dist-info "$sp"/pydantic_core.libs \
+               "$sp"/pydantic "$sp"/pydantic-*.dist-info 2>/dev/null || true
+    fi
+    "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null
+}
+
 # Create pure-Python stubs for Rust-based packages that can't compile on
 # Android/aarch64 (Termux).  Each stub satisfies pip's dependency resolver
 # and provides the stdlib fallback that the actual package would use anyway.
@@ -787,9 +816,15 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            # patchelf: needed to rewrite the RPATH of manylinux .so files
-            # (e.g. pydantic-core) to an absolute path Bionic will search.
+            # patchelf: used to adjust RPATHs of prebuilt .so files when needed.
             pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 patchelf 2>/dev/null || true
+            # pydantic-core is a Rust extension. PyPI only ships manylinux/musl
+            # wheels (glibc/musl) which Android's Bionic linker cannot load at
+            # all — so we MUST use Termux's own Bionic-native build. Installing
+            # python-pydantic pulls in the matching python-pydantic-core; the
+            # pilot venv (created with --system-site-packages) then imports them
+            # directly and pip never touches pydantic-core. Best-effort.
+            pkg install -y python-pydantic python-pydantic-core 2>/dev/null || true
             # Note: python-numpy used to be installed here to satisfy
             # langchain-community, but Pilot no longer depends on it (see
             # pilot/requirements.txt), so we skip it — building/compiling numpy
@@ -1446,35 +1481,33 @@ install_pilot_deps() {
         rm -f "$tmp_req"
 
         # pip may have overwritten SOABI-patched pydantic-core .so files
-        # during dependency resolution. Re-patch if pydantic-core is broken.
+        # during dependency resolution, replacing our SOABI-patched copy with a
+        # manylinux/musllinux wheel. Those are glibc/musl binaries that Android's
+        # Bionic linker CANNOT load (it reports the bundled glibc libgcc_s as
+        # "not found"), so the only reliable fix on Termux is the native build.
         if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-            warn "pydantic-core broken after pip install — re-patching SOABI..."
-            local _pc_sp
-            _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-            if [[ -n "$_pc_sp" ]]; then
-                _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
-            fi
-        fi
-
-        # Final safety net: pydantic_core's native lib needs libgcc_s.so.1,
-        # which no Termux package provides. If it still won't import, stage the
-        # libgcc bundled in the wheel (searched across the whole venv) onto
-        # $PREFIX/lib and retry — loudly, so any remaining failure is visible
-        # here instead of only when Pilot launches.
-        if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-            warn "pydantic-core native lib not loading — staging libs + fixing RPATH..."
-            _termux_stage_bundled_libs "$GATHM_VENV"
-            # The decisive step: Bionic ignores the wheel's $ORIGIN RUNPATH and
-            # won't search $PREFIX/lib for a dlopen'd .so's deps, so rewrite the
-            # extension's RPATH to absolute dirs with patchelf.
-            local _pcso2
-            _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
-            [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
-            if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-                ok "pydantic-core now loads (RPATH fixed → \$PREFIX/lib)"
+            warn "pydantic-core not loading — switching to Termux-native build..."
+            if _termux_use_native_pydantic_core; then
+                ok "pydantic-core now loads (Termux-native build)"
             else
-                warn "pydantic-core STILL failing to load its native library:"
-                "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
+                # Fallback for environments without the Termux package: try to
+                # make the manylinux wheel's bundled libgcc loadable. This only
+                # works if the wheel can load on Bionic at all.
+                warn "Termux-native pydantic unavailable — trying wheel + libgcc staging..."
+                local _pc_sp
+                _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+                [[ -n "$_pc_sp" ]] && _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
+                _termux_stage_bundled_libs "$GATHM_VENV"
+                local _pcso2
+                _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
+                [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
+                if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
+                    ok "pydantic-core now loads"
+                else
+                    warn "pydantic-core STILL failing to load its native library:"
+                    "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
+                    warn "Fix manually: pkg install python-pydantic python-pydantic-core"
+                fi
             fi
         else
             ok "pydantic-core loads"
