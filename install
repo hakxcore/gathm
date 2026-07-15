@@ -447,7 +447,10 @@ with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
 # Returns 0 only if pydantic + pydantic_core import cleanly afterwards.
 _termux_use_native_pydantic_core() {
     command -v pkg >/dev/null 2>&1 || return 1
-    info "Using Termux-native pydantic-core (Bionic build)..."
+    info "Looking for a Termux-native pydantic-core (Bionic build)..."
+    # The community repo (tur-repo) carries many extra python-* packages that
+    # aren't in the main repo — enable it before trying.
+    pkg install -y tur-repo >/dev/null 2>&1 || true
     pkg install -y python-pydantic python-pydantic-core >/dev/null 2>&1 || true
 
     # Only proceed if the native build actually IMPORTS on the system Python —
@@ -465,6 +468,35 @@ _termux_use_native_pydantic_core() {
                "$sp"/pydantic "$sp"/pydantic-*.dist-info 2>/dev/null || true
     fi
     "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null
+}
+
+# Last-resort but guaranteed-correct: compile pydantic-core from source with
+# Termux's own Rust toolchain, producing a genuine Bionic binary (no glibc).
+# Slow (a large Rust crate on-device), so it is only used when no native
+# package is available. pip build isolation bootstraps a native maturin.
+_termux_build_pydantic_core_from_source() {
+    local py="$GATHM_VENV/bin/python3" pip="$GATHM_VENV/bin/pip"
+    [[ -x "$pip" ]] || return 1
+
+    # Version to build = whatever the installed pydantic pins (or the broken
+    # pydantic-core's own metadata, which is readable without loading the .so).
+    local ver
+    ver=$("$py" -c "import importlib.metadata as m; print(m.version('pydantic-core'))" 2>/dev/null)
+    [[ -n "$ver" ]] || ver=$("$py" -c "import importlib.metadata as m; print(m.version('pydantic_core'))" 2>/dev/null)
+    [[ -n "$ver" ]] || return 1
+
+    command -v cargo >/dev/null 2>&1 || pkg install -y rust >/dev/null 2>&1 || true
+    command -v cargo >/dev/null 2>&1 || return 1
+
+    warn "No native package — building pydantic-core $ver from source with Rust."
+    warn "This is a one-time on-device compile and can take 10–30 minutes..."
+    # --no-binary forces a source build (a real Bionic .so); --force-reinstall
+    # replaces the broken glibc wheel; build isolation compiles maturin natively.
+    if "$pip" install --no-binary pydantic-core --force-reinstall --no-deps "pydantic-core==$ver"; then
+        "$py" -c "import pydantic_core" 2>/dev/null
+    else
+        return 1
+    fi
 }
 
 # Create pure-Python stubs for Rust-based packages that can't compile on
@@ -1480,34 +1512,23 @@ install_pilot_deps() {
         fi
         rm -f "$tmp_req"
 
-        # pip may have overwritten SOABI-patched pydantic-core .so files
-        # during dependency resolution, replacing our SOABI-patched copy with a
-        # manylinux/musllinux wheel. Those are glibc/musl binaries that Android's
-        # Bionic linker CANNOT load (it reports the bundled glibc libgcc_s as
-        # "not found"), so the only reliable fix on Termux is the native build.
+        # pip likely replaced our copy with a manylinux/musllinux pydantic-core
+        # wheel during dependency resolution. Those are glibc/musl binaries that
+        # Android's Bionic linker CANNOT load (it reports the bundled glibc
+        # libgcc_s as "not found"), so path/RPATH fixes don't help — the only
+        # things that work are a Bionic-native package or a from-source build.
         if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-            warn "pydantic-core not loading — switching to Termux-native build..."
+            warn "pydantic-core not loading — it needs a native (Bionic) build."
             if _termux_use_native_pydantic_core; then
-                ok "pydantic-core now loads (Termux-native build)"
+                ok "pydantic-core now loads (Termux-native package)"
+            elif _termux_build_pydantic_core_from_source; then
+                ok "pydantic-core now loads (compiled from source)"
             else
-                # Fallback for environments without the Termux package: try to
-                # make the manylinux wheel's bundled libgcc loadable. This only
-                # works if the wheel can load on Bionic at all.
-                warn "Termux-native pydantic unavailable — trying wheel + libgcc staging..."
-                local _pc_sp
-                _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-                [[ -n "$_pc_sp" ]] && _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
-                _termux_stage_bundled_libs "$GATHM_VENV"
-                local _pcso2
-                _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
-                [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
-                if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-                    ok "pydantic-core now loads"
-                else
-                    warn "pydantic-core STILL failing to load its native library:"
-                    "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
-                    warn "Fix manually: pkg install python-pydantic python-pydantic-core"
-                fi
+                warn "pydantic-core STILL failing to load its native library:"
+                "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
+                warn "Manual fix (either one):"
+                warn "  pkg install python-pydantic python-pydantic-core"
+                warn "  $GATHM_VENV/bin/pip install --no-binary pydantic-core --force-reinstall pydantic pydantic-core"
             fi
         else
             ok "pydantic-core loads"
