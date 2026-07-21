@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# Author: Hakxcore https://github.com/hakxcore
+# Description: Speak text aloud using the best available text-to-speech engine.
+#
+# Engine selection (auto): the first that works on this platform wins.
+#   Termux : termux-tts-speak (Android system TTS) -> espeak-ng/espeak
+#   macOS  : KittenTTS (if importable) -> say
+#   Linux  : KittenTTS (if importable) -> espeak-ng/espeak -> spd-say
+# KittenTTS is neural (ONNX) and only auto-selected where it actually imports,
+# so on Termux — where onnxruntime's glibc wheels can't load on Bionic — it is
+# skipped automatically and the native Android engine is used instead.
+
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="3.0.0"
+TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Message helpers (lib/utils.bash provides colors but not these).
+_R="$(printf '\033[0m')"; _G="$(printf '\033[32m')"; _Y="$(printf '\033[33m')"
+_B="$(printf '\033[34m')"; _RED="$(printf '\033[31m')"
+info() { echo -e "${_B}[*]${_R} $*"; }
+ok()   { echo -e "${_G}[+]${_R} $*"; }
+warn() { echo -e "${_Y}[!]${_R} $*"; }
+fail() { echo -e "${_RED}[-]${_R} $*"; }
+
+usage() {
+cat <<EOF
+Speak (v$currentVersion)
+
+Description: Speak text aloud using the best available TTS engine.
+
+Usage:
+  speak "text to say"
+  echo "text" | speak
+  speak -e espeak -n en+f3 "hello"
+
+Options:
+  -e <engine>   Force engine: auto (default), termux, kitten, espeak, say, spd
+  -n <voice>    Voice name (engine-specific, e.g. Jasper for kitten, en+m2 for espeak)
+  -o <file.wav> Write audio to a WAV file instead of playing it (kitten/espeak)
+  -r <rate>     Speech rate (words/min for espeak; ignored by some engines)
+  -l            List engines available on this system
+  -h            Show this help
+  -v            Show version
+
+Notes:
+  * On Termux, install the Termux:API app + 'pkg install termux-api' for the best
+    voice (termux-tts-speak). 'pkg install espeak-ng' gives an offline fallback.
+  * KittenTTS (desktop) needs a one-time setup: run 'speak --setup'.
+
+Examples:
+  speak "Setup complete. Gathm is ready."
+  gathm pilot   # then Pilot can speak its replies with /speak on
+EOF
+}
+
+# --- helpers ---------------------------------------------------------------
+_platform="$(detect_platform)"
+
+_have() { command -v "$1" >/dev/null 2>&1; }
+
+_python() {
+    if _have python3; then echo "python3"
+    elif _have python; then echo "python"
+    else echo ""; fi
+}
+
+# True only if kittentts (and its onnxruntime backend) actually IMPORTS — this
+# is the honest test: find_spec would pass on Termux but the import fails there.
+_kitten_ok() {
+    local py; py="$(_python)"
+    [[ -n "$py" ]] || return 1
+    "$py" - <<'PY' >/dev/null 2>&1
+import kittentts  # noqa: F401  (imports onnxruntime; fails on Bionic)
+PY
+}
+
+# Pick an audio player for a WAV file on this platform.
+_play_wav() {
+    local f="$1"
+    case "$_platform" in
+        termux) _have termux-media-player && { termux-media-player play "$f" >/dev/null 2>&1; return; } ;;
+        darwin) _have afplay && { afplay "$f"; return; } ;;
+    esac
+    for p in paplay aplay ffplay mpv play sox; do
+        if _have "$p"; then
+            case "$p" in
+                ffplay) ffplay -autoexit -nodisp -loglevel quiet "$f" ;;
+                mpv)    mpv --really-quiet "$f" ;;
+                play|sox) play -q "$f" ;;
+                *)      "$p" "$f" >/dev/null 2>&1 ;;
+            esac
+            return
+        fi
+    done
+    warn "No audio player found to play $f"
+    return 1
+}
+
+# --- engines ---------------------------------------------------------------
+speak_termux() {
+    _have termux-tts-speak || return 1
+    if [[ -n "$VOICE" ]]; then
+        printf '%s' "$TEXT" | termux-tts-speak -e "$VOICE" 2>/dev/null
+    else
+        printf '%s' "$TEXT" | termux-tts-speak 2>/dev/null
+    fi
+}
+
+speak_say() {  # macOS
+    _have say || return 1
+    if [[ -n "$OUTFILE" ]]; then
+        say ${VOICE:+-v "$VOICE"} -o "$OUTFILE" --data-format=LEF32@22050 "$TEXT"
+    else
+        say ${VOICE:+-v "$VOICE"} "$TEXT"
+    fi
+}
+
+speak_espeak() {
+    local cmd=""
+    _have espeak-ng && cmd="espeak-ng"
+    [[ -z "$cmd" ]] && _have espeak && cmd="espeak"
+    [[ -z "$cmd" ]] && return 1
+    local args=()
+    [[ -n "$VOICE" ]] && args+=(-v "$VOICE")
+    [[ -n "$RATE"  ]] && args+=(-s "$RATE")
+    if [[ -n "$OUTFILE" ]]; then
+        "$cmd" "${args[@]}" -w "$OUTFILE" "$TEXT"
+    else
+        "$cmd" "${args[@]}" "$TEXT"
+    fi
+}
+
+speak_spd() {  # speech-dispatcher
+    _have spd-say || return 1
+    spd-say -w ${VOICE:+-t "$VOICE"} "$TEXT"
+}
+
+speak_kitten() {
+    _kitten_ok || return 1
+    local py; py="$(_python)"
+    local out="${OUTFILE:-$(mktemp 2>/dev/null).wav}"
+    local voice="${VOICE:-Jasper}"
+    TEXT="$TEXT" KVOICE="$voice" KOUT="$out" "$py" - <<'PY' 2>/dev/null || return 1
+import os
+from kittentts import KittenTTS
+import soundfile as sf
+m = KittenTTS("KittenML/kitten-tts-mini-0.8")
+audio = m.generate(os.environ["TEXT"], voice=os.environ["KVOICE"])
+sf.write(os.environ["KOUT"], audio, 24000)
+PY
+    [[ -f "$out" ]] || return 1
+    if [[ -n "$OUTFILE" ]]; then
+        ok "Saved audio: $OUTFILE"
+    else
+        _play_wav "$out"; local rc=$?
+        rm -f "$out" 2>/dev/null
+        return $rc
+    fi
+}
+
+list_engines() {
+    echo "TTS engines on this system ($_platform):"
+    _have termux-tts-speak && echo "  [x] termux  (termux-tts-speak — Android system TTS)" || echo "  [ ] termux  (install Termux:API app + pkg install termux-api)"
+    _kitten_ok             && echo "  [x] kitten  (KittenTTS neural, ONNX)"               || echo "  [ ] kitten  (run: speak --setup   — desktop only)"
+    { _have espeak-ng || _have espeak; } && echo "  [x] espeak  (offline)"                || echo "  [ ] espeak  (install: pkg/apt install espeak-ng)"
+    _have say              && echo "  [x] say     (macOS)"
+    _have spd-say          && echo "  [x] spd     (speech-dispatcher)"
+}
+
+setup_kitten() {
+    local py pip
+    py="$(_python)"; [[ -n "$py" ]] || { fail "Python not found."; return 1; }
+    if [[ "$_platform" == "termux" ]]; then
+        warn "KittenTTS needs onnxruntime, whose wheels don't load on Termux/Bionic."
+        warn "Use the native engine instead: pkg install termux-api espeak-ng"
+        return 1
+    fi
+    pip="$py -m pip"
+    info "Installing KittenTTS (this pulls onnxruntime — desktop only)..."
+    $pip install "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" \
+        && _kitten_ok && ok "KittenTTS ready — try: speak -e kitten \"hello from Gathm\"" \
+        || { fail "KittenTTS install failed (onnxruntime unavailable on this platform)."; return 1; }
+}
+
+# --- run one engine by name; returns its status ---
+run_engine() {
+    case "$1" in
+        termux) speak_termux ;;
+        kitten) speak_kitten ;;
+        espeak) speak_espeak ;;
+        say)    speak_say ;;
+        spd)    speak_spd ;;
+        *)      return 2 ;;
+    esac
+}
+
+# Auto order per platform.
+auto_order() {
+    case "$_platform" in
+        termux)         echo "termux espeak" ;;
+        darwin)         echo "kitten say espeak" ;;
+        *)              echo "kitten espeak spd" ;;
+    esac
+}
+
+# --- option parsing --------------------------------------------------------
+ENGINE="auto"; VOICE=""; OUTFILE=""; RATE=""
+# Long options first (getopts doesn't handle them).
+if [[ "${1:-}" == "--setup" ]]; then setup_kitten; exit $?; fi
+if [[ "${1:-}" == "--list" ]]; then list_engines; exit 0; fi
+
+while getopts "e:n:o:r:lhv" opt; do
+    case "$opt" in
+        e) ENGINE="$OPTARG" ;;
+        n) VOICE="$OPTARG" ;;
+        o) OUTFILE="$OPTARG" ;;
+        r) RATE="$OPTARG" ;;
+        l) list_engines; exit 0 ;;
+        h) usage; exit 0 ;;
+        v) echo "Version $currentVersion"; exit 0 ;;
+        \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
+        :)  echo "Option -$OPTARG requires an argument." >&2; exit 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Text: remaining args, or stdin if piped.
+TEXT="$*"
+if [[ -z "$TEXT" && ! -t 0 ]]; then
+    TEXT="$(cat)"
+fi
+if [[ -z "$TEXT" ]]; then
+    usage
+    exit 1
+fi
+
+# --- dispatch --------------------------------------------------------------
+if [[ "$ENGINE" != "auto" ]]; then
+    if run_engine "$ENGINE"; then exit 0; fi
+    fail "Engine '$ENGINE' unavailable or failed."
+    list_engines
+    exit 1
+fi
+
+for eng in $(auto_order); do
+    if run_engine "$eng"; then
+        exit 0
+    fi
+done
+
+fail "No working TTS engine found."
+echo ""
+list_engines
+echo ""
+echo "Quick setup:"
+case "$_platform" in
+    termux) echo "  pkg install termux-api espeak-ng   # + install the Termux:API app" ;;
+    darwin) echo "  (say is built in)  or  speak --setup   # for KittenTTS" ;;
+    *)      echo "  sudo apt install espeak-ng   # or: speak --setup   for KittenTTS" ;;
+esac
+exit 1

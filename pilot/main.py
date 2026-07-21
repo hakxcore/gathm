@@ -531,12 +531,89 @@ else:
     workflow = None
     app = None
 
+# --- Text-to-speech (optional; delegates to the native `speak` tool) ---
+# The speak tool picks a platform-appropriate engine (Android system TTS /
+# espeak / macOS say / KittenTTS on desktop), so Pilot needs no audio deps and
+# this works on Termux even while heavier Python extensions are unavailable.
+_TTS_STATE_FILE = Path.home() / ".gathm" / "tts"
+_SPEAK_TOOL = TOOLS_DIR / "speak" / "speak"
+
+def tts_enabled() -> bool:
+    env = os.environ.get("GATHM_TTS", "").strip().lower()
+    if env in ("1", "on", "true", "yes"):
+        return True
+    if env in ("0", "off", "false", "no"):
+        return False
+    try:
+        return _TTS_STATE_FILE.read_text().strip().lower() in ("1", "on", "true", "yes")
+    except Exception:
+        return False
+
+def set_tts(enabled: bool) -> None:
+    try:
+        _TTS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TTS_STATE_FILE.write_text("on" if enabled else "off")
+    except Exception:
+        pass
+
+def _clean_for_speech(text: str) -> str:
+    t = re.sub(r"```.*?```", " ", text, flags=re.S)   # fenced code blocks
+    t = re.sub(r"`([^`]*)`", r"\1", t)                # inline code
+    t = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", t)  # bold / italic
+    t = re.sub(r"https?://\S+", " link ", t)          # spoken URLs are noise
+    t = re.sub(r"[#>|~`]", " ", t)                     # leftover markdown
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:600]                                     # keep it to a sentence or two
+
+def speak_text(text: str, force: bool = False) -> None:
+    """Speak text in the background via the speak tool. No-op if voice is off."""
+    if not text or (not force and not tts_enabled()):
+        return
+    if not (_SPEAK_TOOL.is_file() and os.access(_SPEAK_TOOL, os.X_OK)):
+        return
+    cleaned = _clean_for_speech(text)
+    if not cleaned:
+        return
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(_SPEAK_TOOL)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if proc.stdin:
+            proc.stdin.write(cleaned.encode("utf-8", "ignore"))
+            proc.stdin.close()   # don't wait — speech plays while Pilot continues
+    except Exception:
+        pass
+
+
 def _handle_slash_command(cmd: str) -> bool:
     """Handle slash commands. Returns True if a command was handled."""
     cmd_lower = cmd.strip().lower()
 
     if cmd_lower in ("/help", "?"):
         render_help()
+        return True
+
+    # /speak on|off  → toggle voice;  /speak <text>  → speak it now
+    if cmd_lower == "/speak" or cmd_lower.startswith("/speak "):
+        arg = cmd.strip()[len("/speak"):].strip()
+        low = arg.lower()
+        if low in ("on", "1", "true", "yes", "enable"):
+            set_tts(True)
+            console.print("\n  [color(208)]Voice:[/color(208)] on")
+        elif low in ("off", "0", "false", "no", "disable"):
+            set_tts(False)
+            console.print("\n  [color(208)]Voice:[/color(208)] off")
+        elif low in ("", "status"):
+            console.print(
+                f"\n  [color(208)]Voice:[/color(208)] {'on' if tts_enabled() else 'off'}"
+                "   (use /speak on | /speak off | /speak <text>)"
+            )
+        else:
+            speak_text(arg, force=True)   # test-speak whatever was typed
+            console.print(f"\n  [color(208)]\\[speaking][/color(208)] {arg}")
         return True
 
     if cmd_lower == "/tools":
@@ -643,6 +720,7 @@ def main():
                 # (error case already displayed render_error above)
                 if not _stream_error:
                     render_response(final_agent_reply)
+                    speak_text(final_agent_reply)   # voice output when /speak on
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=final_agent_reply),

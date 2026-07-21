@@ -870,28 +870,32 @@ install_deps() {
             # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
             # this ensures manylinux fallback wheels also load correctly.
             pkg install -y libgcc 2>/dev/null || true
+            # Text-to-speech (the 'speak' tool / Pilot voice): termux-api gives
+            # termux-tts-speak (Android's system TTS — needs the Termux:API app),
+            # espeak-ng is an offline fallback. Best-effort.
+            pkg install -y termux-api espeak-ng 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
             sudo apt-get update -y 2>/dev/null || true
-            sudo apt-get install -y $core python3 python3-pip python3-venv pv dialog wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
+            sudo apt-get install -y $core python3 python3-pip python3-venv pv dialog wget dnsutils iproute2 net-tools libxml2-utils espeak-ng 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || pip install pyyaml 2>/dev/null || true
             ;;
         fedora)
-            sudo dnf install -y $core python3 python3-pip pv dialog wget bind-utils iproute net-tools libxml2 2>/dev/null || true
+            sudo dnf install -y $core python3 python3-pip pv dialog wget bind-utils iproute net-tools libxml2 espeak-ng 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         arch)
-            sudo pacman -Sy --noconfirm $core python python-pip pv dialog wget bind-tools iproute2 net-tools libxml2 2>/dev/null || true
+            sudo pacman -Sy --noconfirm $core python python-pip pv dialog wget bind-tools iproute2 net-tools libxml2 espeak-ng 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         alpine)
             apk update 2>/dev/null || true
-            apk add $core python3 py3-pip pv dialog wget bind-tools iproute2 net-tools libxml2-utils 2>/dev/null || true
+            apk add $core python3 py3-pip pv dialog wget bind-tools iproute2 net-tools libxml2-utils espeak-ng 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         opensuse)
-            sudo zypper install -y $core python3 python3-pip pv dialog wget bind-utils iproute2 net-tools libxml2-tools 2>/dev/null || true
+            sudo zypper install -y $core python3 python3-pip pv dialog wget bind-utils iproute2 net-tools libxml2-tools espeak-ng 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         macos)
@@ -2124,6 +2128,13 @@ main() {
     echo ""
     echo -e "${BOLD}${GREEN}Setup Complete!${RESET}"
     echo ""
+
+    # Say it out loud — a first taste of the new 'speak' tool. Best-effort and
+    # non-blocking; silently does nothing if no TTS engine is available yet.
+    local _speak="$SCRIPT_DIR/tools/speak/speak"
+    if [[ -x "$_speak" ]]; then
+        ( echo "Setup complete. Gathm is ready." | "$_speak" >/dev/null 2>&1 & ) 2>/dev/null || true
+    fi
 
     # Pilot clears the screen when it launches, so persist the "still missing"
     # report to a file and leave a short pointer here — the last thing the user

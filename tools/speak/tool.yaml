@@ -1,0 +1,41 @@
+name: speak
+version: "3.0.0"
+description: "Speak text aloud using the best available TTS engine (Android/espeak/say/KittenTTS)"
+category: media
+requires_internet: false  # native engines are fully offline; KittenTTS fetches its model once
+
+dependencies:
+  system: [bash]
+
+apis: []
+
+input_schema:
+  arguments:
+    - name: text
+      type: string
+      required: true
+      description: "Text to speak (or pipe text via stdin)"
+  flags:
+    - flag: "-e"
+      description: "Force engine: auto, termux, kitten, espeak, say, spd"
+      has_argument: true
+    - flag: "-n"
+      description: "Voice name (engine-specific)"
+      has_argument: true
+    - flag: "-o"
+      description: "Write audio to a WAV file instead of playing it"
+      has_argument: true
+    - flag: "-r"
+      description: "Speech rate (words/min, espeak)"
+      has_argument: true
+    - flag: "-l"
+      description: "List engines available on this system"
+    - flag: "-h"
+      description: "Show help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Speaks the given text; with -o writes a WAV file"
+
+tags: [media, tts, speech, voice, audio, accessibility]

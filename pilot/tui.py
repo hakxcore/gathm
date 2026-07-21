@@ -364,6 +364,7 @@ def render_help() -> None:
         ("/tools",  "List all available Gathm tools"),
         ("/clear",  "Clear screen and redraw welcome"),
         ("/model",  "Show current model / backend info"),
+        ("/speak",  "Voice replies: /speak on | off | <text>"),
         ("/quit",   "Exit Pilot"),
         ("?",       "Show this help screen"),
     ]:
