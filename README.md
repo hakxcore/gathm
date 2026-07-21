@@ -4,7 +4,7 @@ Formerly **Termux-Snippets**.
 
 Gathm is a modular, local-first command intelligence framework for security, networking, and operator workflows. It combines:
 
-- A large tool catalog (53 tools in this branch)
+- A large tool catalog (55 tools in this branch)
 - An orchestration layer (`gathm`) with planning, health, retry, recovery, and caching
 - Multiple user interfaces (CLI, TUI, API server, GUI)
 - Cross-platform support (Linux, macOS, Termux, WSL/Git Bash/MSYS2)
@@ -41,7 +41,7 @@ gathm/
 │   ├── cache.bash             # Output caching with TTL
 │   ├── ratelimit.bash         # Per-tool rate limiting
 │   └── schema.bash            # JSON helpers + manifest parsing
-├── tools/                     # 53 tool wrappers/scripts + tool.yaml manifests
+├── tools/                     # 55 tool wrappers/scripts + tool.yaml manifests
 ├── pilot/                     # Local AI TUI assistant
 ├── engineer/                  # AutoGen-based engineering agent
 ├── api/server.py              # REST API server
@@ -128,6 +128,28 @@ Notes:
 
 - Uses Ollama-compatible model runtime.
 - Model resolution order: `GATHM_OLLAMA_MODEL` -> `OLLAMA_MODEL` -> `~/.gathm/model` -> default.
+- Voice: `/speak on` reads replies aloud (`/speak off` to stop, `/speak <text>`
+  to test). Uses the `speak` tool, so it needs no extra Python deps.
+
+### Voice / Text-to-speech
+
+Gathm can talk via the `speak` tool, which auto-selects the best engine for the
+platform:
+
+```bash
+gathm speak "Hello, I am Gathm"      # or: ./tools/speak/speak "..."
+speak -l                              # list engines available on this system
+speak -o out.wav "save to a file"     # write audio instead of playing it
+```
+
+- **Termux**: `termux-tts-speak` (Android system TTS — install the *Termux:API*
+  app + `pkg install termux-api`), falling back to offline `espeak-ng`.
+- **macOS**: `say`, or KittenTTS if set up.
+- **Linux**: `espeak-ng` / `spd-say`, or KittenTTS (`speak --setup`).
+
+KittenTTS (neural, ONNX) is desktop-only: its `onnxruntime` dependency ships
+glibc/musl wheels that Android's Bionic linker can't load, so it is skipped
+automatically on Termux in favour of the native engine.
 
 ### 4) REST API
 
@@ -214,6 +236,7 @@ Key environment variables:
 - `GATHM_CACHE_DEFAULT_TTL`
 - `GATHM_API_KEY` (API bearer auth)
 - `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
+- `GATHM_TTS` (`on|off`) — enable Pilot voice output by default
 - `OMDB_API_KEY` (movie tool)
 - `VT_API_KEY` / `VIRUSTOTAL_API_KEY` (tipcheck VirusTotal)
 - `ABUSEIPDB_API_KEY` (tipcheck AbuseIPDB)
