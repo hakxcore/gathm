@@ -1162,13 +1162,31 @@ _detect_total_ram_mb() {
     return 1
 }
 
+# The only Ollama model Gathm uses on Termux.
+#
+# Phones report plenty of RAM — 8-12 GB is common — so the RAM tiers below
+# would happily pick gemma3:4b or llama3.1:8b. On Android that is a bad trade
+# regardless of what /proc/meminfo says: inference is pure CPU, thermal
+# throttling hits within a minute, and Android's low-memory killer reaps the
+# Ollama server mid-response. gemma3:1b is the one that stays usable, so
+# Termux is pinned to it rather than sized by RAM.
+GATHM_TERMUX_MODEL="gemma3:1b"
+
 # Pick an Ollama model tag based on system RAM.
 # Conservative tiers — assumes pure CPU inference and leaves headroom
 # for the OS.  Override at any time by writing $HOME/.gathm/model or
 # setting GATHM_OLLAMA_MODEL in the env before running ./install.
 _recommend_model_for_hardware() {
+    # Termux ignores the RAM tiers entirely — see GATHM_TERMUX_MODEL above.
+    if _is_termux; then
+        echo "$GATHM_TERMUX_MODEL"
+        return 0
+    fi
+
     local ram_mb
-    ram_mb=$(_detect_total_ram_mb)
+    # `|| true`: the detector returns non-zero when it cannot tell, and under
+    # `set -e` a bare assignment from it would abort the installer.
+    ram_mb=$(_detect_total_ram_mb) || true
     if   (( ram_mb < 1 ));     then echo "gemma3:4b"      # detection failed
     elif (( ram_mb < 4096 ));  then echo "gemma3:1b"      # phone / small VM
     elif (( ram_mb < 8192 ));  then echo "gemma3:4b"      # ≤8 GB
@@ -1238,7 +1256,8 @@ _largest_model_that_fits() {
 #   2. If $1 is set but not yet pulled → attempt download.
 #   3. On download failure (or no $1 given) → scan `ollama list` for anything
 #      already present and pick the best match from a priority list.
-#   4. If nothing is pulled at all → pull gemma3:4b as the minimal default.
+#   4. If nothing is pulled at all → pull the minimal default (gemma3:4b,
+#      or GATHM_TERMUX_MODEL on Termux).
 _pull_ollama_model() {
     local requested_model="${1:-}"
 
@@ -1267,6 +1286,24 @@ _pull_ollama_model() {
     fi
 
     # ── 3. Pick the best model from what is already on disk ───────────
+    # On Termux, only 1b-class models are actually usable. The priority list
+    # below leads with llama3.x, so without this filter a phone that still has
+    # an 8b model from an older install would "fall back" to the very thing
+    # that gets OOM-killed mid-response.
+    if [[ -n "$pulled_models" ]] && _is_termux; then
+        local small_models
+        small_models=$(echo "$pulled_models" | grep -iE ':(0\.5b|1b|1\.5b|2b)$' || true)
+        if [[ -n "$small_models" ]]; then
+            local small_match
+            small_match=$(echo "$small_models" | head -1)
+            ok "Using already-pulled model: $small_match"
+            _save_model_config "$small_match"
+            return 0
+        fi
+        warn "Already-pulled models are all too large for Termux — ignoring them"
+        pulled_models=""
+    fi
+
     if [[ -n "$pulled_models" ]]; then
         local preferred=(
             "llama3.3" "llama3.2" "llama3.1" "llama3"
@@ -1295,22 +1332,28 @@ _pull_ollama_model() {
         fi
     fi
 
-    # ── 4. Nothing available — pull gemma3:4b as the minimal default ──
-    info "No local models found. Pulling gemma3:4b as default (this may take a few minutes)..."
-    if ollama pull "gemma3:4b" 2>/dev/null; then
-        ok "Default model gemma3:4b ready"
-        _save_model_config "gemma3:4b"
+    # ── 4. Nothing available — pull the minimal default ──
+    # Termux gets the 1b model here too; gemma3:4b is the desktop default.
+    local default_model="gemma3:4b"
+    if _is_termux; then
+        default_model="$GATHM_TERMUX_MODEL"
+    fi
+    info "No local models found. Pulling $default_model as default (this may take a few minutes)..."
+    if ollama pull "$default_model" 2>/dev/null; then
+        ok "Default model $default_model ready"
+        _save_model_config "$default_model"
     else
-        warn "Could not pull gemma3:4b — run manually: ollama pull gemma3:4b"
-        _save_model_config "gemma3:4b"
+        warn "Could not pull $default_model — run manually: ollama pull $default_model"
+        _save_model_config "$default_model"
     fi
 }
 
 # --- Pick a local model and pull it ---
 # Selection priority (highest wins):
 #   1. GATHM_OLLAMA_MODEL env var (explicit override)
-#   2. $HOME/.gathm/model        (sticky choice from a previous run)
-#   3. _recommend_model_for_hardware (RAM-tier heuristic)
+#   2. GATHM_TERMUX_MODEL        (Termux is pinned; bigger models are unusable)
+#   3. $HOME/.gathm/model        (sticky choice from a previous run)
+#   4. _recommend_model_for_hardware (RAM-tier heuristic)
 select_and_pull_llm_model() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
         warn "Offline — checking for already-pulled local models"
@@ -1327,8 +1370,22 @@ select_and_pull_llm_model() {
     local recommended=""
 
     if [[ -n "${GATHM_OLLAMA_MODEL:-}" ]]; then
+        # An explicit env override is a deliberate choice; honour it everywhere.
         recommended="$GATHM_OLLAMA_MODEL"
         info "Using model from GATHM_OLLAMA_MODEL: $recommended"
+    elif _is_termux; then
+        # Pinned, and deliberately ahead of the saved-model check: an install
+        # from before this pin existed may have left a 4b/8b tag in
+        # ~/.gathm/model, and reusing that is the thing we are preventing.
+        recommended="$GATHM_TERMUX_MODEL"
+        local _prev=""
+        [[ -s "$HOME/.gathm/model" ]] && \
+            _prev=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
+        if [[ -n "$_prev" && "$_prev" != "$recommended" ]]; then
+            warn "Replacing previously-selected '$_prev' with $recommended (Termux runs 1b models only)"
+        else
+            info "Termux: using $recommended"
+        fi
     elif [[ -s "$HOME/.gathm/model" ]]; then
         recommended=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
         [[ -n "$recommended" ]] && info "Using previously-selected model: $recommended"
@@ -1628,10 +1685,9 @@ install_playwright_browser() {
 #   Do not "fix" a failure here by pip-installing pydantic-core or a Python
 #   TTS library; that is the exact trap this path exists to avoid.
 #
-#   Desktop platforms (macOS/Linux/WSL/Windows) keep their existing
-#   Python/audio dependencies untouched. audio.cpp is opt-in there because
-#   compiling ggml from source is a genuinely long step and those platforms
-#   already have working alternatives.
+#   This is Termux-only on purpose. Every other platform is left exactly as it
+#   was, keeping whatever Python/audio dependencies it already uses — nothing
+#   here runs off Termux.
 #
 # The Termux flow, which is the one verified on-device:
 #   pkg build deps
@@ -1647,8 +1703,7 @@ install_playwright_browser() {
 #   voice model weights — a separate download, reported not forced
 #
 # Environment knobs (all optional):
-#   GATHM_INSTALL_AUDIO_CPP=1|0    force the build on/off
-#                                  (default: on for Termux, off elsewhere)
+#   GATHM_INSTALL_AUDIO_CPP=0      skip the build (fast install, no voice)
 #   GATHM_AUDIOCPP_SRC=DIR         clone/build location
 #   GATHM_AUDIOCPP_MODEL_SET=SET   full | core | custom   (default: custom)
 #   GATHM_AUDIOCPP_MODELS=a,b,c    families to compile when MODEL_SET=custom
@@ -1733,47 +1788,14 @@ _audiocpp_jobs() {
     echo "$jobs"
 }
 
-# Toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
+# Termux toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
 _audiocpp_install_build_deps() {
-    local platform="$1"
     info "Installing audio.cpp build dependencies..."
-
-    case "$platform" in
-        termux)
-            pkg install -y git cmake ninja clang make pkg-config 2>/dev/null || true
-            # Upstream builds with OpenMP ON by default. Termux ships libomp in
-            # its own `openmp` package rather than inside clang, so without this
-            # the configure step fails on an otherwise fine toolchain.
-            pkg install -y openmp 2>/dev/null || true
-            ;;
-        debian|wsl)
-            sudo apt-get install -y git cmake ninja-build build-essential pkg-config 2>/dev/null || true
-            ;;
-        fedora)
-            sudo dnf install -y git cmake ninja-build gcc gcc-c++ make pkgconf-pkg-config 2>/dev/null || true
-            ;;
-        arch)
-            sudo pacman -Sy --noconfirm git cmake ninja base-devel pkgconf 2>/dev/null || true
-            ;;
-        alpine)
-            # samurai is Alpine's ninja implementation.
-            apk add git cmake samurai build-base pkgconf 2>/dev/null || true
-            ;;
-        opensuse)
-            sudo zypper install -y git cmake ninja gcc gcc-c++ make pkg-config 2>/dev/null || true
-            ;;
-        macos)
-            if command -v brew &>/dev/null; then
-                brew install cmake ninja pkg-config 2>/dev/null || true
-            else
-                warn "Homebrew not found — install cmake and ninja manually for audio.cpp"
-            fi
-            ;;
-        *)
-            warn "No known package manager for '$platform'"
-            warn "Install manually: git cmake ninja clang(or gcc) make pkg-config"
-            ;;
-    esac
+    pkg install -y git cmake ninja clang make pkg-config 2>/dev/null || true
+    # Upstream builds with OpenMP ON by default. Termux ships libomp in its own
+    # `openmp` package rather than inside clang, so without this the configure
+    # step fails on an otherwise fine toolchain.
+    pkg install -y openmp 2>/dev/null || true
 }
 
 # Clone audio.cpp, or update an existing checkout.
@@ -2065,16 +2087,16 @@ install_audio_cpp_termux() {
     if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 3072 )); then
         step_skip "Skipping audio.cpp: needs ~3 GB, only ${free_mb} MB free"
         note_missing "audio.cpp speech runtime (${free_mb} MB free)" \
-            "free up ~3 GB, then: GATHM_INSTALL_AUDIO_CPP=1 ./install"
+            "free up ~3 GB, then re-run ./install"
         return 0
     fi
 
-    _audiocpp_install_build_deps "termux"
+    _audiocpp_install_build_deps
 
     if ! _audiocpp_clone_or_update "$src"; then
         step_fail "audio.cpp clone failed — Pilot will run without voice"
         note_missing "audio.cpp speech runtime" \
-            "git clone $AUDIOCPP_REPO $src && GATHM_INSTALL_AUDIO_CPP=1 ./install"
+            "git clone $AUDIOCPP_REPO $src && ./install"
         return 0
     fi
 
@@ -2109,54 +2131,18 @@ install_audio_cpp_termux() {
     _audiocpp_report_model_status "$src"
 }
 
-# macOS/Linux/WSL: same native build, opt-in only.
-# These platforms keep whatever Python/audio dependencies they already use;
-# audio.cpp is an addition, not a replacement, and a ggml compile is too long
-# to impose on every desktop install by default.
-_install_audio_cpp_native() {
-    local platform="$1"
-    local src; src=$(_audiocpp_src_dir)
-
-    if [[ "$platform" == "windows" ]]; then
-        step_skip "audio.cpp skipped on Windows (needs MSVC Build Tools)"
-        warn "Build manually in a VS 2022 x64 developer prompt, or use WSL."
-        return 0
-    fi
-
-    _audiocpp_install_build_deps "$platform"
-
-    if ! _audiocpp_clone_or_update "$src"; then
-        step_fail "audio.cpp clone failed"
-        note_missing "audio.cpp speech runtime" "git clone $AUDIOCPP_REPO $src"
-        return 0
-    fi
-
-    local t0=$SECONDS
-    if ! _audiocpp_cmake_build "$src"; then
-        step_fail "audio.cpp build failed after $(_format_elapsed $(( SECONDS - t0 )))"
-        note_missing "audio.cpp speech runtime" "see build output in $src/build"
-        return 0
-    fi
-
-    if ! _audiocpp_install_bin "$src"; then
-        step_fail "audiocpp_cli built but could not be installed to $LOCAL_BIN"
-        note_missing "audiocpp_cli on PATH" "cp $src/build/bin/audiocpp_cli $LOCAL_BIN/"
-        return 0
-    fi
-
-    local bin; bin=$(_audiocpp_bin) || true
-    _audiocpp_save_config "$bin" "$src"
-    step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
-    _audiocpp_report_model_status "$src"
-}
-
-# Entry point: decide whether to build audio.cpp, then hand off to the
-# Termux or desktop path.
+# Entry point. Termux only, by design — every other platform is left exactly
+# as it was, with whatever Python/audio dependencies it already uses.
 install_audio_cpp() {
     local platform="$1"
 
+    if ! _is_termux; then
+        step_skip "audio.cpp skipped (Termux only)"
+        return 0
+    fi
+
     # Already have it? Register and move on — this is the fast path that keeps
-    # re-running ./install cheap.
+    # re-running ./install cheap instead of recompiling for an hour.
     local existing; existing=$(_audiocpp_bin) || true
     if [[ -n "$existing" && "${GATHM_AUDIOCPP_FORCE:-0}" != "1" ]]; then
         _audiocpp_save_config "$existing" "$(_audiocpp_src_dir)"
@@ -2165,7 +2151,7 @@ install_audio_cpp() {
         return 0
     fi
 
-    # Explicit opt-out always wins.
+    # Escape hatch for anyone who wants a fast install and no voice.
     if [[ "${GATHM_INSTALL_AUDIO_CPP:-}" == "0" ]]; then
         step_skip "audio.cpp skipped (GATHM_INSTALL_AUDIO_CPP=0)"
         return 0
@@ -2177,16 +2163,7 @@ install_audio_cpp() {
         return 0
     fi
 
-    # Termux builds by default: there is no Python speech stack that works on
-    # Android, so this is voice or nothing. Desktops opt in.
-    if _is_termux; then
-        install_audio_cpp_termux
-    elif [[ "${GATHM_INSTALL_AUDIO_CPP:-}" == "1" ]]; then
-        _install_audio_cpp_native "$platform"
-    else
-        step_skip "audio.cpp not built (optional on $platform)"
-        echo -e "     Enable Pilot voice with: ${BOLD}GATHM_INSTALL_AUDIO_CPP=1 ./install${RESET}"
-    fi
+    install_audio_cpp_termux
 }
 
 # --- Create command shortcuts ---
@@ -2528,15 +2505,13 @@ PY
     elif [[ -n "$audio_bin" ]]; then
         warn "audiocpp_cli found but won't run ($audio_bin)"
         note_missing "audio.cpp speech runtime" \
-            "GATHM_AUDIOCPP_FORCE=1 GATHM_INSTALL_AUDIO_CPP=1 ./install"
+            "GATHM_AUDIOCPP_FORCE=1 ./install"
     elif [[ "$plat" == "termux" ]]; then
         warn "Speech runtime not installed (Pilot runs, just without voice)"
-        note_missing "audio.cpp speech runtime" "GATHM_INSTALL_AUDIO_CPP=1 ./install"
-    else
-        # Optional on desktop — a hint, not a warning, so it stays out of the
-        # "still missing" report for people who never asked for voice.
-        info "Speech runtime not installed (optional: GATHM_INSTALL_AUDIO_CPP=1 ./install)"
+        note_missing "audio.cpp speech runtime" "re-run ./install"
     fi
+    # Off Termux there is nothing to report: audio.cpp is not part of that
+    # install, so a missing binary is the expected state, not a finding.
 
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then

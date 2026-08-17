@@ -73,23 +73,20 @@ cd gathm
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
 
-### Voice (Pilot speech)
+### Voice on Termux (Pilot speech)
 
-Pilot speaks through [audio.cpp](https://github.com/0xShug0/audio.cpp), a native
-C++/ggml speech runtime. It is compiled from source and installed to
-`~/.local/bin/audiocpp_cli` — no Python audio packages are involved, which is
-what makes it work on Termux, where the usual speech wheels cannot load at all.
+On Termux, `./install` builds [audio.cpp](https://github.com/0xShug0/audio.cpp)
+— a native C++/ggml speech runtime — and installs it to
+`~/.local/bin/audiocpp_cli`. No Python audio packages are involved, which is the
+point: the usual speech wheels cannot load on Android at all.
 
-On **Termux** it is built automatically. On **macOS/Linux/WSL** it is opt-in,
-because compiling ggml takes a while and those platforms keep their existing
-Python/audio dependencies:
+This step is **Termux-only**. Other platforms are untouched and keep whatever
+Python/audio dependencies they already use.
 
-```bash
-GATHM_INSTALL_AUDIO_CPP=1 ./install
-```
-
-The build is CPU-only and compiles just the `pocket_tts` family by default.
-Expect 20-60 minutes on a phone; it is skipped on re-runs once installed.
+The build is CPU-only and compiles just the `pocket_tts` family. Expect 20-60
+minutes on a phone; it is skipped on re-runs once installed. Compile
+parallelism is capped by available RAM, since concurrent clang processes
+otherwise get OOM-killed partway through.
 
 Installing the runtime does not download voice weights. Fetch those separately:
 
@@ -101,15 +98,22 @@ Options:
 
 | Variable | Purpose |
 |---|---|
-| `GATHM_INSTALL_AUDIO_CPP` | `1` forces the build, `0` skips it |
+| `GATHM_INSTALL_AUDIO_CPP` | `0` skips the build (fast install, no voice) |
 | `GATHM_AUDIOCPP_SRC` | clone/build location (default `~/.gathm/audio.cpp`) |
 | `GATHM_AUDIOCPP_MODELS` | families to compile, e.g. `pocket_tts,qwen3_asr` |
 | `GATHM_AUDIOCPP_MODEL_SET` | `custom` (default), `full`, or `core` |
 | `GATHM_AUDIOCPP_JOBS` | compile parallelism (auto-capped by available RAM) |
 | `GATHM_AUDIOCPP_FORCE` | `1` rebuilds even if `audiocpp_cli` already exists |
 
-Windows is not built automatically — use WSL, or build in a VS 2022 x64
-developer prompt.
+### LLM model on Termux
+
+Termux is pinned to `gemma3:1b` regardless of how much RAM the phone reports.
+Larger models are not practical on-device: inference is pure CPU, thermal
+throttling starts within a minute, and Android's low-memory killer reaps the
+Ollama server mid-response. An install that previously selected a bigger model
+is migrated down to `gemma3:1b`, and bigger models already on disk are ignored.
+
+Set `GATHM_OLLAMA_MODEL` to override this deliberately.
 
 ## Quick Start
 
