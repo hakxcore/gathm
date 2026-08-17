@@ -1728,13 +1728,26 @@ AUDIOCPP_DEFAULT_MODELS="pocket_tts"
 #       --model models/PocketTTS-GGUF/english --backend cpu \
 #       --voice-id alba --text "..." --out hello.wav
 #
-# The package ships pocket-tts-english-q8_0.gguf plus embeddings/alba.safetensors,
-# and `alba` is its built-in voice — no reference recording needed. Voice
-# cloning uses --voice-ref <wav> instead of --voice-id.
-AUDIOCPP_TTS_PACKAGE="pocket_tts_english_q8_0"
+# All four values come from upstream's model_specs/pocket_tts.json:
+# pocket_tts_english_q8_0 is the family's default package, its target
+# directory is PocketTTS-GGUF/english, and `alba` is the declared default
+# voice. That package ships the .gguf *plus* embeddings/alba.safetensors —
+# which is exactly why the weights must come from the model manager and not a
+# hand-picked .gguf: without the embedding the model loads and has no voice.
+#
+# Voice cloning uses --voice-ref <wav> in place of --voice-id.
+#
+# Overriding the package: the spec also offers bf16, and german/italian/
+# portuguese/spanish variants — but those language packages ship a model file
+# only, with no voice embedding, so --voice-id alba will not resolve against
+# them. pocket_tts_english_safetensors carries 26 voices (alba..vera) if you
+# want a choice of voice later.
+AUDIOCPP_TTS_PACKAGE="${GATHM_AUDIOCPP_TTS_PACKAGE:-pocket_tts_english_q8_0}"
 AUDIOCPP_TTS_FAMILY="pocket_tts"
-AUDIOCPP_TTS_VOICE="alba"
-# Where model_manager_v2.py lands the package, relative to the source tree.
+AUDIOCPP_TTS_VOICE="${GATHM_AUDIOCPP_TTS_VOICE:-alba}"
+# Where model_manager_v2.py lands the default package, relative to the source
+# tree. Only a hint — _audiocpp_model_dir falls back to locating the .gguf, so
+# an overridden package in a different target directory still resolves.
 AUDIOCPP_TTS_MODEL_REL="models/PocketTTS-GGUF/english"
 
 # True on Termux/Android. Prefers the platform detected by main(), falling
@@ -2114,6 +2127,10 @@ _audiocpp_has_model() {
 # which files belong to the package (weights *and* embeddings/alba.safetensors)
 # and puts them in the layout audiocpp_cli expects. Fetching just the .gguf
 # yields a model that loads and then has no voice.
+#
+# model_manager_v2.py is standard-library only — urllib, not requests or
+# huggingface_hub — so this stays consistent with the no-pip rule on Termux. It
+# needs the `python` package and nothing else.
 _audiocpp_install_tts_model() {
     local src="$1"
     local mgr="$src/tools/model_manager_v2.py"
@@ -2158,10 +2175,13 @@ _audiocpp_install_tts_model() {
     fi
 
     info "Downloading voice model $AUDIOCPP_TTS_PACKAGE (a few hundred MB)..."
-    # Run from inside the source tree: the manager resolves models/ relative to
-    # the checkout, and the installer's own cwd is wherever ./install was run.
+    # Run from inside the source tree so the manager finds model_specs/, and pin
+    # the output with --models-root rather than relying on cwd for both.
+    # --progress gives the spinner real download progress to display instead of
+    # a silent multi-hundred-MB wait.
     run_with_spinner "model_manager install $AUDIOCPP_TTS_PACKAGE" -- \
-        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_TTS_PACKAGE'" || true
+        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_TTS_PACKAGE' \
+                    --models-root '$src/models' --progress" || true
 
     if _audiocpp_has_model "$src"; then
         ok "Voice model installed ($(_audiocpp_model_dir "$src"))"
