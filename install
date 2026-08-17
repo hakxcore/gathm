@@ -1721,6 +1721,22 @@ AUDIOCPP_REPO="https://github.com/0xShug0/audio.cpp.git"
 # transcription) via GATHM_AUDIOCPP_MODELS — each one costs build time.
 AUDIOCPP_DEFAULT_MODELS="pocket_tts"
 
+# The voice weights, and how the CLI is invoked to use them. These are the
+# values verified end-to-end on-device:
+#
+#   audiocpp_cli --task tts --family pocket_tts \
+#       --model models/PocketTTS-GGUF/english --backend cpu \
+#       --voice-id alba --text "..." --out hello.wav
+#
+# The package ships pocket-tts-english-q8_0.gguf plus embeddings/alba.safetensors,
+# and `alba` is its built-in voice — no reference recording needed. Voice
+# cloning uses --voice-ref <wav> instead of --voice-id.
+AUDIOCPP_TTS_PACKAGE="pocket_tts_english_q8_0"
+AUDIOCPP_TTS_FAMILY="pocket_tts"
+AUDIOCPP_TTS_VOICE="alba"
+# Where model_manager_v2.py lands the package, relative to the source tree.
+AUDIOCPP_TTS_MODEL_REL="models/PocketTTS-GGUF/english"
+
 # True on Termux/Android. Prefers the platform detected by main(), falling
 # back to detection so this is also correct when called from `--check`.
 _is_termux() {
@@ -1827,14 +1843,18 @@ _audiocpp_clone_or_update() {
     return 1
 }
 
-# Termux-only source patch: make sentencepiece build for Android.
+# Termux-only source patch: make sentencepiece link on Android.
 #
-# audio.cpp vendors sentencepiece, whose CMake turns on an Android build path
-# when __ANDROID__ is defined. Termux is Android by that definition but is a
-# full POSIX userland, not the NDK, so that path compiles against APIs Termux
-# does not have and the build dies in sentencepiece-static. Undefining
-# __ANDROID__ for just that target makes it take the ordinary Linux path,
-# which is the correct one here.
+# audio.cpp vendors sentencepiece, which switches to an Android code path when
+# __ANDROID__ is defined and logs through Android's liblog. Termux is Android
+# by that definition but is a full POSIX userland, not the NDK, and nothing
+# here links liblog — so everything compiles fine and then the final link of
+# audiocpp_cli dies with:
+#
+#   ld.lld: error: undefined symbol: __android_log_write
+#
+# Undefining __ANDROID__ for that one target sends it down the ordinary POSIX
+# path, which is the correct one on Termux, and the symbol never appears.
 #
 # Idempotent: a second run finds the line already present and does nothing.
 # Sets _AUDIOCPP_FRESH_CONFIGURE=1 when it actually changes the file, because
@@ -2031,48 +2051,185 @@ _audiocpp_save_config() {
     echo "$src"      > "$config_dir/audiocpp_src"   2>/dev/null || true
     echo "audio.cpp" > "$config_dir/audio_backend"  2>/dev/null || true
 
-    local env_file="$SCRIPT_DIR/.env"
-    if [[ -f "$env_file" ]]; then
-        if grep -q '^GATHM_AUDIOCPP_BIN=' "$env_file" 2>/dev/null; then
-            sed -i "s|^GATHM_AUDIOCPP_BIN=.*|GATHM_AUDIOCPP_BIN=$bin|" "$env_file" 2>/dev/null || \
-                sed -i '' "s|^GATHM_AUDIOCPP_BIN=.*|GATHM_AUDIOCPP_BIN=$bin|" "$env_file" 2>/dev/null || true
-        else
-            echo "GATHM_AUDIOCPP_BIN=$bin" >> "$env_file"
-        fi
-    else
-        printf 'GATHM_AUDIOCPP_BIN=%s\n' "$bin" > "$env_file"
-    fi
+    # Everything Pilot needs to build a TTS command line, so it never has to
+    # hardcode a family name or guess where the weights went.
+    local model_dir; model_dir=$(_audiocpp_model_dir "$src") || true
+    echo "$AUDIOCPP_TTS_FAMILY" > "$config_dir/audiocpp_family" 2>/dev/null || true
+    echo "$AUDIOCPP_TTS_VOICE"  > "$config_dir/audiocpp_voice"  2>/dev/null || true
+    [[ -n "$model_dir" ]] && { echo "$model_dir" > "$config_dir/audiocpp_model" 2>/dev/null || true; }
+
+    _audiocpp_write_env GATHM_AUDIOCPP_BIN    "$bin"
+    _audiocpp_write_env GATHM_AUDIOCPP_FAMILY "$AUDIOCPP_TTS_FAMILY"
+    _audiocpp_write_env GATHM_AUDIOCPP_VOICE  "$AUDIOCPP_TTS_VOICE"
+    [[ -n "$model_dir" ]] && _audiocpp_write_env GATHM_AUDIOCPP_MODEL "$model_dir"
+
     ok "Speech runtime registered: $bin"
 }
 
-# Is there a voice model on disk? The CLI needs weights before it can speak:
-#   audiocpp_cli --task tts --family <f> --model <path> --text "hi" --out a.wav
-# Weights are a separate, large download, so the installer reports on them
-# instead of silently pulling hundreds of MB.
-_audiocpp_has_model() {
-    local src="$1" d hit
-    for d in "$src/models" "$HOME/.gathm/audio-models" "$HOME/.cache/audio.cpp"; do
-        [[ -d "$d" ]] || continue
-        # `|| true` guards `set -o pipefail`: once head closes the pipe, find
-        # dies of SIGPIPE, which would otherwise fail this check precisely when
-        # there are lots of models to find.
-        hit=$(find "$d" -maxdepth 3 -name '*.gguf' -type f 2>/dev/null | head -1) || true
-        [[ -n "$hit" ]] && return 0
+# Upsert KEY=VALUE in the repo .env (GNU sed first, then BSD's -i '' form).
+_audiocpp_write_env() {
+    local key="$1" value="$2"
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]] && grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || \
+            sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || true
+    else
+        echo "${key}=${value}" >> "$env_file" 2>/dev/null || true
+    fi
+}
+
+# Echo the directory holding the PocketTTS weights, or nothing.
+# model_manager_v2.py installs to models/PocketTTS-GGUF/english, but resolve it
+# by locating the .gguf instead of trusting that layout across versions.
+_audiocpp_model_dir() {
+    local src="$1" hit f
+    # Expected layout first. A for-loop over the glob, not `[[ -f dir/*.gguf ]]`
+    # — inside [[ ]] the pattern is never expanded, so that test can only fail.
+    for f in "$src/$AUDIOCPP_TTS_MODEL_REL"/*.gguf; do
+        if [[ -f "$f" ]]; then
+            echo "$src/$AUDIOCPP_TTS_MODEL_REL"; return 0
+        fi
     done
+    # `|| true` guards `set -o pipefail`: head closing the pipe kills find with
+    # SIGPIPE, which would otherwise fail this precisely when there is a lot to
+    # find.
+    hit=$(find "$src/models" -maxdepth 4 -name '*.gguf' -type f 2>/dev/null | head -1) || true
+    if [[ -n "$hit" ]]; then
+        dirname "$hit"; return 0
+    fi
+    echo ""
     return 1
 }
 
-# Print how to fetch voice weights, and flag it in the install report.
-_audiocpp_report_model_status() {
+# Are the voice weights on disk?
+_audiocpp_has_model() {
+    local src="$1" dir
+    dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$dir" ]]
+}
+
+# Download the PocketTTS weights with the project's own model manager.
+#
+# Deliberately not pip or a hand-rolled curl of the .gguf: the model spec knows
+# which files belong to the package (weights *and* embeddings/alba.safetensors)
+# and puts them in the layout audiocpp_cli expects. Fetching just the .gguf
+# yields a model that loads and then has no voice.
+_audiocpp_install_tts_model() {
     local src="$1"
+    local mgr="$src/tools/model_manager_v2.py"
+
     if _audiocpp_has_model "$src"; then
-        ok "Voice model found — Pilot can speak"
+        ok "Voice model already installed ($(_audiocpp_model_dir "$src"))"
         return 0
     fi
-    warn "No voice model yet — audiocpp_cli is installed but has nothing to speak with."
-    echo -e "     Fetch one with: ${BOLD}python $src/tools/model_manager_v2.py${RESET}"
-    echo -e "     or download a GGUF from ${CYAN}https://huggingface.co/audio-cpp/audio.cpp-gguf${RESET}"
-    note_missing "audio.cpp voice model" "python $src/tools/model_manager_v2.py  (or grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf)"
+
+    if [[ "${GATHM_AUDIOCPP_SKIP_MODEL:-0}" == "1" ]]; then
+        warn "Skipping voice model download (GATHM_AUDIOCPP_SKIP_MODEL=1)"
+        note_missing "audio.cpp voice model" \
+            "python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    if [[ ! -f "$mgr" ]]; then
+        warn "model_manager_v2.py not found at $mgr — cannot fetch the voice model"
+        note_missing "audio.cpp voice model" \
+            "grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf"
+        return 1
+    fi
+
+    local py; py=$(_python_cmd)
+    if [[ -z "$py" ]]; then
+        pkg install -y python 2>/dev/null || true
+        py=$(_python_cmd)
+    fi
+    if [[ -z "$py" ]]; then
+        warn "Python not available — cannot run the model manager"
+        note_missing "audio.cpp voice model" "pkg install python && python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    # Roughly 1 GB of weights; refuse rather than fill the phone.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 1536 )); then
+        warn "Only ${free_mb} MB free — skipping the voice model download (needs ~1.5 GB)"
+        note_missing "audio.cpp voice model (${free_mb} MB free)" \
+            "free up ~1.5 GB, then: python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    info "Downloading voice model $AUDIOCPP_TTS_PACKAGE (a few hundred MB)..."
+    # Run from inside the source tree: the manager resolves models/ relative to
+    # the checkout, and the installer's own cwd is wherever ./install was run.
+    run_with_spinner "model_manager install $AUDIOCPP_TTS_PACKAGE" -- \
+        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_TTS_PACKAGE'" || true
+
+    if _audiocpp_has_model "$src"; then
+        ok "Voice model installed ($(_audiocpp_model_dir "$src"))"
+        return 0
+    fi
+
+    warn "Voice model download did not complete."
+    echo -e "     Retry with: ${BOLD}cd $src && $py tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE${RESET}"
+    note_missing "audio.cpp voice model" \
+        "cd $src && python tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE"
+    return 1
+}
+
+# Synthesize a throwaway WAV to prove the whole chain works: binary links,
+# loaders are compiled in, weights load, the voice resolves, audio comes out.
+# Cheaper to find out here than the first time Pilot tries to talk.
+_audiocpp_smoke_test() {
+    local bin="$1" src="$2"
+    local model_dir; model_dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 1
+
+    local tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; tmp_dir="${tmp_dir:-/tmp}"
+    local out="$tmp_dir/gathm-tts-smoketest.$$.wav"
+    rm -f "$out" 2>/dev/null || true
+
+    info "Testing speech synthesis..."
+    if run_with_spinner "synthesizing a test phrase" -- \
+            "$bin" --task tts \
+                   --family "$AUDIOCPP_TTS_FAMILY" \
+                   --model "$model_dir" \
+                   --backend cpu \
+                   --voice-id "$AUDIOCPP_TTS_VOICE" \
+                   --text "Gathm speech is online." \
+                   --out "$out" \
+        && [[ -s "$out" ]]; then
+        local kb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1024 ))
+        ok "Speech synthesis works (${kb} KB WAV, voice '$AUDIOCPP_TTS_VOICE')"
+        rm -f "$out" 2>/dev/null || true
+        return 0
+    fi
+
+    rm -f "$out" 2>/dev/null || true
+    warn "audiocpp_cli built and weights are present, but synthesis failed."
+    echo -e "     Try manually: ${BOLD}$bin --task tts --family $AUDIOCPP_TTS_FAMILY \\"
+    echo -e "       --model $model_dir --backend cpu --voice-id $AUDIOCPP_TTS_VOICE \\"
+    echo -e "       --text \"hello\" --out hello.wav --metrics${RESET}"
+    note_missing "audio.cpp speech synthesis" "see the manual command above"
+    return 1
+}
+
+# Record the resolved weights directory. Separate from _audiocpp_save_config
+# because that runs right after the build, before the model exists.
+_audiocpp_save_model_path() {
+    local src="$1" model_dir
+    model_dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 0
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$model_dir" > "$HOME/.gathm/audiocpp_model" 2>/dev/null || true
+    _audiocpp_write_env GATHM_AUDIOCPP_MODEL "$model_dir"
+}
+
+# Fetch the weights, record where they landed, then prove the chain end-to-end.
+_audiocpp_setup_voice() {
+    local bin="$1" src="$2"
+    if _audiocpp_install_tts_model "$src"; then
+        _audiocpp_save_model_path "$src"
+        _audiocpp_smoke_test "$bin" "$src" || true
+    fi
 }
 
 # Termux: build audio.cpp natively. This is the only speech path that works
@@ -2128,7 +2285,7 @@ install_audio_cpp_termux() {
     local bin; bin=$(_audiocpp_bin) || true
     _audiocpp_save_config "$bin" "$src"
     step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
-    _audiocpp_report_model_status "$src"
+    _audiocpp_setup_voice "$bin" "$src"
 }
 
 # Entry point. Termux only, by design — every other platform is left exactly
@@ -2147,7 +2304,7 @@ install_audio_cpp() {
     if [[ -n "$existing" && "${GATHM_AUDIOCPP_FORCE:-0}" != "1" ]]; then
         _audiocpp_save_config "$existing" "$(_audiocpp_src_dir)"
         step_done "audio.cpp already installed ($existing)"
-        _audiocpp_report_model_status "$(_audiocpp_src_dir)"
+        _audiocpp_setup_voice "$existing" "$(_audiocpp_src_dir)"
         return 0
     fi
 
@@ -2494,13 +2651,21 @@ PY
     local audio_bin audio_src
     audio_bin=$(_audiocpp_bin) || true
     audio_src=$(_audiocpp_src_dir)
-    if [[ -n "$audio_bin" ]] && "$audio_bin" --help >/dev/null 2>&1; then
+    # --list-loaders is the better probe than --help: it only reports
+    # "pocket_tts: tts (offline)" if the TTS family was actually compiled in.
+    if [[ -n "$audio_bin" ]] \
+            && { "$audio_bin" --list-loaders >/dev/null 2>&1 || "$audio_bin" --help >/dev/null 2>&1; }; then
         ok "Speech runtime (audio.cpp: $audio_bin)"
+        if "$audio_bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY"; then
+            ok "TTS loader compiled in ($AUDIOCPP_TTS_FAMILY)"
+        fi
         # The binary alone cannot speak — it needs weights.
-        if ! _audiocpp_has_model "$audio_src"; then
+        if _audiocpp_has_model "$audio_src"; then
+            ok "Voice model ($(_audiocpp_model_dir "$audio_src"), voice '$AUDIOCPP_TTS_VOICE')"
+        else
             warn "No voice model downloaded yet (Pilot stays silent until one is)"
             note_missing "audio.cpp voice model" \
-                "python $audio_src/tools/model_manager_v2.py  (or a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf)"
+                "cd $audio_src && python tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE"
         fi
     elif [[ -n "$audio_bin" ]]; then
         warn "audiocpp_cli found but won't run ($audio_bin)"

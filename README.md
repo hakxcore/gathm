@@ -83,15 +83,46 @@ point: the usual speech wheels cannot load on Android at all.
 This step is **Termux-only**. Other platforms are untouched and keep whatever
 Python/audio dependencies they already use.
 
-The build is CPU-only and compiles just the `pocket_tts` family. Expect 20-60
-minutes on a phone; it is skipped on re-runs once installed. Compile
-parallelism is capped by available RAM, since concurrent clang processes
-otherwise get OOM-killed partway through.
+The install does four things:
 
-Installing the runtime does not download voice weights. Fetch those separately:
+1. Installs the build toolchain (`clang cmake ninja`, plus `openmp`).
+2. Clones audio.cpp and patches the vendored `sentencepiece` with
+   `-U__ANDROID__`. Without that patch the build compiles for 20-60 minutes and
+   then dies at the final link with
+   `ld.lld: error: undefined symbol: __android_log_write`.
+3. Builds the `audiocpp_cli` target, CPU-only, with just the `pocket_tts`
+   family compiled in. Compile parallelism is capped by available RAM, since
+   concurrent clang processes otherwise get OOM-killed partway through.
+4. Downloads the `pocket_tts_english_q8_0` voice package with the project's own
+   model manager, then synthesizes a throwaway WAV to prove the chain works.
+
+Expect 20-60 minutes for the build on a phone. Everything is skipped on re-runs
+once installed.
+
+Once installed you can speak a phrase directly:
 
 ```bash
-python ~/.gathm/audio.cpp/tools/model_manager_v2.py
+audiocpp_cli \
+  --task tts \
+  --family pocket_tts \
+  --model ~/.gathm/audio.cpp/models/PocketTTS-GGUF/english \
+  --backend cpu \
+  --voice-id alba \
+  --text "Hello from Gathm, running entirely on-device." \
+  --out hello.wav \
+  --metrics
+
+termux-open hello.wav
+```
+
+`alba` is the package's built-in voice, so no reference recording is needed.
+For voice cloning, swap `--voice-id alba` for `--voice-ref your.wav`.
+
+Useful checks:
+
+```bash
+audiocpp_cli --list-loaders   # should list: pocket_tts: tts (offline)
+./install --check             # reports runtime, loader, and voice model
 ```
 
 Options:
@@ -99,11 +130,16 @@ Options:
 | Variable | Purpose |
 |---|---|
 | `GATHM_INSTALL_AUDIO_CPP` | `0` skips the build (fast install, no voice) |
+| `GATHM_AUDIOCPP_SKIP_MODEL` | `1` builds the runtime but skips the weights |
 | `GATHM_AUDIOCPP_SRC` | clone/build location (default `~/.gathm/audio.cpp`) |
 | `GATHM_AUDIOCPP_MODELS` | families to compile, e.g. `pocket_tts,qwen3_asr` |
 | `GATHM_AUDIOCPP_MODEL_SET` | `custom` (default), `full`, or `core` |
 | `GATHM_AUDIOCPP_JOBS` | compile parallelism (auto-capped by available RAM) |
 | `GATHM_AUDIOCPP_FORCE` | `1` rebuilds even if `audiocpp_cli` already exists |
+
+The resolved binary, model directory, family, and voice are written to
+`~/.gathm/audiocpp_*` and to `.env` as `GATHM_AUDIOCPP_BIN`,
+`GATHM_AUDIOCPP_MODEL`, `GATHM_AUDIOCPP_FAMILY`, and `GATHM_AUDIOCPP_VOICE`.
 
 ### LLM model on Termux
 
@@ -256,7 +292,8 @@ Key environment variables:
 - `GATHM_CACHE_DEFAULT_TTL`
 - `GATHM_API_KEY` (API bearer auth)
 - `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
-- `GATHM_AUDIOCPP_BIN` (audio.cpp speech runtime; see [Voice](#voice-pilot-speech))
+- `GATHM_AUDIOCPP_BIN` / `GATHM_AUDIOCPP_MODEL` / `GATHM_AUDIOCPP_FAMILY` / `GATHM_AUDIOCPP_VOICE`
+  (audio.cpp speech runtime on Termux; see [Voice on Termux](#voice-on-termux-pilot-speech))
 - `OMDB_API_KEY` (movie tool)
 - `VT_API_KEY` / `VIRUSTOTAL_API_KEY` (tipcheck VirusTotal)
 - `ABUSEIPDB_API_KEY` (tipcheck AbuseIPDB)
