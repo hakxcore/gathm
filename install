@@ -1613,6 +1613,582 @@ install_playwright_browser() {
     fi
 }
 
+# ── audio.cpp — native speech runtime (lets Pilot talk) ──────────────────
+#
+# audio.cpp is a C++/ggml audio runtime (TTS + ASR):
+#   https://github.com/0xShug0/audio.cpp
+#
+# Why a native build instead of a Python TTS stack:
+#   On Termux there is no working Python option. The usual speech wheels are
+#   either glibc-only native builds that Android's Bionic linker refuses to
+#   load — the same class of breakage we already fight with pydantic-core,
+#   see _termux_use_native_pydantic_core — or Rust extensions with no
+#   aarch64 wheel at all. audio.cpp compiles on-device with clang and needs
+#   no Python at runtime, so the Termux voice path adds ZERO pip packages.
+#   Do not "fix" a failure here by pip-installing pydantic-core or a Python
+#   TTS library; that is the exact trap this path exists to avoid.
+#
+#   Desktop platforms (macOS/Linux/WSL/Windows) keep their existing
+#   Python/audio dependencies untouched. audio.cpp is opt-in there because
+#   compiling ggml from source is a genuinely long step and those platforms
+#   already have working alternatives.
+#
+# The Termux flow, which is the one verified on-device:
+#   pkg build deps
+#        ↓
+#   clone/update audio.cpp
+#        ↓
+#   patch vendored sentencepiece (-U__ANDROID__, or the build fails)
+#        ↓
+#   CMake CPU-only build of the audiocpp_cli target
+#        ↓
+#   ~/.local/bin/audiocpp_cli   (+ ~/.gathm/audiocpp_path for Pilot)
+#        ↓
+#   voice model weights — a separate download, reported not forced
+#
+# Environment knobs (all optional):
+#   GATHM_INSTALL_AUDIO_CPP=1|0    force the build on/off
+#                                  (default: on for Termux, off elsewhere)
+#   GATHM_AUDIOCPP_SRC=DIR         clone/build location
+#   GATHM_AUDIOCPP_MODEL_SET=SET   full | core | custom   (default: custom)
+#   GATHM_AUDIOCPP_MODELS=a,b,c    families to compile when MODEL_SET=custom
+#   GATHM_AUDIOCPP_JOBS=N          compile parallelism
+#   GATHM_AUDIOCPP_FORCE=1         rebuild even if audiocpp_cli already exists
+AUDIOCPP_REPO="https://github.com/0xShug0/audio.cpp.git"
+
+# Speech-only default. Upstream defaults to AUDIOCPP_MODEL_SET=full, which
+# compiles every model family it ships (music generation, voice conversion,
+# separation, …). Pilot only needs to speak, and on a phone that difference is
+# the difference between a build that finishes and one that does not.
+#
+# pocket_tts specifically: this is the configuration that has actually been
+# built and verified on Termux. Add families here (e.g. qwen3_asr for
+# transcription) via GATHM_AUDIOCPP_MODELS — each one costs build time.
+AUDIOCPP_DEFAULT_MODELS="pocket_tts"
+
+# True on Termux/Android. Prefers the platform detected by main(), falling
+# back to detection so this is also correct when called from `--check`.
+_is_termux() {
+    local p="${_GATHM_PLATFORM:-}"
+    [[ -z "$p" ]] && p=$(detect_platform)
+    [[ "$p" == "termux" ]]
+}
+
+# Where audio.cpp is checked out and built.
+# Defaults under ~/.gathm so uninstall knows where to look, but an existing
+# ~/audio.cpp checkout (how this was first done by hand) is reused as-is so
+# nobody re-clones a tree they already have.
+_audiocpp_src_dir() {
+    if [[ -n "${GATHM_AUDIOCPP_SRC:-}" ]]; then
+        echo "$GATHM_AUDIOCPP_SRC"
+    elif [[ -d "$HOME/audio.cpp/.git" ]]; then
+        echo "$HOME/audio.cpp"
+    else
+        echo "$HOME/.gathm/audio.cpp"
+    fi
+}
+
+# Echo a usable audiocpp_cli path, preferring the copy Gathm controls.
+# Returns 1 (and echoes nothing) when there is no binary anywhere.
+_audiocpp_bin() {
+    if [[ -x "$LOCAL_BIN/audiocpp_cli" ]]; then
+        echo "$LOCAL_BIN/audiocpp_cli"; return 0
+    fi
+    if command -v audiocpp_cli &>/dev/null; then
+        command -v audiocpp_cli; return 0
+    fi
+    local built; built="$(_audiocpp_src_dir)/build/bin/audiocpp_cli"
+    if [[ -x "$built" ]]; then
+        echo "$built"; return 0
+    fi
+    echo ""
+    return 1
+}
+
+# Compile parallelism. `nproc` alone is the wrong answer on a phone: ggml's
+# translation units are large, and 8 concurrent clang processes on a 4 GB
+# device get OOM-killed partway through — which surfaces as a random,
+# confusing build failure. Budget ~1.5 GB per job and never exceed the core
+# count.
+_audiocpp_jobs() {
+    if [[ -n "${GATHM_AUDIOCPP_JOBS:-}" ]]; then
+        echo "$GATHM_AUDIOCPP_JOBS"; return 0
+    fi
+
+    local cores jobs ram_mb by_ram
+    cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+    [[ "$cores" =~ ^[0-9]+$ ]] || cores=2
+    jobs="$cores"
+
+    # `|| true`: the detector returns non-zero when it cannot tell, and under
+    # `set -e` a bare assignment from it would abort the whole installer.
+    ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] && (( ram_mb > 0 )); then
+        by_ram=$(( ram_mb / 1500 ))
+        if (( by_ram < 1 )); then by_ram=1; fi
+        if (( by_ram < jobs )); then jobs="$by_ram"; fi
+    fi
+
+    if (( jobs < 1 )); then jobs=1; fi
+    echo "$jobs"
+}
+
+# Toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
+_audiocpp_install_build_deps() {
+    local platform="$1"
+    info "Installing audio.cpp build dependencies..."
+
+    case "$platform" in
+        termux)
+            pkg install -y git cmake ninja clang make pkg-config 2>/dev/null || true
+            # Upstream builds with OpenMP ON by default. Termux ships libomp in
+            # its own `openmp` package rather than inside clang, so without this
+            # the configure step fails on an otherwise fine toolchain.
+            pkg install -y openmp 2>/dev/null || true
+            ;;
+        debian|wsl)
+            sudo apt-get install -y git cmake ninja-build build-essential pkg-config 2>/dev/null || true
+            ;;
+        fedora)
+            sudo dnf install -y git cmake ninja-build gcc gcc-c++ make pkgconf-pkg-config 2>/dev/null || true
+            ;;
+        arch)
+            sudo pacman -Sy --noconfirm git cmake ninja base-devel pkgconf 2>/dev/null || true
+            ;;
+        alpine)
+            # samurai is Alpine's ninja implementation.
+            apk add git cmake samurai build-base pkgconf 2>/dev/null || true
+            ;;
+        opensuse)
+            sudo zypper install -y git cmake ninja gcc gcc-c++ make pkg-config 2>/dev/null || true
+            ;;
+        macos)
+            if command -v brew &>/dev/null; then
+                brew install cmake ninja pkg-config 2>/dev/null || true
+            else
+                warn "Homebrew not found — install cmake and ninja manually for audio.cpp"
+            fi
+            ;;
+        *)
+            warn "No known package manager for '$platform'"
+            warn "Install manually: git cmake ninja clang(or gcc) make pkg-config"
+            ;;
+    esac
+}
+
+# Clone audio.cpp, or update an existing checkout.
+_audiocpp_clone_or_update() {
+    local src="$1"
+
+    if [[ -d "$src/.git" ]]; then
+        info "Updating audio.cpp checkout ($src)..."
+        # --ff-only, never a hard reset: a local checkout may carry the user's
+        # own patches. A failed update is not fatal — whatever is already
+        # checked out still builds.
+        run_with_spinner "git pull (audio.cpp)" -- \
+            git -C "$src" pull --ff-only --recurse-submodules \
+            || warn "Could not update audio.cpp — building the existing checkout"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$src")" 2>/dev/null || true
+    info "Cloning audio.cpp into $src ..."
+    # Shallow, including submodules: ggml is a submodule and the full history
+    # of both is a large download for a build we only ever do once.
+    if run_with_spinner "git clone audio.cpp" -- \
+            git clone --depth 1 --recurse-submodules --shallow-submodules \
+                "$AUDIOCPP_REPO" "$src"; then
+        return 0
+    fi
+
+    warn "git clone failed (audio.cpp)"
+    return 1
+}
+
+# Termux-only source patch: make sentencepiece build for Android.
+#
+# audio.cpp vendors sentencepiece, whose CMake turns on an Android build path
+# when __ANDROID__ is defined. Termux is Android by that definition but is a
+# full POSIX userland, not the NDK, so that path compiles against APIs Termux
+# does not have and the build dies in sentencepiece-static. Undefining
+# __ANDROID__ for just that target makes it take the ordinary Linux path,
+# which is the correct one here.
+#
+# Idempotent: a second run finds the line already present and does nothing.
+# Sets _AUDIOCPP_FRESH_CONFIGURE=1 when it actually changes the file, because
+# CMake's cache has to be discarded after the compile options change.
+_AUDIOCPP_FRESH_CONFIGURE=0
+_audiocpp_patch_termux_sentencepiece() {
+    local src="$1"
+    local spm="$src/external/sentencepiece/src/CMakeLists.txt"
+    local line="target_compile_options(sentencepiece-static PRIVATE -U__ANDROID__)"
+
+    if [[ ! -f "$spm" ]]; then
+        # Upstream moved or vendored it differently — not fatal, the build
+        # either doesn't need the patch anymore or will say so plainly.
+        warn "sentencepiece CMakeLists not found (looked in $spm) — skipping Android patch"
+        return 0
+    fi
+
+    if grep -qF -- "$line" "$spm" 2>/dev/null; then
+        ok "sentencepiece already patched for Termux (-U__ANDROID__)"
+        return 0
+    fi
+
+    local tmp
+    tmp=$(mktemp 2>/dev/null) || tmp="$spm.gathm.tmp"
+    # Insert immediately after the target is declared. Matching only up to
+    # "STATIC" keeps this free of brace/dollar escaping for ${SPM_SRCS}.
+    if awk -v ins="$line" '
+            { print }
+            /add_library\(sentencepiece-static STATIC/ { print ins }
+        ' "$spm" > "$tmp" 2>/dev/null \
+            && grep -qF -- "$line" "$tmp" 2>/dev/null \
+            && mv "$tmp" "$spm" 2>/dev/null; then
+        ok "Patched sentencepiece for Termux (-U__ANDROID__ on sentencepiece-static)"
+        _AUDIOCPP_FRESH_CONFIGURE=1
+        return 0
+    fi
+
+    rm -f "$tmp" 2>/dev/null || true
+    warn "Could not patch sentencepiece — the build may fail in sentencepiece-static."
+    warn "Apply manually, then re-run:"
+    warn "  echo '$line' >> $spm"
+    return 0
+}
+
+# Configure + compile the audiocpp_cli target. CPU only, twice if needed.
+_audiocpp_cmake_build() {
+    local src="$1"
+    local build_dir="$src/build"
+    local jobs; jobs=$(_audiocpp_jobs)
+
+    local model_set="${GATHM_AUDIOCPP_MODEL_SET:-custom}"
+    local models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+
+    # CPU-only, every accelerator off. Gathm never asks audio.cpp for GPU
+    # inference: phones have no usable CUDA/Vulkan path, and a desktop GPU
+    # build would demand a whole toolchain just to speak a sentence.
+    local -a cm_args=(
+        -DCMAKE_BUILD_TYPE=Release
+        -DENGINE_ENABLE_CUDA=OFF
+        -DENGINE_ENABLE_HIP=OFF
+        -DENGINE_ENABLE_VULKAN=OFF
+        -DENGINE_ENABLE_METAL=OFF
+        -DENGINE_BUILD_EXAMPLES=OFF
+        -DENGINE_BUILD_TESTS=OFF
+        -DENGINE_BUILD_WARMBENCH=OFF
+    )
+    if [[ "$model_set" == "custom" ]]; then
+        cm_args+=( -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS="$models" )
+        info "Model families: $models"
+    else
+        cm_args+=( -DAUDIOCPP_MODEL_SET="$model_set" )
+        info "Model set: $model_set"
+    fi
+    # Android needs the vendored sentencepiece patched before anything is
+    # configured, or the build dies in sentencepiece-static.
+    if _is_termux; then
+        _audiocpp_patch_termux_sentencepiece "$src"
+    fi
+
+    # A patch that just landed invalidates CMake's cache: it captured the old
+    # compile options. Discard the build dir so configure genuinely re-runs.
+    if (( _AUDIOCPP_FRESH_CONFIGURE == 1 )) && [[ -d "$build_dir" ]]; then
+        info "Source patched — discarding the stale CMake cache in $build_dir"
+        rm -rf "$build_dir" 2>/dev/null || true
+    fi
+
+    local attempt=1 rc=0
+    while (( attempt <= 2 )); do
+        # Each attempt is strictly more conservative than the last, because a
+        # failed attempt on a phone costs 20-60 minutes — two tries, not a
+        # matrix.
+        local -a tune
+        if (( attempt == 1 )); then
+            # The configuration verified on-device: native-ISA kernels, OpenMP
+            # threading, llamafile SGEMM. Ninja if we have it — the target
+            # graph is large and it schedules better than Make.
+            tune=(
+                -DENGINE_ENABLE_NATIVE_CPU=ON
+                -DENGINE_ENABLE_OPENMP=ON
+                -DENGINE_ENABLE_LLAMAFILE=ON
+            )
+            if command -v ninja &>/dev/null; then
+                tune+=( -G Ninja )
+            fi
+            info "Configuring audio.cpp (CPU, native ISA + OpenMP)..."
+        else
+            # Portable fallback: the three options that actually break on
+            # Android — -march=native is rejected by some clang builds, libomp
+            # may be absent, and llamafile's SGEMM kernels lean on the ISA
+            # detection native-CPU was providing — plus the default generator,
+            # in case Ninja was the problem.
+            warn "Retrying with portable flags (no native ISA, no OpenMP, no llamafile, default generator)..."
+            tune=(
+                -DENGINE_ENABLE_NATIVE_CPU=OFF
+                -DENGINE_ENABLE_OPENMP=OFF
+                -DENGINE_ENABLE_LLAMAFILE=OFF
+            )
+            # Stale cache entries would otherwise pin the failed configuration
+            # (and a generator change requires a clean build dir regardless).
+            rm -rf "$build_dir" 2>/dev/null || true
+        fi
+
+        rc=0
+        run_with_spinner "cmake configure (audio.cpp)" -- \
+            cmake -S "$src" -B "$build_dir" "${cm_args[@]}" "${tune[@]}" || rc=$?
+
+        if (( rc == 0 )); then
+            info "Compiling audiocpp_cli with $jobs parallel job(s) — this is the long part."
+            if _is_termux; then
+                info "On a phone this can take 20-60 min. Keep Termux in the foreground"
+                info "(Android kills background builds) and stay on a charger."
+            fi
+            run_with_spinner "cmake --build (audiocpp_cli)" -- \
+                cmake --build "$build_dir" --parallel "$jobs" --target audiocpp_cli || rc=$?
+        fi
+
+        if (( rc == 0 )) && [[ -x "$build_dir/bin/audiocpp_cli" ]]; then
+            return 0
+        fi
+
+        attempt=$(( attempt + 1 ))
+    done
+
+    return 1
+}
+
+# Put the built binary on PATH at $LOCAL_BIN/audiocpp_cli and confirm it runs.
+_audiocpp_install_bin() {
+    local src="$1"
+    local built="$src/build/bin/audiocpp_cli"
+    local target="$LOCAL_BIN/audiocpp_cli"
+
+    [[ -x "$built" ]] || return 1
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+
+    if ! cp "$built" "$target" 2>/dev/null; then
+        warn "Could not copy audiocpp_cli into $LOCAL_BIN"
+        return 1
+    fi
+    chmod +x "$target" 2>/dev/null || true
+
+    # A copied binary can lose sibling shared objects that live in the build
+    # tree (ggml links statically by default, but a shared build would not).
+    # Verify the copy actually runs; if it doesn't, replace it with a wrapper
+    # that execs the binary in place rather than leave a broken command
+    # on PATH that fails later, mid-conversation.
+    if "$target" --help >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "Copied audiocpp_cli won't run standalone — installing a wrapper instead"
+    cat > "$target" <<EOF
+#!/usr/bin/env bash
+# Gathm wrapper: run audiocpp_cli from its build tree so it can find the
+# shared libraries built alongside it.
+exec "$built" "\$@"
+EOF
+    chmod +x "$target" 2>/dev/null || true
+
+    if "$target" --help >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "audiocpp_cli still won't run — see $src/build for build output"
+    return 1
+}
+
+# Record where the runtime lives so Pilot (and --check) can find it without
+# re-deriving any of this. Mirrors _save_model_config's ~/.gathm + .env split.
+_audiocpp_save_config() {
+    local bin="$1" src="$2"
+    local config_dir="$HOME/.gathm"
+    mkdir -p "$config_dir" 2>/dev/null || true
+    echo "$bin"      > "$config_dir/audiocpp_path"  2>/dev/null || true
+    echo "$src"      > "$config_dir/audiocpp_src"   2>/dev/null || true
+    echo "audio.cpp" > "$config_dir/audio_backend"  2>/dev/null || true
+
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        if grep -q '^GATHM_AUDIOCPP_BIN=' "$env_file" 2>/dev/null; then
+            sed -i "s|^GATHM_AUDIOCPP_BIN=.*|GATHM_AUDIOCPP_BIN=$bin|" "$env_file" 2>/dev/null || \
+                sed -i '' "s|^GATHM_AUDIOCPP_BIN=.*|GATHM_AUDIOCPP_BIN=$bin|" "$env_file" 2>/dev/null || true
+        else
+            echo "GATHM_AUDIOCPP_BIN=$bin" >> "$env_file"
+        fi
+    else
+        printf 'GATHM_AUDIOCPP_BIN=%s\n' "$bin" > "$env_file"
+    fi
+    ok "Speech runtime registered: $bin"
+}
+
+# Is there a voice model on disk? The CLI needs weights before it can speak:
+#   audiocpp_cli --task tts --family <f> --model <path> --text "hi" --out a.wav
+# Weights are a separate, large download, so the installer reports on them
+# instead of silently pulling hundreds of MB.
+_audiocpp_has_model() {
+    local src="$1" d hit
+    for d in "$src/models" "$HOME/.gathm/audio-models" "$HOME/.cache/audio.cpp"; do
+        [[ -d "$d" ]] || continue
+        # `|| true` guards `set -o pipefail`: once head closes the pipe, find
+        # dies of SIGPIPE, which would otherwise fail this check precisely when
+        # there are lots of models to find.
+        hit=$(find "$d" -maxdepth 3 -name '*.gguf' -type f 2>/dev/null | head -1) || true
+        [[ -n "$hit" ]] && return 0
+    done
+    return 1
+}
+
+# Print how to fetch voice weights, and flag it in the install report.
+_audiocpp_report_model_status() {
+    local src="$1"
+    if _audiocpp_has_model "$src"; then
+        ok "Voice model found — Pilot can speak"
+        return 0
+    fi
+    warn "No voice model yet — audiocpp_cli is installed but has nothing to speak with."
+    echo -e "     Fetch one with: ${BOLD}python $src/tools/model_manager_v2.py${RESET}"
+    echo -e "     or download a GGUF from ${CYAN}https://huggingface.co/audio-cpp/audio.cpp-gguf${RESET}"
+    note_missing "audio.cpp voice model" "python $src/tools/model_manager_v2.py  (or grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf)"
+}
+
+# Termux: build audio.cpp natively. This is the only speech path that works
+# on Android, and it must stay pip-free (see the section comment above).
+install_audio_cpp_termux() {
+    local src; src=$(_audiocpp_src_dir)
+
+    # Source tree plus a full ggml build needs real space, and a phone that
+    # runs out mid-compile fails in a way that is tedious to diagnose.
+    # `|| true`: the detector returns non-zero when free space is unknown.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 3072 )); then
+        step_skip "Skipping audio.cpp: needs ~3 GB, only ${free_mb} MB free"
+        note_missing "audio.cpp speech runtime (${free_mb} MB free)" \
+            "free up ~3 GB, then: GATHM_INSTALL_AUDIO_CPP=1 ./install"
+        return 0
+    fi
+
+    _audiocpp_install_build_deps "termux"
+
+    if ! _audiocpp_clone_or_update "$src"; then
+        step_fail "audio.cpp clone failed — Pilot will run without voice"
+        note_missing "audio.cpp speech runtime" \
+            "git clone $AUDIOCPP_REPO $src && GATHM_INSTALL_AUDIO_CPP=1 ./install"
+        return 0
+    fi
+
+    local t0=$SECONDS
+    if ! _audiocpp_cmake_build "$src"; then
+        step_fail "audio.cpp build failed after $(_format_elapsed $(( SECONDS - t0 )))"
+        warn "Build log tail is above. The known-good Termux sequence is:"
+        warn "  cd $src"
+        warn "  echo 'target_compile_options(sentencepiece-static PRIVATE -U__ANDROID__)' \\"
+        warn "    >> external/sentencepiece/src/CMakeLists.txt"
+        warn "  rm -rf build"
+        warn "  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\"
+        warn "    -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_HIP=OFF \\"
+        warn "    -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_METAL=OFF \\"
+        warn "    -DENGINE_ENABLE_NATIVE_CPU=ON -DENGINE_ENABLE_OPENMP=ON \\"
+        warn "    -DENGINE_ENABLE_LLAMAFILE=ON -DAUDIOCPP_MODEL_SET=custom \\"
+        warn "    -DAUDIOCPP_MODELS=pocket_tts"
+        warn "  cmake --build build --target audiocpp_cli -j$(_audiocpp_jobs)"
+        note_missing "audio.cpp speech runtime" "see build output in $src/build"
+        return 0
+    fi
+
+    if ! _audiocpp_install_bin "$src"; then
+        step_fail "audiocpp_cli built but could not be installed to $LOCAL_BIN"
+        note_missing "audiocpp_cli on PATH" "cp $src/build/bin/audiocpp_cli $LOCAL_BIN/"
+        return 0
+    fi
+
+    local bin; bin=$(_audiocpp_bin) || true
+    _audiocpp_save_config "$bin" "$src"
+    step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
+    _audiocpp_report_model_status "$src"
+}
+
+# macOS/Linux/WSL: same native build, opt-in only.
+# These platforms keep whatever Python/audio dependencies they already use;
+# audio.cpp is an addition, not a replacement, and a ggml compile is too long
+# to impose on every desktop install by default.
+_install_audio_cpp_native() {
+    local platform="$1"
+    local src; src=$(_audiocpp_src_dir)
+
+    if [[ "$platform" == "windows" ]]; then
+        step_skip "audio.cpp skipped on Windows (needs MSVC Build Tools)"
+        warn "Build manually in a VS 2022 x64 developer prompt, or use WSL."
+        return 0
+    fi
+
+    _audiocpp_install_build_deps "$platform"
+
+    if ! _audiocpp_clone_or_update "$src"; then
+        step_fail "audio.cpp clone failed"
+        note_missing "audio.cpp speech runtime" "git clone $AUDIOCPP_REPO $src"
+        return 0
+    fi
+
+    local t0=$SECONDS
+    if ! _audiocpp_cmake_build "$src"; then
+        step_fail "audio.cpp build failed after $(_format_elapsed $(( SECONDS - t0 )))"
+        note_missing "audio.cpp speech runtime" "see build output in $src/build"
+        return 0
+    fi
+
+    if ! _audiocpp_install_bin "$src"; then
+        step_fail "audiocpp_cli built but could not be installed to $LOCAL_BIN"
+        note_missing "audiocpp_cli on PATH" "cp $src/build/bin/audiocpp_cli $LOCAL_BIN/"
+        return 0
+    fi
+
+    local bin; bin=$(_audiocpp_bin) || true
+    _audiocpp_save_config "$bin" "$src"
+    step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
+    _audiocpp_report_model_status "$src"
+}
+
+# Entry point: decide whether to build audio.cpp, then hand off to the
+# Termux or desktop path.
+install_audio_cpp() {
+    local platform="$1"
+
+    # Already have it? Register and move on — this is the fast path that keeps
+    # re-running ./install cheap.
+    local existing; existing=$(_audiocpp_bin) || true
+    if [[ -n "$existing" && "${GATHM_AUDIOCPP_FORCE:-0}" != "1" ]]; then
+        _audiocpp_save_config "$existing" "$(_audiocpp_src_dir)"
+        step_done "audio.cpp already installed ($existing)"
+        _audiocpp_report_model_status "$(_audiocpp_src_dir)"
+        return 0
+    fi
+
+    # Explicit opt-out always wins.
+    if [[ "${GATHM_INSTALL_AUDIO_CPP:-}" == "0" ]]; then
+        step_skip "audio.cpp skipped (GATHM_INSTALL_AUDIO_CPP=0)"
+        return 0
+    fi
+
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        step_skip "audio.cpp skipped (offline — the source has to be cloned)"
+        note_missing "audio.cpp speech runtime" "re-run ./install while online"
+        return 0
+    fi
+
+    # Termux builds by default: there is no Python speech stack that works on
+    # Android, so this is voice or nothing. Desktops opt in.
+    if _is_termux; then
+        install_audio_cpp_termux
+    elif [[ "${GATHM_INSTALL_AUDIO_CPP:-}" == "1" ]]; then
+        _install_audio_cpp_native "$platform"
+    else
+        step_skip "audio.cpp not built (optional on $platform)"
+        echo -e "     Enable Pilot voice with: ${BOLD}GATHM_INSTALL_AUDIO_CPP=1 ./install${RESET}"
+    fi
+}
+
 # --- Create command shortcuts ---
 # gathm and gathm-agent: symlinked directly — simpler, always in sync with
 #   the source, and uninstall just removes the links.
@@ -1937,6 +2513,31 @@ PY
         fi
     fi
 
+    # ── Speech runtime (what lets Pilot talk) ──
+    local audio_bin audio_src
+    audio_bin=$(_audiocpp_bin) || true
+    audio_src=$(_audiocpp_src_dir)
+    if [[ -n "$audio_bin" ]] && "$audio_bin" --help >/dev/null 2>&1; then
+        ok "Speech runtime (audio.cpp: $audio_bin)"
+        # The binary alone cannot speak — it needs weights.
+        if ! _audiocpp_has_model "$audio_src"; then
+            warn "No voice model downloaded yet (Pilot stays silent until one is)"
+            note_missing "audio.cpp voice model" \
+                "python $audio_src/tools/model_manager_v2.py  (or a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf)"
+        fi
+    elif [[ -n "$audio_bin" ]]; then
+        warn "audiocpp_cli found but won't run ($audio_bin)"
+        note_missing "audio.cpp speech runtime" \
+            "GATHM_AUDIOCPP_FORCE=1 GATHM_INSTALL_AUDIO_CPP=1 ./install"
+    elif [[ "$plat" == "termux" ]]; then
+        warn "Speech runtime not installed (Pilot runs, just without voice)"
+        note_missing "audio.cpp speech runtime" "GATHM_INSTALL_AUDIO_CPP=1 ./install"
+    else
+        # Optional on desktop — a hint, not a warning, so it stays out of the
+        # "still missing" report for people who never asked for voice.
+        info "Speech runtime not installed (optional: GATHM_INSTALL_AUDIO_CPP=1 ./install)"
+    fi
+
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
         ok "Agent orchestrator"
@@ -1971,8 +2572,23 @@ PY
 uninstall() {
     info "Removing Gathm shortcuts..."
     rm -f "$HOME/.local/bin/gathm" "$HOME/.local/bin/gathm-agent" "$HOME/.local/bin/gathm-api"
+    rm -f "$HOME/.local/bin/audiocpp_cli"
+
+    # The audio.cpp checkout is only deleted when it lives inside ~/.gathm
+    # (the default). A checkout somewhere else — ~/audio.cpp, or a custom
+    # GATHM_AUDIOCPP_SRC — is left alone, since we did not create it.
+    # Either way say which happened: rebuilding costs up to an hour on a phone.
+    local audio_src; audio_src=$(_audiocpp_src_dir)
+    if [[ -d "$audio_src" && "$audio_src" == "$HOME/.gathm/"* ]]; then
+        warn "Deleting the audio.cpp build at $audio_src (a rebuild takes 20-60 min on a phone)"
+    fi
+
     info "Removing data directory..."
     rm -rf "$HOME/.gathm"
+
+    if [[ -d "$audio_src" ]]; then
+        warn "audio.cpp source kept at $audio_src (delete manually to reclaim the space)"
+    fi
     ok "Uninstalled. Source directory not removed: $SCRIPT_DIR"
 }
 
@@ -2026,11 +2642,11 @@ main() {
     # Visible step count. Termux has one extra step (storage permission),
     # which runs first so a permission-grant restart costs no real work.
     # Steps: [storage] connectivity, python, deps, files, ollama, llm-model,
-    # pilot-deps, playwright, shortcuts, verify.
+    # pilot-deps, playwright, audio.cpp, shortcuts, verify.
     if [[ "$platform" == "termux" ]]; then
-        _GATHM_TOTAL_STEPS=11
+        _GATHM_TOTAL_STEPS=12
     else
-        _GATHM_TOTAL_STEPS=10
+        _GATHM_TOTAL_STEPS=11
     fi
 
     # Termux storage permission FIRST: granting it can restart Termux, so we
@@ -2087,6 +2703,12 @@ main() {
     step_begin "Installing Playwright browser engine"
     install_playwright_browser
     step_done "Browser engine ready"
+
+    # Speech runtime (lets Pilot talk). Native C++ on every platform — on
+    # Termux that is the only thing that works, so it runs by default there
+    # and is opt-in elsewhere. Emits its own step_done / step_skip / step_fail.
+    step_begin "Installing audio.cpp (speech runtime)"
+    install_audio_cpp "$platform"
 
     step_begin "Installing shell shortcuts"
     setup_shortcuts "$platform"

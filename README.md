@@ -73,6 +73,44 @@ cd gathm
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
 
+### Voice (Pilot speech)
+
+Pilot speaks through [audio.cpp](https://github.com/0xShug0/audio.cpp), a native
+C++/ggml speech runtime. It is compiled from source and installed to
+`~/.local/bin/audiocpp_cli` — no Python audio packages are involved, which is
+what makes it work on Termux, where the usual speech wheels cannot load at all.
+
+On **Termux** it is built automatically. On **macOS/Linux/WSL** it is opt-in,
+because compiling ggml takes a while and those platforms keep their existing
+Python/audio dependencies:
+
+```bash
+GATHM_INSTALL_AUDIO_CPP=1 ./install
+```
+
+The build is CPU-only and compiles just the `pocket_tts` family by default.
+Expect 20-60 minutes on a phone; it is skipped on re-runs once installed.
+
+Installing the runtime does not download voice weights. Fetch those separately:
+
+```bash
+python ~/.gathm/audio.cpp/tools/model_manager_v2.py
+```
+
+Options:
+
+| Variable | Purpose |
+|---|---|
+| `GATHM_INSTALL_AUDIO_CPP` | `1` forces the build, `0` skips it |
+| `GATHM_AUDIOCPP_SRC` | clone/build location (default `~/.gathm/audio.cpp`) |
+| `GATHM_AUDIOCPP_MODELS` | families to compile, e.g. `pocket_tts,qwen3_asr` |
+| `GATHM_AUDIOCPP_MODEL_SET` | `custom` (default), `full`, or `core` |
+| `GATHM_AUDIOCPP_JOBS` | compile parallelism (auto-capped by available RAM) |
+| `GATHM_AUDIOCPP_FORCE` | `1` rebuilds even if `audiocpp_cli` already exists |
+
+Windows is not built automatically — use WSL, or build in a VS 2022 x64
+developer prompt.
+
 ## Quick Start
 
 ```bash
@@ -214,6 +252,7 @@ Key environment variables:
 - `GATHM_CACHE_DEFAULT_TTL`
 - `GATHM_API_KEY` (API bearer auth)
 - `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
+- `GATHM_AUDIOCPP_BIN` (audio.cpp speech runtime; see [Voice](#voice-pilot-speech))
 - `OMDB_API_KEY` (movie tool)
 - `VT_API_KEY` / `VIRUSTOTAL_API_KEY` (tipcheck VirusTotal)
 - `ABUSEIPDB_API_KEY` (tipcheck AbuseIPDB)
