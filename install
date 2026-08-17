@@ -289,153 +289,33 @@ _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
 
-# Rename .so files from manylinux/musllinux SOABI to the actual Termux SOABI.
-# Usage: _soabi_patch_dir <python_cmd> <directory>
-# e.g.  _soabi_patch_dir "$venv/bin/python3" "/path/to/site-packages/pydantic_core"
-_soabi_patch_dir() {
-    local python_cmd="$1" dir="$2"
-    # Get Termux Python's actual SOABI (e.g. "cpython-313" without arch triplet)
-    local _target_soabi
-    _target_soabi=$("$python_cmd" -c "import sysconfig; print(sysconfig.get_config_var('SOABI') or '')" 2>/dev/null)
-    [[ -z "$_target_soabi" ]] && return 1
-
-    while IFS= read -r f; do
-        local base; base=$(basename "$f")
-        # Match *.cpython-3XX-<arch-triplet>.so and rename to *.<target_soabi>.so
-        if [[ "$base" =~ \.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so$ ]]; then
-            local nf
-            nf=$(echo "$f" | sed -E "s/\.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so/.$_target_soabi.so/")
-            [[ "$f" != "$nf" ]] && mv "$f" "$nf"
-        fi
-    done < <(find "$dir" -name "*.so" 2>/dev/null)
-}
-
-# Stage shared libs that a manylinux wheel bundled in a <pkg>.libs/ directory
-# onto the Termux linker's default search path ($PREFIX/lib), so Bionic can
-# resolve them even though it ignores the wheel's DT_RUNPATH. Also creates the
-# plain libgcc_s.so.1 soname (Termux dropped the standalone `libgcc` package,
-# so nothing else provides it). No-op off Termux or when nothing was bundled.
-#
-# $1 is a root dir to search recursively (a site-packages dir, or the whole
-# venv). Searching by path (not a fixed depth) makes this robust to whichever
-# site-packages the wheel actually landed in.
-_termux_stage_bundled_libs() {
-    local root="$1"
-    [[ -n "${PREFIX:-}" && -d "$PREFIX/lib" && -n "$root" ]] || return 0
-
-    local staged=0 _so
-    # Copy every shared object bundled inside any *.libs/ directory.
-    while IFS= read -r _so; do
-        [[ -f "$_so" ]] || continue
-        cp -f "$_so" "$PREFIX/lib/" 2>/dev/null && staged=$((staged + 1))
-    done < <(find "$root" -path "*.libs/*" -name "*.so*" -type f 2>/dev/null)
-
-    # Ensure the plain libgcc_s.so.1 soname exists (wheels ship it hashed as
-    # libgcc_s-<hash>.so.1; something may DT_NEEDED the unversioned name).
-    if [[ ! -e "$PREFIX/lib/libgcc_s.so.1" ]]; then
-        local _gcc
-        _gcc=$(find "$root" -name "libgcc_s*.so*" -type f 2>/dev/null | head -1)
-        [[ -n "$_gcc" ]] && cp -f "$_gcc" "$PREFIX/lib/libgcc_s.so.1" 2>/dev/null && staged=$((staged + 1))
-    fi
-
-    (( staged > 0 )) && ok "Staged $staged bundled native lib(s) into \$PREFIX/lib (Termux linker path)"
-    return 0
-}
-
-# Rewrite a manylinux extension's library search path to ABSOLUTE dirs Bionic
-# will actually search. Android's linker does NOT expand $ORIGIN in the wheel's
-# DT_RUNPATH, and it does not search $PREFIX/lib for a dlopen'd .so's deps — so
-# staging libgcc alone isn't enough; the .so has to point at an absolute path.
-# We use --force-rpath (DT_RPATH) for the widest Android-linker compatibility.
-# $1 = the .so to patch. Searches for patchelf; no-op if unavailable.
-_termux_patch_rpath() {
-    local so="$1"
-    [[ -f "$so" ]] || return 1
-    if ! command -v patchelf >/dev/null 2>&1; then
-        pkg install -y patchelf >/dev/null 2>&1 || true
-    fi
-    command -v patchelf >/dev/null 2>&1 || return 1
-
-    # Point at $PREFIX/lib (where _termux_stage_bundled_libs copied libgcc) and
-    # the wheel's own .libs dir, both absolute.
-    local rpath="$PREFIX/lib"
-    local libsdir; libsdir=$(dirname "$so")/../$(basename "$(dirname "$so")").libs
-    [[ -d "$libsdir" ]] && rpath="$PREFIX/lib:$(cd "$libsdir" && pwd)"
-    patchelf --force-rpath --set-rpath "$rpath" "$so" 2>/dev/null
-}
-
-# Download, extract, and SOABI-patch pydantic-core for Termux.
-# Called from _create_termux_native_stubs and _repair_pydantic_core_soabi.
-_install_pydantic_core_termux() {
-    local venv="$1" python_cmd="$2" site_packages="$3"
-    local _pc_tmp; _pc_tmp=$(mktemp -d)
-
-    # Detect Python version for pip download flags
-    local _py_majmin _py_ver_nodot
+# Install a Bionic-native Pydantic pair when the Termux package is unavailable.
+# PyPI's manylinux and musllinux wheels target glibc and musl respectively; a
+# renamed extension or copied libgcc cannot turn either into an Android binary.
+# The Termux User Repository publishes Android wheels.  Pin this compatible
+# pair so pip cannot resolve a newer PyPI pydantic-core wheel over it.
+_termux_install_android_pydantic() {
+    local venv="$1" python_cmd="$2"
+    local _py_majmin
     _py_majmin=$("$python_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-    _py_ver_nodot="${_py_majmin:-313}"
+    case "$_py_majmin" in
+        313|314) ;;
+        *)
+            warn "No Android pydantic-core wheel is configured for Python ${_py_majmin:-unknown}"
+            return 1
+            ;;
+    esac
 
-    # Step 1: install pydantic shell (pure Python, no deps) to learn
-    #         the required pydantic-core version from its metadata.
-    "$venv/bin/pip" install "pydantic<3.0.0,>=2.7.4" --no-deps -q 2>/dev/null || true
-    local _pc_ver
-    _pc_ver=$("$python_cmd" -c "
-from importlib.metadata import requires
-for r in (requires('pydantic') or []):
-    if 'pydantic-core' in r:
-        import re; m = re.search(r'pydantic-core==([\d.]+)', r)
-        if m: print(m.group(1)); break
-" 2>/dev/null)
-
-    if [[ -n "$_pc_ver" ]]; then
-        # Step 2: download an aarch64 wheel.
-        # Prefer musllinux: Rust compiles that target with a fully static
-        # runtime (no external libgcc_s.so.1 needed), making it work on
-        # Termux/Android's Bionic libc without additional packages.
-        # Fall back to manylinux if musl isn't available (libgcc pkg covers it).
-        local _whl=""
-        for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
-            if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
-                    --platform "$_plat" \
-                    --python-version "$_py_ver_nodot" --implementation cp --abi "cp${_py_ver_nodot}" \
-                    --only-binary :all: --no-deps -q \
-                    -d "$_pc_tmp" 2>/dev/null; then
-                _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
-                [[ -n "$_whl" ]] && break
-            fi
-        done
-        if [[ -n "$_whl" ]]; then
-            # Step 3: extract and rename SOABI suffix using actual Termux SOABI
-            local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
-            "$python_cmd" -c "
-import zipfile, sys
-with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
-" "$_whl" "$_ext" 2>/dev/null
-            _soabi_patch_dir "$python_cmd" "$_ext"
-            cp -r "$_ext/"* "$site_packages/"
-            # manylinux wheels bundle their shared-lib deps (notably
-            # libgcc_s.so.1) into a pydantic_core.libs/ dir and rely on the
-            # ELF DT_RUNPATH ($ORIGIN/../pydantic_core.libs) to find them at
-            # load time. Android's Bionic linker does not reliably honour that
-            # RUNPATH, so `import pydantic_core` fails with:
-            #   dlopen failed: library "libgcc_s-<hash>.so.1" not found
-            # Copy the bundled libs onto $PREFIX/lib (always searched by the
-            # Termux linker) and expose the plain libgcc_s.so.1 soname. For a
-            # musllinux wheel there is no .libs dir, so this is a no-op.
-            _termux_stage_bundled_libs "$site_packages"
-            # And point the extension's RPATH at those absolute dirs, because
-            # Bionic won't find libgcc via the wheel's $ORIGIN-relative RUNPATH.
-            local _pcso
-            _pcso=$(find "$site_packages/pydantic_core" -name "_pydantic_core*.so" 2>/dev/null | head -1)
-            [[ -n "$_pcso" ]] && _termux_patch_rpath "$_pcso"
-            ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
-        else
-            warn "pydantic-core wheel download failed — pip install will likely fail"
-        fi
-    else
-        warn "Could not determine pydantic-core version from pydantic metadata"
-    fi
-    rm -rf "$_pc_tmp"
+    local _tur_index="https://termux-user-repository.github.io/pypi/"
+    info "Installing Android-native pydantic-core from the Termux User Repository..."
+    # pydantic 2.12.5 and pydantic-core 2.41.5 are version-locked.  The latter
+    # has CPython 3.13/3.14 Android wheels, unlike the current PyPI release.
+    "$venv/bin/pip" install -q --no-deps --upgrade "pydantic==2.12.5" || return 1
+    "$venv/bin/pip" install -q --no-deps --upgrade \
+        --index-url "$_tur_index" --only-binary=:all: "pydantic-core==2.41.5" || return 1
+    # The rest of Pydantic's pure-Python dependencies are resolved with the
+    # Pilot requirements immediately after this pre-install step.
+    "$python_cmd" -c "import pydantic_core" 2>/dev/null
 }
 
 # Switch the venv over to Termux's Bionic-native pydantic / pydantic-core.
@@ -661,19 +541,14 @@ PYEOF
         ok "zstandard stub created (Termux-compatible; trace compression disabled)"
     fi
 
-    # pydantic-core: force manylinux_2_17_aarch64 wheel -------------------
-    # pydantic v2 cannot function without pydantic-core (pure Rust, no Python
-    # fallback).  Termux Python's SOABI is "cpython-312" (no arch suffix), so
-    # pip never selects the pre-built aarch64 wheels and falls through to a
-    # maturin source build which always fails.
-    #
-    # Fix: (1) install pydantic (pure Python) with --no-deps to read its
-    # exact pydantic-core version requirement; (2) download the manylinux
-    # aarch64 wheel for that exact version; (3) extract the wheel and rename
-    # *.cpython-3XX-aarch64-linux-gnu.so → *.cpython-3XX.so so that Termux
-    # Python can dlopen it.
+    # pydantic-core: use an Android/Bionic wheel --------------------------
+    # pydantic v2 has no pure-Python fallback, and PyPI only publishes Linux
+    # (glibc/musl) wheels.  Install a matching Android-native pair before
+    # resolving Pilot's requirements so pip does not replace it with a Linux
+    # build or attempt a Rust source build.
     if ! "$python_cmd" -c "import pydantic_core" 2>/dev/null; then
-        _install_pydantic_core_termux "$venv" "$python_cmd" "$site_packages"
+        _termux_install_android_pydantic "$venv" "$python_cmd" || \
+            warn "Android-native pydantic-core install failed; Pilot dependencies may be unavailable"
     fi
 }
 
@@ -816,8 +691,7 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            # patchelf: used to adjust RPATHs of prebuilt .so files when needed.
-            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 patchelf 2>/dev/null || true
+            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
             # pydantic-core is a Rust extension. PyPI only ships manylinux/musl
             # wheels (glibc/musl) which Android's Bionic linker cannot load at
             # all — so we MUST use Termux's own Bionic-native build. Installing
@@ -834,10 +708,6 @@ install_deps() {
             # Termux ships a prebuilt binding we use it; otherwise the venv gets
             # a pure-Python stub in _create_termux_native_stubs. (zstd = C lib.)
             pkg install -y zstd python-zstandard 2>/dev/null || true
-            # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
-            # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
-            # this ensures manylinux fallback wheels also load correctly.
-            pkg install -y libgcc 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
@@ -1563,6 +1433,9 @@ install_pilot_deps() {
         local tmp_req
         tmp_req=$(mktemp)
         grep -vE "^playwright" "$req_file" > "$tmp_req"
+        # Keep pip from upgrading the Android-native pair selected above to a
+        # newer PyPI Pydantic release whose core wheel is Linux-only.
+        printf '\npydantic==2.12.5\n' >> "$tmp_req"
         if _venv_pip -r "$tmp_req"; then
             ok "Pilot dependencies installed (playwright skipped on Termux)"
         else
@@ -1570,37 +1443,28 @@ install_pilot_deps() {
         fi
         rm -f "$tmp_req"
 
-        # pip may have overwritten SOABI-patched pydantic-core .so files
-        # during dependency resolution, replacing our SOABI-patched copy with a
-        # manylinux/musllinux wheel. Those are glibc/musl binaries that Android's
-        # Bionic linker CANNOT load (it reports the bundled glibc libgcc_s as
-        # "not found"), so the only reliable fix on Termux is the native build.
+        # pydantic-core must be a Bionic-native build.  PyPI's manylinux and
+        # musllinux wheels cannot be repaired by copying their libgcc payload:
+        # they target different C libraries from Android's linker.
         if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
             warn "pydantic-core not loading — switching to Termux-native build..."
             if _termux_use_native_pydantic_core; then
                 ok "pydantic-core now loads (Termux-native build)"
             else
-                # Fallback for environments without the Termux package: try to
-                # make the manylinux wheel's bundled libgcc loadable. This only
-                # works if the wheel can load on Bionic at all.
-                warn "Termux-native pydantic unavailable — trying wheel + libgcc staging..."
-                local _pc_sp
-                _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-                [[ -n "$_pc_sp" ]] && _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
-                _termux_stage_bundled_libs "$GATHM_VENV"
-                local _pcso2
-                _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
-                [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
-                if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-                    ok "pydantic-core now loads"
+                warn "Termux-native pydantic unavailable — installing Android wheel..."
+                _termux_install_android_pydantic "$GATHM_VENV" "$GATHM_VENV/bin/python3" || true
+                if "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null; then
+                    ok "pydantic-core now loads (Android-native wheel)"
                 else
-                    warn "pydantic-core STILL failing to load its native library:"
+                    warn "pydantic-core still cannot load:"
                     "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
-                    warn "Fix manually: pkg install python-pydantic python-pydantic-core"
+                    warn "Fix manually: pip install --index-url https://termux-user-repository.github.io/pypi/ --only-binary=:all: --no-deps pydantic-core==2.41.5"
                 fi
             fi
-        else
+        elif "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null; then
             ok "pydantic-core loads"
+        else
+            warn "pydantic is incomplete after dependency installation"
         fi
 
         # selenium drives the system Chromium on Termux (pure Python, works on aarch64)
@@ -2641,8 +2505,7 @@ verify() {
 
     # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
     # We actually IMPORT each module (not just find_spec) so a native library
-    # that fails to load — e.g. pydantic_core missing libgcc_s.so.1 on Termux —
-    # is caught here instead of only blowing up when Pilot starts.
+    # failure is caught here instead of only blowing up when Pilot starts.
     _init_venv
     local pilot_py="$GATHM_VENV/bin/python3"
     if [[ -x "$pilot_py" ]]; then
