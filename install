@@ -1717,11 +1717,31 @@ _audiocpp_jobs() {
 # Termux toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
 _audiocpp_install_build_deps() {
     info "Installing audio.cpp build dependencies..."
-    pkg install -y git cmake ninja clang make pkg-config 2>/dev/null || true
+    # coreutils supplies `timeout`, used to prevent a stalled Git HTTPS
+    # connection from holding the entire installer forever.
+    pkg install -y git cmake ninja clang make pkg-config coreutils 2>/dev/null || true
     # Upstream builds with OpenMP ON by default. Termux ships libomp in its own
     # `openmp` package rather than inside clang, so without this the configure
     # step fails on an otherwise fine toolchain.
     pkg install -y openmp 2>/dev/null || true
+}
+
+# Run an audio.cpp Git operation with a finite wall-clock deadline.  Android
+# can keep an HTTPS socket half-open indefinitely after a network hand-off;
+# Git then prints only "Cloning into ..." while the spinner runs forever.
+# GIT_TERMINAL_PROMPT=0 also turns an unexpected credential prompt into a
+# normal failure instead of an invisible hang behind the spinner.
+_audiocpp_git() {
+    local limit="${GATHM_AUDIOCPP_GIT_TIMEOUT:-900}"
+    [[ "$limit" =~ ^[0-9]+$ ]] && (( limit > 0 )) || limit=900
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$limit" env GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
+    else
+        env GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
+    fi
 }
 
 # Clone audio.cpp, or update an existing checkout.
@@ -1734,7 +1754,7 @@ _audiocpp_clone_or_update() {
         # own patches. A failed update is not fatal — whatever is already
         # checked out still builds.
         run_with_spinner "git pull (audio.cpp)" -- \
-            git -C "$src" pull --ff-only --recurse-submodules \
+            _audiocpp_git -C "$src" pull --ff-only --recurse-submodules \
             || warn "Could not update audio.cpp — building the existing checkout"
         return 0
     fi
@@ -1744,12 +1764,13 @@ _audiocpp_clone_or_update() {
     # Shallow, including submodules: ggml is a submodule and the full history
     # of both is a large download for a build we only ever do once.
     if run_with_spinner "git clone audio.cpp" -- \
-            git clone --depth 1 --recurse-submodules --shallow-submodules \
+            _audiocpp_git clone --depth 1 --recurse-submodules --shallow-submodules \
                 "$AUDIOCPP_REPO" "$src"; then
         return 0
     fi
 
-    warn "git clone failed (audio.cpp)"
+    warn "git clone failed or timed out (audio.cpp; default limit: 15 min)"
+    warn "Set GATHM_AUDIOCPP_GIT_TIMEOUT=1800 to allow a 30-minute download"
     return 1
 }
 
