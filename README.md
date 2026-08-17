@@ -143,13 +143,26 @@ The resolved binary, model directory, family, and voice are written to
 
 ### LLM model on Termux
 
-Termux is pinned to `gemma3:1b` regardless of how much RAM the phone reports.
-Larger models are not practical on-device: inference is pure CPU, thermal
-throttling starts within a minute, and Android's low-memory killer reaps the
-Ollama server mid-response. An install that previously selected a bigger model
-is migrated down to `gemma3:1b`, and bigger models already on disk are ignored.
+Termux uses its own two-step ladder instead of the desktop RAM tiers, because
+on Android inference is pure CPU, thermal throttling starts within a minute, and
+the low-memory killer reaps the Ollama server mid-response:
 
-Set `GATHM_OLLAMA_MODEL` to override this deliberately.
+| Phone RAM (`MemTotal`) | Model |
+|---|---|
+| under 11 GB | `gemma3:1b` |
+| 11 GB and above | `gemma3:4b` |
+
+The floor is 11 GB rather than 12 because `MemTotal` reports what the kernel can
+allocate, not the marketed capacity — a phone sold as 12 GB reads back around
+11.0-11.7 GB. A strict 12 GB test would never match one. 11 GB still sits well
+clear of an 8 GB phone (~7.2-7.6 GB) and a 10 GB one (~9.3 GB).
+
+An install that previously selected a bigger model is migrated down, and models
+already on disk that exceed the tier are ignored rather than reused. Unknown RAM
+falls to `gemma3:1b`.
+
+Override with `GATHM_OLLAMA_MODEL` for a specific model, or
+`GATHM_TERMUX_LARGE_MIN_RAM_MB` to move the 4b threshold.
 
 ## Quick Start
 

@@ -1162,24 +1162,50 @@ _detect_total_ram_mb() {
     return 1
 }
 
-# The only Ollama model Gathm uses on Termux.
+# The Ollama models Gathm will use on Termux.
 #
-# Phones report plenty of RAM — 8-12 GB is common — so the RAM tiers below
-# would happily pick gemma3:4b or llama3.1:8b. On Android that is a bad trade
-# regardless of what /proc/meminfo says: inference is pure CPU, thermal
-# throttling hits within a minute, and Android's low-memory killer reaps the
-# Ollama server mid-response. gemma3:1b is the one that stays usable, so
-# Termux is pinned to it rather than sized by RAM.
-GATHM_TERMUX_MODEL="gemma3:1b"
+# Android inference is pure CPU, thermal throttling starts within a minute, and
+# the low-memory killer reaps the Ollama server mid-response — so the desktop
+# RAM tiers below are far too generous here. Termux gets its own two-step
+# ladder: gemma3:1b everywhere, and gemma3:4b only on a genuinely large phone.
+GATHM_TERMUX_MODEL_SMALL="gemma3:1b"
+GATHM_TERMUX_MODEL_LARGE="gemma3:4b"
+
+# RAM floor for the 4b model, in MB. Deliberately 11000 and not 12288: MemTotal
+# reports what the kernel can allocate, not the marketed capacity, so a phone
+# sold as 12 GB reads back around 11.0-11.7 GB once firmware and kernel
+# reservations are taken out. Comparing against a strict 12288 would never match
+# a 12 GB device. 11000 still sits well clear of an 8 GB phone (~7.2-7.6 GB) and
+# a 10 GB one (~9.3 GB).
+GATHM_TERMUX_LARGE_MIN_RAM_MB="${GATHM_TERMUX_LARGE_MIN_RAM_MB:-11000}"
+
+# Echo the Termux model appropriate to this phone's RAM.
+# Unknown RAM deliberately falls to the small model — on a phone the cost of
+# guessing high is an unusable install, and guessing low is a smaller download.
+_termux_model_for_ram() {
+    local ram_mb
+    ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] \
+            && (( ram_mb >= GATHM_TERMUX_LARGE_MIN_RAM_MB )); then
+        echo "$GATHM_TERMUX_MODEL_LARGE"
+    else
+        echo "$GATHM_TERMUX_MODEL_SMALL"
+    fi
+}
+
+# True when this phone qualifies for the larger Termux model.
+_termux_wants_large_model() {
+    [[ "$(_termux_model_for_ram)" == "$GATHM_TERMUX_MODEL_LARGE" ]]
+}
 
 # Pick an Ollama model tag based on system RAM.
 # Conservative tiers — assumes pure CPU inference and leaves headroom
 # for the OS.  Override at any time by writing $HOME/.gathm/model or
 # setting GATHM_OLLAMA_MODEL in the env before running ./install.
 _recommend_model_for_hardware() {
-    # Termux ignores the RAM tiers entirely — see GATHM_TERMUX_MODEL above.
+    # Termux uses its own ladder, not these tiers — see above.
     if _is_termux; then
-        echo "$GATHM_TERMUX_MODEL"
+        _termux_model_for_ram
         return 0
     fi
 
@@ -1286,13 +1312,18 @@ _pull_ollama_model() {
     fi
 
     # ── 3. Pick the best model from what is already on disk ───────────
-    # On Termux, only 1b-class models are actually usable. The priority list
-    # below leads with llama3.x, so without this filter a phone that still has
-    # an 8b model from an older install would "fall back" to the very thing
-    # that gets OOM-killed mid-response.
+    # The priority list below leads with llama3.x, so without this filter a
+    # phone that still has an 8b model from an older install would "fall back"
+    # to the very thing that gets OOM-killed mid-response. What counts as
+    # acceptable tracks the same RAM rule as a fresh pull: 4b only on a large
+    # phone, 1b-class otherwise.
     if [[ -n "$pulled_models" ]] && _is_termux; then
+        local ok_sizes=':(0\.5b|1b|1\.5b|2b)$'
+        if _termux_wants_large_model; then
+            ok_sizes=':(0\.5b|1b|1\.5b|2b|3b|4b)$'
+        fi
         local small_models
-        small_models=$(echo "$pulled_models" | grep -iE ':(0\.5b|1b|1\.5b|2b)$' || true)
+        small_models=$(echo "$pulled_models" | grep -iE "$ok_sizes" || true)
         if [[ -n "$small_models" ]]; then
             local small_match
             small_match=$(echo "$small_models" | head -1)
@@ -1300,7 +1331,7 @@ _pull_ollama_model() {
             _save_model_config "$small_match"
             return 0
         fi
-        warn "Already-pulled models are all too large for Termux — ignoring them"
+        warn "Already-pulled models are all too large for this phone — ignoring them"
         pulled_models=""
     fi
 
@@ -1333,10 +1364,10 @@ _pull_ollama_model() {
     fi
 
     # ── 4. Nothing available — pull the minimal default ──
-    # Termux gets the 1b model here too; gemma3:4b is the desktop default.
+    # Termux picks by RAM; gemma3:4b is the desktop default.
     local default_model="gemma3:4b"
     if _is_termux; then
-        default_model="$GATHM_TERMUX_MODEL"
+        default_model=$(_termux_model_for_ram)
     fi
     info "No local models found. Pulling $default_model as default (this may take a few minutes)..."
     if ollama pull "$default_model" 2>/dev/null; then
@@ -1351,7 +1382,7 @@ _pull_ollama_model() {
 # --- Pick a local model and pull it ---
 # Selection priority (highest wins):
 #   1. GATHM_OLLAMA_MODEL env var (explicit override)
-#   2. GATHM_TERMUX_MODEL        (Termux is pinned; bigger models are unusable)
+#   2. Termux RAM ladder         (1b, or 4b only on an 11 GB+ phone)
 #   3. $HOME/.gathm/model        (sticky choice from a previous run)
 #   4. _recommend_model_for_hardware (RAM-tier heuristic)
 select_and_pull_llm_model() {
@@ -1374,17 +1405,19 @@ select_and_pull_llm_model() {
         recommended="$GATHM_OLLAMA_MODEL"
         info "Using model from GATHM_OLLAMA_MODEL: $recommended"
     elif _is_termux; then
-        # Pinned, and deliberately ahead of the saved-model check: an install
-        # from before this pin existed may have left a 4b/8b tag in
+        # Chosen here, deliberately ahead of the saved-model check: an install
+        # from before this rule existed may have left a 4b/8b tag in
         # ~/.gathm/model, and reusing that is the thing we are preventing.
-        recommended="$GATHM_TERMUX_MODEL"
+        recommended=$(_termux_model_for_ram)
+        local _ram_mb; _ram_mb=$(_detect_total_ram_mb) || true
+        # State the decision and its inputs out loud: when this picks the
+        # "wrong" model, the RAM reading is the first thing worth seeing.
+        info "Termux: ${_ram_mb:-?} MB RAM (4b needs ${GATHM_TERMUX_LARGE_MIN_RAM_MB}+) → $recommended"
         local _prev=""
         [[ -s "$HOME/.gathm/model" ]] && \
             _prev=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
         if [[ -n "$_prev" && "$_prev" != "$recommended" ]]; then
-            warn "Replacing previously-selected '$_prev' with $recommended (Termux runs 1b models only)"
-        else
-            info "Termux: using $recommended"
+            warn "Replacing previously-selected '$_prev' with $recommended"
         fi
     elif [[ -s "$HOME/.gathm/model" ]]; then
         recommended=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
