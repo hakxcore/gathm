@@ -133,8 +133,9 @@ MIME_TYPES = {
 # When set, all requests must include: Authorization: Bearer <key>
 # Health and root endpoints are exempt.
 GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
-PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
-# GUI static files are also public (any path not starting with /api/)
+# NOTE: PUBLIC_PATHS lives next to the auth logic below. It used to be defined
+# here as well, and that earlier copy was silently shadowed by the later one --
+# so entries added here (notably /api/v1/ping) never took effect.
 
 import hashlib
 import secrets
@@ -219,8 +220,9 @@ def _build_token_map() -> dict[str, str]:
 TOKEN_MAP: dict[str, str] = _build_token_map()
 AUTH_ENABLED = bool(TOKEN_MAP)
 
-# Public paths that skip auth entirely
-PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health"}
+# Public paths that skip auth entirely.
+# GUI static files are also public (any path not starting with /api/).
+PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
 
 def resolve_role(request: Request) -> str | None:
     """Return the role for the request's bearer token, or None if unauthenticated."""
@@ -963,6 +965,17 @@ async def cancel_job(job_id: str, request: Request):
 # Routes: API info
 # ---------------------------------------------------------------------------
 
+@app.get("/api/v1/ping", tags=["meta"])
+async def ping():
+    """Cheap liveness probe.
+
+    The GUI polls this every 30s for its Online/Offline badge and falls back to
+    /api/v1/tools when it 404s. That fallback shells out to enumerate every
+    tool, so a missing /ping meant a full tool scan twice a minute on a phone
+    (plus a 404 in the log each time). Deliberately does no work.
+    """
+    return {"status": "ok", "service": "gathm-api", "version": API_VERSION}
+
 @app.get("/api/v1", tags=["meta"])
 @app.get("/api", tags=["meta"])
 async def api_info():
@@ -975,6 +988,7 @@ async def api_info():
             "GET /api/v1/tools": "List all tools",
             "GET /api/v1/tools/{name}": "Get tool metadata",
             "POST /api/v1/tools/{name}/execute": "Execute a tool (synchronous)",
+            "GET /api/v1/ping": "Liveness probe (public)",
             "GET /api/v1/health": "System health check (public)",
             "GET /api/v1/health/{tool}": "Tool health check",
             "POST /api/v1/agent/ask": "Natural language query",

@@ -57,6 +57,47 @@ def _read_request() -> dict:
     return {}
 
 
+def _describe_failure(exc: BaseException) -> str:
+    """Turn a raw agent exception into something the user can act on.
+
+    A dead Ollama server surfaced as bare "agent error: [Errno 111]
+    Connection refused", which says nothing about what to start. Walk the
+    exception chain looking for a refused/unreachable connection and name the
+    server and the fix instead.
+    """
+    seen = []
+    cur: BaseException | None = exc
+    while cur is not None and len(seen) < 10:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+
+    text = " | ".join("%s: %s" % (type(e).__name__, e) for e in seen).lower()
+    refused = (
+        "errno 111" in text
+        or "connection refused" in text
+        or "connectionerror" in text
+        or "failed to establish a new connection" in text
+        or "max retries exceeded" in text
+        or "all connection attempts failed" in text
+        or "cannot connect to host" in text
+    )
+    if not refused:
+        return "agent error: %s" % exc
+
+    backend = os.environ.get("GATHM_LLM_BACKEND", "ollama")
+    if backend == "ollama":
+        url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        host = url.split("/v1")[0]
+        return (
+            "cannot reach the Ollama server at %s — it is not running. "
+            "Start it with:  ollama serve  (then retry)" % host
+        )
+    return (
+        "cannot reach the %s LLM backend — the connection was refused. "
+        "Check that it is running and reachable." % backend
+    )
+
+
 def main() -> int:
     req = _read_request()
     query = (req.get("query") or "").strip()
@@ -99,7 +140,7 @@ def main() -> int:
                 if key == "agent" and value.get("next_step") == "end":
                     reply = value["messages"][-1].content
     except Exception as exc:  # noqa: BLE001
-        return _emit({"error": f"agent error: {exc}"}, 3)
+        return _emit({"error": _describe_failure(exc)}, 3)
 
     return _emit({
         "reply": reply or "(no response)",
