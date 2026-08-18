@@ -464,44 +464,93 @@ PYEOF
     fi
 
     # ormsgpack stub ---------------------------------------------------------
-    # langgraph-checkpoint uses ormsgpack for checkpoint serialization.
-    # pickle provides consistent serialization within a session.
-    if [[ ! -d "$site_packages/ormsgpack" ]]; then
+    # langgraph-checkpoint uses ormsgpack for checkpoint serialization; pickle
+    # gives consistent serialization within a session.
+    #
+    # The OPT_* constants are the fragile part. An earlier version of this stub
+    # listed the ones that seemed to be in use, and langgraph then reached for
+    # one that was not there:
+    #
+    #   AttributeError: module 'ormsgpack' has no attribute
+    #                   'OPT_PASSTHROUGH_DATACLASS'
+    #
+    # Enumerating them is a losing game — any langgraph release can reference a
+    # new flag. A module-level __getattr__ now mints any unknown OPT_* on
+    # demand. That is safe precisely because packb ignores `option` entirely
+    # (it pickles), so the values only need to exist and be OR-able ints.
+    #
+    # Guarded on the marker file rather than on the directory: a phone carrying
+    # the older constant-listing stub has to be repaired, not skipped.
+    if [[ ! -f "$site_packages/ormsgpack/_gathm_stub_marker" ]]; then
         mkdir -p "$site_packages/ormsgpack"
         cat > "$site_packages/ormsgpack/__init__.py" << 'PYEOF'
 # Termux stub: ormsgpack Rust extension cannot compile on Android/aarch64.
 # Uses pickle for in-session checkpoint serialization.
+import itertools as _itertools
 import pickle as _pickle
 
-OPT_NON_STR_KEYS      = 1
-OPT_SERIALIZE_UUID     = 2
-OPT_OMIT_MICROSECONDS  = 4
-OPT_NAIVE_DATETIME     = 8
-OPT_UTC_Z              = 16
+# Known flags keep their documented bit positions, for anything that inspects
+# them. Values are otherwise irrelevant here: packb ignores `option`.
+OPT_NON_STR_KEYS           = 1
+OPT_SERIALIZE_UUID         = 2
+OPT_OMIT_MICROSECONDS      = 4
+OPT_NAIVE_DATETIME         = 8
+OPT_UTC_Z                  = 16
 OPT_PASSTHROUGH_DATETIME   = 32
 OPT_PASSTHROUGH_SUBCLASS   = 64
-OPT_INDENT_2           = 128
-OPT_SORT_KEYS          = 256
+OPT_INDENT_2               = 128
+OPT_SORT_KEYS              = 256
+OPT_PASSTHROUGH_BIG_INT    = 512
+OPT_PASSTHROUGH_DATACLASS  = 1024
+OPT_PASSTHROUGH_TUPLE      = 2048
+OPT_SERIALIZE_NUMPY        = 4096
+OPT_SERIALIZE_PYDANTIC     = 8192
+
+# Any OPT_* this stub has not heard of gets a fresh distinct bit on first
+# access, so a newer langgraph cannot break the import with an AttributeError.
+_next_bit = _itertools.count(14)   # first free bit above the constants above
+
+
+def __getattr__(name):
+    if name.startswith("OPT_"):
+        value = 1 << next(_next_bit)
+        globals()[name] = value
+        return value
+    raise AttributeError("module 'ormsgpack' has no attribute %r" % name)
+
 
 def packb(obj, *, option=None, default=None):
     return _pickle.dumps(obj, protocol=_pickle.HIGHEST_PROTOCOL)
 
+
 def unpackb(data, *, option=None):
     return _pickle.loads(data)
+
+
+class MsgpackEncodeError(TypeError):
+    pass
+
+
+class MsgpackDecodeError(ValueError):
+    pass
 PYEOF
+        : > "$site_packages/ormsgpack/_gathm_stub_marker"
         _write_stub_distinfo "$site_packages" "ormsgpack" "1.12.2" "ormsgpack"
-        ok "ormsgpack stub created (pure Python, Termux-compatible)"
+        ok "ormsgpack stub created (pickle-backed, tolerates unknown OPT_* flags)"
     fi
 
     # orjson stub ------------------------------------------------------------
     # langgraph-sdk requires orjson for JSON serialization.
     # stdlib json provides the same interface; orjson.dumps returns bytes so
     # we encode accordingly.
-    if [[ ! -d "$site_packages/orjson" ]]; then
+    # Same OPT_* fragility and the same marker-file guard as the ormsgpack stub
+    # above, for the same reason: an unknown flag must not raise AttributeError.
+    if [[ ! -f "$site_packages/orjson/_gathm_stub_marker" ]]; then
         mkdir -p "$site_packages/orjson"
         cat > "$site_packages/orjson/__init__.py" << 'PYEOF'
 # Termux stub: orjson Rust extension cannot compile on Android/aarch64.
 # Wraps stdlib json with the same bytes-oriented API.
+import itertools as _itertools
 import json as _json
 
 OPT_NON_STR_KEYS    = 1
@@ -516,8 +565,28 @@ OPT_PASSTHROUGH_DATETIME   = 256
 OPT_PASSTHROUGH_SUBCLASS   = 512
 OPT_OMIT_MICROSECONDS      = 1024
 OPT_SERIALIZE_DATACLASS    = 2048
+OPT_APPEND_NEWLINE         = 4096
+OPT_PASSTHROUGH_BIG_INT    = 8192
+
+# Mint any unknown OPT_* on demand rather than raising AttributeError. Only
+# OPT_INDENT_2 and OPT_SORT_KEYS change behaviour below, so an unrecognised
+# flag is harmless as long as it exists.
+_next_bit = _itertools.count(14)
+
+
+def __getattr__(name):
+    if name.startswith("OPT_"):
+        value = 1 << next(_next_bit)
+        globals()[name] = value
+        return value
+    raise AttributeError("module 'orjson' has no attribute %r" % name)
+
 
 class JSONDecodeError(ValueError):
+    pass
+
+
+class JSONEncodeError(TypeError):
     pass
 
 def dumps(obj, default=None, option=None) -> bytes:
@@ -534,8 +603,9 @@ def loads(data) -> object:
     except _json.JSONDecodeError as exc:
         raise JSONDecodeError(str(exc)) from exc
 PYEOF
+        : > "$site_packages/orjson/_gathm_stub_marker"
         _write_stub_distinfo "$site_packages" "orjson" "3.11.7" "orjson"
-        ok "orjson stub created (pure Python, Termux-compatible)"
+        ok "orjson stub created (json-backed, tolerates unknown OPT_* flags)"
     fi
 
     # zstandard stub ---------------------------------------------------------

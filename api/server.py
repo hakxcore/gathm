@@ -661,6 +661,11 @@ class ExecuteRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
 
+class ChatRequest(BaseModel):
+    """GUI chat turn. `history` is prior turns as {"role", "content"} dicts."""
+    query: str
+    history: list = []
+
 class TaskRequest(BaseModel):
     task: str
 
@@ -772,6 +777,23 @@ async def agent_ask(body: QueryRequest, request: Request):
     if not role_has_permission(role, "tool:execute"):
         raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
     return await run_agent_command("ask", body.query)
+
+@app.post("/api/v1/agent/chat", tags=["agent"])
+async def agent_chat(body: ChatRequest, request: Request):
+    """Talk to the real Pilot LLM agent for one turn, with history.
+
+    run_chat_agent() and pilot/chat_once.py were both written for this route,
+    but the route itself was never registered — so the GUI's POST fell through
+    to the StaticFiles mount at "/", which only serves GET/HEAD, and came back
+    405 Method Not Allowed instead of a reply.
+
+    Runs in a thread: run_chat_agent uses blocking subprocess.run, and calling
+    it directly here would stall the event loop for the whole turn.
+    """
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await asyncio.to_thread(run_chat_agent, body.query, body.history)
 
 @app.post("/api/v1/agent/plan", tags=["agent"])
 async def agent_plan(body: TaskRequest, request: Request):
