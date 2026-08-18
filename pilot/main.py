@@ -408,9 +408,58 @@ def _require_langchain_runtime() -> None:
             "Install pilot/requirements.txt and retry" + detail
         )
 
+# Messages that never need a tool. Kept deliberately tight: the whole message
+# must be small talk, so "hi" matches but "hi, what is AAPL trading at" does not.
+_SMALL_TALK = {
+    "hi", "hii", "hiii", "hey", "heyy", "hello", "helo", "yo", "sup",
+    "hi there", "hello there", "hey there", "good morning", "good afternoon",
+    "good evening", "good night", "gm", "gn",
+    "thanks", "thank you", "thx", "ty", "cheers", "nice", "cool", "ok", "okay",
+    "bye", "goodbye", "see you", "who are you", "what are you", "what can you do",
+    "how are you", "how are you?", "what's up", "whats up",
+}
+
+
+def _is_small_talk(text: str) -> bool:
+    """True when the entire message is a greeting or pleasantry."""
+    cleaned = re.sub(r"[^\w\s']", "", (text or "")).strip().lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned or len(cleaned) > 24:
+        return False
+    return cleaned in _SMALL_TALK
+
+
+# Short prompt for small talk: no tool list at all.
+#
+# The full prompt lists every tool plus 14 numbered rules, and rule 0 already
+# says not to call a tool for a greeting. A 1B model on a phone cannot reliably
+# honour that — "hi" came back as a stocks lookup reciting a 2023 AAPL price,
+# because the rules mention "For company STOCKS (Apple, Google)". Removing the
+# tools from the prompt makes the misroute structurally impossible instead of
+# merely forbidden, and the far shorter prompt is markedly faster on-device.
+_SMALL_TALK_PROMPT = """You are Pilot, a friendly AI assistant for the Gathm ecosystem.
+Reply to the user conversationally in one or two short sentences.
+Do not mention tools, actions, or your own instructions. Plain text only."""
+
+
 # System prompt for models without native tool support
 def call_model(state: AgentState):
     _require_langchain_runtime()
+
+    # Small talk never needs a tool. Answer with the short prompt and finish,
+    # skipping tool discovery and the long rule list entirely.
+    _last = ""
+    for _m in reversed(state.get("messages") or []):
+        if isinstance(_m, HumanMessage):
+            _last = str(getattr(_m, "content", "") or "")
+            break
+    if _is_small_talk(_last):
+        from langchain_core.messages import AIMessage as _AIMsg
+        _llm = _build_llm()
+        _resp = _llm.invoke([HumanMessage(content=_SMALL_TALK_PROMPT),
+                             HumanMessage(content=_last)])
+        _text = _clean_agent_response(_resp.content)
+        return {"messages": [_AIMsg(content=_text)], "next_step": "end"}
 
     # Re-discover tools to ensure we have the latest descriptions
     available_tools = discover_tools()

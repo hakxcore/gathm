@@ -388,13 +388,23 @@ def _pilot_python() -> str:
             return str(c)
     return sys.executable  # last resort (may lack langchain → handled gracefully)
 
-def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict:
+# One agent turn on a phone is slow: CPU-only inference, a long tool-routing
+# prompt, and LangGraph on top. 180s was not enough — the GUI reported "agent
+# timed out" on a Termux device that was still working. This is only a ceiling,
+# so a generous value costs nothing when the reply is fast.
+CHAT_TIMEOUT = int(os.environ.get("GATHM_CHAT_TIMEOUT", "600"))
+
+
+def run_chat_agent(query: str, history: list = None, timeout: int | None = None) -> dict:
     """Run the real Pilot LLM agent for one turn and return its reply.
 
     Shells out to pilot/chat_once.py using the Pilot venv's Python so the
     stdlib-only API server stays dependency-free. Returns {"reply": ...} on
     success, or {"error": ...} which the caller can fall back on.
     """
+    if timeout is None:
+        timeout = CHAT_TIMEOUT
+
     if not CHAT_SCRIPT.exists():
         return {"error": "chat agent not installed (pilot/chat_once.py missing)"}
 
@@ -410,7 +420,12 @@ def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict
             env={**os.environ},
         )
     except subprocess.TimeoutExpired:
-        return {"error": f"agent timed out after {timeout}s"}
+        return {"error": (
+            f"the agent did not finish within {timeout}s. On a phone this "
+            "usually means the model is just slow rather than stuck — try a "
+            "shorter question, or raise the ceiling with "
+            "GATHM_CHAT_TIMEOUT=<seconds> before starting the server."
+        )}
     except Exception as e:
         return {"error": str(e)}
 
