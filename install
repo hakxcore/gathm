@@ -2524,10 +2524,62 @@ start_gui_server() {
         return 1
     fi
 
-    # Check if something is already on the port
+    # Something already listening? Do not just return — the installer has only
+    # just (re)staged the code, so a server left over from an earlier run is
+    # still serving the OLD api/server.py. That is precisely how a newly added
+    # endpoint keeps returning the old error: the GUI POSTs to a route that
+    # exists on disk but not in the running process, falls through to the
+    # StaticFiles mount, and comes back 405.
+    #
+    # Restart our own server only. Anything else holding the port belongs to
+    # someone else and is left alone.
     if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
-        ok "GUI server already running at $GUI_URL"
-        return 0
+        if ! command -v pgrep >/dev/null 2>&1; then
+            warn "GUI server already running at $GUI_URL, and pgrep is unavailable"
+            warn "so it cannot be identified. If the GUI behaves like older code,"
+            warn "restart it manually:  pkill -f api/server.py  then re-run ./install"
+            return 0
+        fi
+
+        # Match on the "api/server.py" suffix rather than $server_script's
+        # absolute path: the server may have been launched relative to another
+        # cwd or through the gathm-api shortcut, and an absolute-path match then
+        # silently misses it, leaving the stale process serving.
+        #
+        # Then filter hard. `pgrep -f` matches any process whose *command line*
+        # contains the pattern, which includes wrapper shells — and, in the
+        # wrong circumstances, this installer itself. Skip our own pid and our
+        # parent, and require the command line to actually be a Python process,
+        # which is what rules out a shell that merely mentions the path.
+        local _old_pids="" _p _cmd
+        for _p in $(pgrep -f 'api/server\.py' 2>/dev/null || true); do
+            [[ "$_p" == "$$" || "$_p" == "${PPID:-0}" ]] && continue
+            if [[ -r "/proc/$_p/cmdline" ]]; then
+                _cmd=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null) || _cmd=""
+                [[ "$_cmd" == *python* ]] || continue
+            fi
+            _old_pids+="$_p "
+        done
+        _old_pids="${_old_pids%% }"
+
+        if [[ -z "${_old_pids// /}" ]]; then
+            ok "GUI server already running at $GUI_URL (not ours — leaving it alone)"
+            return 0
+        fi
+
+        info "Restarting GUI server so it serves the current code (pid: ${_old_pids})..."
+        # shellcheck disable=SC2086  # word splitting is intended for the pid list
+        kill $_old_pids 2>/dev/null || true
+        local _w=0
+        while (( _w < 5 )) && curl -s --max-time 1 "$GUI_URL/" &>/dev/null; do
+            sleep 1
+            _w=$((_w + 1))
+        done
+        if curl -s --max-time 1 "$GUI_URL/" &>/dev/null; then
+            # shellcheck disable=SC2086
+            kill -9 $_old_pids 2>/dev/null || true
+            sleep 1
+        fi
     fi
 
     info "Starting GUI server on port $GUI_PORT..."
@@ -2537,7 +2589,8 @@ start_gui_server() {
 
     # Wait up to 15 s for the server to respond (Termux can be slow)
     local _max_wait=15
-    [[ "$_GATHM_PLATFORM" != "termux" ]] && _max_wait=8
+    # `:-` so the function stays callable (and testable) before main() sets it.
+    [[ "${_GATHM_PLATFORM:-}" != "termux" ]] && _max_wait=8
     local i=0
     while (( i < _max_wait )); do
         sleep 1
