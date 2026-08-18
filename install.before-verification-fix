@@ -1169,9 +1169,9 @@ _detect_total_ram_mb() {
 _recommend_model_for_hardware() {
     local ram_mb
     ram_mb=$(_detect_total_ram_mb)
-    if   (( ram_mb < 1 ));     then echo "gemma3:1b"      # detection failed
+    if   (( ram_mb < 1 ));     then echo "gemma3:4b"      # detection failed
     elif (( ram_mb < 4096 ));  then echo "gemma3:1b"      # phone / small VM
-    elif (( ram_mb < 8192 ));  then echo "gemma3:1b"      # ≤8 GB
+    elif (( ram_mb < 8192 ));  then echo "gemma3:4b"      # ≤8 GB
     elif (( ram_mb < 16384 )); then echo "llama3.1:8b"    # 8–16 GB
     elif (( ram_mb < 32768 )); then echo "qwen2.5:14b"    # 16–32 GB
     else                            echo "qwen2.5:32b"    # 32 GB+
@@ -1238,7 +1238,7 @@ _largest_model_that_fits() {
 #   2. If $1 is set but not yet pulled → attempt download.
 #   3. On download failure (or no $1 given) → scan `ollama list` for anything
 #      already present and pick the best match from a priority list.
-#   4. If nothing is pulled at all → pull gemma3:1b as the minimal default.
+#   4. If nothing is pulled at all → pull gemma3:4b as the minimal default.
 _pull_ollama_model() {
     local requested_model="${1:-}"
 
@@ -1295,14 +1295,14 @@ _pull_ollama_model() {
         fi
     fi
 
-    # ── 4. Nothing available — pull gemma3:1b as the minimal default ──
-    info "No local models found. Pulling gemma3:1b as default (this may take a few minutes)..."
-    if ollama pull "gemma3:1b"; then
-        ok "Default model gemma3:1b ready"
-        _save_model_config "gemma3:1b"
+    # ── 4. Nothing available — pull gemma3:4b as the minimal default ──
+    info "No local models found. Pulling gemma3:4b as default (this may take a few minutes)..."
+    if ollama pull "gemma3:4b"; then
+        ok "Default model gemma3:4b ready"
+        _save_model_config "gemma3:4b"
     else
-        warn "Could not pull gemma3:1b — run manually: ollama pull gemma3:1b"
-        _save_model_config "gemma3:1b"
+        warn "Could not pull gemma3:4b — run manually: ollama pull gemma3:4b"
+        _save_model_config "gemma3:4b"
     fi
 }
 
@@ -1852,33 +1852,20 @@ verify() {
             ;;
     esac
 
-    # ── Pilot runtime ───────────────────────────────────────────────
-    # Termux intentionally uses the lightweight Pilot runtime.
-    # It does NOT require LangChain, LangGraph, Pydantic or pydantic-core.
-    # Desktop/server platforms continue to verify the full Pilot stack.
-
+    # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
+    # We actually IMPORT each module (not just find_spec) so a native library
+    # that fails to load — e.g. pydantic_core missing libgcc_s.so.1 on Termux —
+    # is caught here instead of only blowing up when Pilot starts.
     _init_venv
     local pilot_py="$GATHM_VENV/bin/python3"
-
     if [[ -x "$pilot_py" ]]; then
-        if [[ "$plat" == "termux" ]]; then
-            if "$pilot_py" -c "import requests, rich, prompt_toolkit, dotenv, bs4" 2>/dev/null; then
-                ok "Pilot runtime (Termux lightweight)"
-            else
-                warn "Termux Pilot runtime incomplete"
-                note_missing "Pilot Python deps" "re-run ./install"
-            fi
-        else
-            local missing_mods
-            missing_mods=$("$pilot_py" - <<'PYINNER' 2>/dev/null
+        local missing_mods
+        missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
+# import name -> pip package name
 mods = {
-    "pydantic_core": "pydantic",
-    "langchain_core": "langchain-core",
-    "langgraph": "langgraph",
-    "rich": "rich",
-    "dotenv": "python-dotenv",
-    "prompt_toolkit": "prompt_toolkit",
-    "bs4": "beautifulsoup4",
+    "pydantic_core": "pydantic", "langchain_core": "langchain-core",
+    "langgraph": "langgraph", "rich": "rich", "dotenv": "python-dotenv",
+    "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
     "requests": "requests",
 }
 missing = []
@@ -1888,33 +1875,35 @@ for m, pkg in mods.items():
     except Exception:
         missing.append(pkg)
 print(" ".join(missing))
-PYINNER
+PY
 )
-
-            if [[ -z "$missing_mods" ]]; then
-                ok "Pilot runtime (venv + dependencies)"
-            else
-                warn "Pilot runtime missing/broken: $missing_mods"
-                note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt"
-            fi
+        if [[ -z "$missing_mods" ]]; then
+            ok "Pilot runtime (venv + dependencies)"
+        else
+            warn "Pilot runtime missing/broken: $missing_mods"
+            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
         fi
 
-        if [[ "$plat" == "termux" ]]; then
-            ok "GUI server: skipped on Termux"
-        elif "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
+        # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
+        if "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
             ok "GUI server dependencies (fastapi, uvicorn)"
         else
-            warn "GUI server dependencies missing"
+            warn "GUI server dependencies missing (GUI won't start; Pilot CLI still works)"
             note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"
         fi
     else
         warn "Pilot venv not found"
-        note_missing "Pilot venv" "re-run ./install"
+        note_missing "Pilot venv" "re-run ./install (creates pilot/venv from requirements.txt)"
     fi
 
     # ── Browser engine (powers Pilot's 'browser' tool) ──
     if [[ "$plat" == "termux" ]]; then
-        ok "Browser engine: skipped on Termux"
+        if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+            ok "Browser engine (system Chromium)"
+        else
+            warn "Chromium not installed (browser control limited to open/fetch)"
+            note_missing "Chromium (browser tool)" "pkg install tur-repo x11-repo && pkg install chromium"
+        fi
     else
         if [[ -x "$GATHM_VENV/bin/playwright" ]] && "$pilot_py" -c "import playwright" 2>/dev/null; then
             ok "Browser engine (Playwright)"

@@ -1169,9 +1169,9 @@ _detect_total_ram_mb() {
 _recommend_model_for_hardware() {
     local ram_mb
     ram_mb=$(_detect_total_ram_mb)
-    if   (( ram_mb < 1 ));     then echo "gemma3:1b"      # detection failed
+    if   (( ram_mb < 1 ));     then echo "gemma3:4b"      # detection failed
     elif (( ram_mb < 4096 ));  then echo "gemma3:1b"      # phone / small VM
-    elif (( ram_mb < 8192 ));  then echo "gemma3:1b"      # ≤8 GB
+    elif (( ram_mb < 8192 ));  then echo "gemma3:4b"      # ≤8 GB
     elif (( ram_mb < 16384 )); then echo "llama3.1:8b"    # 8–16 GB
     elif (( ram_mb < 32768 )); then echo "qwen2.5:14b"    # 16–32 GB
     else                            echo "qwen2.5:32b"    # 32 GB+
@@ -1238,7 +1238,7 @@ _largest_model_that_fits() {
 #   2. If $1 is set but not yet pulled → attempt download.
 #   3. On download failure (or no $1 given) → scan `ollama list` for anything
 #      already present and pick the best match from a priority list.
-#   4. If nothing is pulled at all → pull gemma3:1b as the minimal default.
+#   4. If nothing is pulled at all → pull gemma3:4b as the minimal default.
 _pull_ollama_model() {
     local requested_model="${1:-}"
 
@@ -1295,14 +1295,14 @@ _pull_ollama_model() {
         fi
     fi
 
-    # ── 4. Nothing available — pull gemma3:1b as the minimal default ──
-    info "No local models found. Pulling gemma3:1b as default (this may take a few minutes)..."
-    if ollama pull "gemma3:1b"; then
-        ok "Default model gemma3:1b ready"
-        _save_model_config "gemma3:1b"
+    # ── 4. Nothing available — pull gemma3:4b as the minimal default ──
+    info "No local models found. Pulling gemma3:4b as default (this may take a few minutes)..."
+    if ollama pull "gemma3:4b"; then
+        ok "Default model gemma3:4b ready"
+        _save_model_config "gemma3:4b"
     else
-        warn "Could not pull gemma3:1b — run manually: ollama pull gemma3:1b"
-        _save_model_config "gemma3:1b"
+        warn "Could not pull gemma3:4b — run manually: ollama pull gemma3:4b"
+        _save_model_config "gemma3:4b"
     fi
 }
 
@@ -1520,32 +1520,23 @@ REQEOF
 # [standard] extras pull in uvloop + httptools (C extensions) and watchfiles
 # (Rust) — none of which have Android/aarch64 wheels, so they'd try to compile
 # from source and stall the install. Plain uvicorn is pure Python and works.
-
 _install_gui_deps() {
-    # Android/Termux does not need the Gathm GUI server.
-    #
-    # FastAPI -> Pydantic -> pydantic-core requires native components
-    # that we intentionally do not install in the lightweight Termux
-    # runtime.
+    _ensure_venv
+    # NB: _venv_pip already runs `pip install`, so pass only packages/flags.
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
-        info "Termux: skipping GUI dependencies (FastAPI/uvicorn)"
-        return 0
-    fi
-
-    local gui_req="$SCRIPT_DIR/webui/requirements.txt"
-
-    if [[ -f "$gui_req" ]]; then
-        info "Installing GUI dependencies..."
-        if _venv_pip -r "$gui_req"; then
-            ok "GUI dependencies installed"
+        if _venv_pip fastapi uvicorn; then
+            ok "GUI dependencies installed (fastapi, uvicorn)"
         else
-            warn "GUI dependency installation failed"
+            warn "GUI dependency install failed — GUI won't start. Retry: pip install fastapi uvicorn"
         fi
     else
-        if _venv_pip install fastapi uvicorn; then
-            ok "GUI dependencies installed"
+        local api_req="$SCRIPT_DIR/api/requirements.txt"
+        if [[ -f "$api_req" ]] && _venv_pip -r "$api_req"; then
+            ok "GUI dependencies installed (fastapi, uvicorn[standard])"
+        elif _venv_pip fastapi uvicorn; then
+            ok "GUI dependencies installed (fastapi, uvicorn)"
         else
-            warn "GUI dependency installation failed"
+            warn "GUI dependency install failed — GUI won't start. Retry: pip install -r api/requirements.txt"
         fi
     fi
 }
@@ -1561,34 +1552,48 @@ _install_gui_deps() {
 #   refuses to run.  Instead, we install the ARM64 Chromium that is distributed
 #   through Termux's community repository (tur-repo + x11-repo).  Pilot's
 #   browser.py detects the system binary automatically via `executable_path`.
-
 install_playwright_browser() {
-    # Chromium is optional on Android/Termux.
-    # Do not download ~100+ MB during the normal Gathm installation.
-    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
-        info "Termux: skipping Playwright/Chromium browser engine"
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        warn "Skipping browser engine install (offline)"
         return 0
     fi
 
-    local pw_cmd=""
+    # ── Termux path: install system Chromium via pkg ──────────────────
+    if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
+        info "Installing Chromium for Termux (tur-repo)..."
+        # tur-repo provides community-built packages; x11-repo provides
+        # display-related libraries needed by the Chromium binary.
+        pkg install -y tur-repo x11-repo 2>/dev/null || true
+        if pkg install -y chromium 2>/dev/null; then
+            ok "Chromium installed via pkg — full browser control enabled on Termux"
+        else
+            warn "Chromium pkg install failed — browser control limited to open/fetch"
+            warn "Retry manually: pkg install tur-repo x11-repo && pkg install chromium"
+        fi
+        return 0
+    fi
 
+    # ── Desktop path: download Playwright's bundled Chromium ──────────
+    local pw_cmd=""
     if [[ -x "$GATHM_VENV/bin/playwright" ]]; then
         pw_cmd="$GATHM_VENV/bin/playwright"
-    elif command -v playwright >/dev/null 2>&1; then
+    elif command -v playwright &>/dev/null; then
         pw_cmd="playwright"
     else
         warn "playwright CLI not found — skipping Chromium download"
+        warn "Run manually: playwright install chromium"
         return 0
     fi
 
     info "Installing Playwright Chromium (browser engine for Pilot)..."
-
+    # --with-deps installs required OS libraries on Linux (harmless on macOS/Win)
     if "$pw_cmd" install chromium --with-deps 2>/dev/null; then
-        ok "Playwright Chromium installed"
+        ok "Playwright Chromium ready"
     elif "$pw_cmd" install chromium 2>/dev/null; then
-        ok "Playwright Chromium installed"
+        ok "Playwright Chromium ready"
     else
-        warn "Playwright Chromium installation failed"
+        warn "Playwright Chromium download failed — browser control will be limited"
+        warn "Retry manually: playwright install chromium"
     fi
 }
 
@@ -1717,49 +1722,52 @@ start_gui_server() {
 }
 
 # --- Launch Pilot and open GUI browser after install ---
-
 launch_post_install() {
-    local platform="${1:-unknown}"
+    local platform="${1:-linux}"
 
-    # Termux uses the CLI-only runtime.
-    # Do not attempt to launch FastAPI/uvicorn or desktop browser tools.
-    if [[ "$platform" == "termux" ]]; then
-        echo
-        echo -e "${BOLD}Starting Gathm on Termux...${RESET}"
-        echo -e "${CYAN}GUI server: skipped (Android/Termux)${RESET}"
-        echo -e "${CYAN}Browser engine: skipped (Android/Termux)${RESET}"
-        echo
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${BOLD}${GREEN}Launching Gathm...${RESET}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
 
-        local pilot_run="$SCRIPT_DIR/pilot/run.sh"
-        local pilot_main="$SCRIPT_DIR/pilot/main.py"
-
-        if [[ -f "$pilot_run" ]]; then
-            bash "$pilot_run"
-        elif [[ -f "$pilot_main" ]]; then
-            "$GATHM_VENV/bin/python3" "$pilot_main"
-        else
-            warn "Pilot not available — start it manually"
-        fi
-
-        return 0
+    # 1. Start GUI server in background
+    if start_gui_server; then
+        # 2. Open GUI in default browser
+        info "Opening GUI in browser..."
+        open_url "$GUI_URL" "$platform"
+        echo -e "  ${CYAN}GUI:${RESET} $GUI_URL"
     fi
 
-    # Existing desktop/server behavior.
-    if declare -F start_gui_server >/dev/null 2>&1; then
-        start_gui_server
+    echo ""
+
+    # 3. Determine how to launch Pilot (prefer venv set by install_pilot_deps)
+    local python_cmd="${_PILOT_PYTHON:-}"
+    if [[ -z "$python_cmd" ]]; then
+        local venv_python="$SCRIPT_DIR/pilot/venv/bin/python"
+        [[ -x "$venv_python" ]] && python_cmd="$venv_python"
     fi
+    [[ -z "$python_cmd" ]] && command -v python3 &>/dev/null && python_cmd="python3"
+    [[ -z "$python_cmd" ]] && command -v python  &>/dev/null && python_cmd="python"
 
     local pilot_run="$SCRIPT_DIR/pilot/run.sh"
     local pilot_main="$SCRIPT_DIR/pilot/main.py"
 
-    echo -e "${BOLD}Starting Pilot AI...${RESET}"
+    if [[ ! -f "$pilot_run" && ! -f "$pilot_main" ]]; then
+        warn "Pilot not available — start it manually: bash pilot/run.sh"
+        return 0
+    fi
 
+    echo -e "${BOLD}Starting Pilot AI...${RESET}"
+    echo -e "  ${YELLOW}(Press Ctrl+C or type /exit to quit Pilot)${RESET}"
+    echo ""
+
+    # Hand off to Pilot via run.sh (activates venv) or python directly as fallback
+    cd "$SCRIPT_DIR"
     if [[ -f "$pilot_run" ]]; then
-        bash "$pilot_run"
-    elif [[ -f "$pilot_main" ]]; then
-        "$GATHM_VENV/bin/python3" "$pilot_main"
+        exec bash "$pilot_run"
     else
-        warn "Pilot not available — start it manually"
+        exec "$python_cmd" "$pilot_main"
     fi
 }
 
@@ -1852,33 +1860,20 @@ verify() {
             ;;
     esac
 
-    # ── Pilot runtime ───────────────────────────────────────────────
-    # Termux intentionally uses the lightweight Pilot runtime.
-    # It does NOT require LangChain, LangGraph, Pydantic or pydantic-core.
-    # Desktop/server platforms continue to verify the full Pilot stack.
-
+    # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
+    # We actually IMPORT each module (not just find_spec) so a native library
+    # that fails to load — e.g. pydantic_core missing libgcc_s.so.1 on Termux —
+    # is caught here instead of only blowing up when Pilot starts.
     _init_venv
     local pilot_py="$GATHM_VENV/bin/python3"
-
     if [[ -x "$pilot_py" ]]; then
-        if [[ "$plat" == "termux" ]]; then
-            if "$pilot_py" -c "import requests, rich, prompt_toolkit, dotenv, bs4" 2>/dev/null; then
-                ok "Pilot runtime (Termux lightweight)"
-            else
-                warn "Termux Pilot runtime incomplete"
-                note_missing "Pilot Python deps" "re-run ./install"
-            fi
-        else
-            local missing_mods
-            missing_mods=$("$pilot_py" - <<'PYINNER' 2>/dev/null
+        local missing_mods
+        missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
+# import name -> pip package name
 mods = {
-    "pydantic_core": "pydantic",
-    "langchain_core": "langchain-core",
-    "langgraph": "langgraph",
-    "rich": "rich",
-    "dotenv": "python-dotenv",
-    "prompt_toolkit": "prompt_toolkit",
-    "bs4": "beautifulsoup4",
+    "pydantic_core": "pydantic", "langchain_core": "langchain-core",
+    "langgraph": "langgraph", "rich": "rich", "dotenv": "python-dotenv",
+    "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
     "requests": "requests",
 }
 missing = []
@@ -1888,33 +1883,35 @@ for m, pkg in mods.items():
     except Exception:
         missing.append(pkg)
 print(" ".join(missing))
-PYINNER
+PY
 )
-
-            if [[ -z "$missing_mods" ]]; then
-                ok "Pilot runtime (venv + dependencies)"
-            else
-                warn "Pilot runtime missing/broken: $missing_mods"
-                note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt"
-            fi
+        if [[ -z "$missing_mods" ]]; then
+            ok "Pilot runtime (venv + dependencies)"
+        else
+            warn "Pilot runtime missing/broken: $missing_mods"
+            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
         fi
 
-        if [[ "$plat" == "termux" ]]; then
-            ok "GUI server: skipped on Termux"
-        elif "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
+        # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
+        if "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
             ok "GUI server dependencies (fastapi, uvicorn)"
         else
-            warn "GUI server dependencies missing"
+            warn "GUI server dependencies missing (GUI won't start; Pilot CLI still works)"
             note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"
         fi
     else
         warn "Pilot venv not found"
-        note_missing "Pilot venv" "re-run ./install"
+        note_missing "Pilot venv" "re-run ./install (creates pilot/venv from requirements.txt)"
     fi
 
     # ── Browser engine (powers Pilot's 'browser' tool) ──
     if [[ "$plat" == "termux" ]]; then
-        ok "Browser engine: skipped on Termux"
+        if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+            ok "Browser engine (system Chromium)"
+        else
+            warn "Chromium not installed (browser control limited to open/fetch)"
+            note_missing "Chromium (browser tool)" "pkg install tur-repo x11-repo && pkg install chromium"
+        fi
     else
         if [[ -x "$GATHM_VENV/bin/playwright" ]] && "$pilot_py" -c "import playwright" 2>/dev/null; then
             ok "Browser engine (Playwright)"

@@ -1,0 +1,7 @@
+# Lightweight Android/Termux Pilot.
+# No LangChain, LangGraph, Pydantic or pydantic-core.
+python-dotenv
+rich>=13.0
+prompt_toolkit>=3.0
+requests
+beautifulsoup4

@@ -278,18 +278,10 @@ def normalize_tool_command(command: str) -> str:
     return shlex.join(normalized)
 
 def run_gathm_tool_raw(command: str) -> str:
-    """
-    Execute a Gathm tool.
-
-    Termux uses direct subprocess execution because sourcing
-    lib/utils.bash through `bash -c` can hang on Android/Termux.
-    Desktop keeps the existing utils.bash execution path.
-    """
     try:
         parts = shlex.split(command.strip())
     except ValueError as exc:
         return f"Error: Invalid command syntax ({exc})."
-
     if not parts:
         return "Error: No tool specified."
 
@@ -297,86 +289,29 @@ def run_gathm_tool_raw(command: str) -> str:
     tool_name = normalized_parts[0]
     tool_args = normalized_parts[1:]
 
-    # Built-in browser tool
+    # Dispatch built-in tools before looking in the shell tools directory
     if tool_name == "browser":
         return _run_browser_action(" ".join(tool_args))
 
     tool_path = TOOLS_DIR / tool_name / tool_name
-
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
-
-    # ---------------------------------------------------------
-    # Termux / Android
-    # ---------------------------------------------------------
-    if _is_termux():
-        try:
-            env = {
-                **os.environ,
-                "TERM": "xterm-256color",
-                "GATHM_NON_INTERACTIVE": "1",
-            }
-
-            result = subprocess.run(
-                [str(tool_path), *tool_args],
-                cwd=GATHM_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env,
-            )
-
-            output = result.stdout.strip()
-
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-
-                if stderr:
-                    output += f"\n[stderr]: {stderr}"
-
-            return output if output else "(no output)"
-
-        except subprocess.TimeoutExpired:
-            return f"Error: Tool '{tool_name}' timed out after 120 seconds."
-
-        except Exception as exc:
-            return f"Error: {exc}"
-
-    # ---------------------------------------------------------
-    # Desktop / Linux / macOS / Windows
-    # ---------------------------------------------------------
     try:
-        env = {
-            **os.environ,
-            "TERM": "xterm-256color",
-            "GATHM_NON_INTERACTIVE": "1",
-        }
-
-        shell_cmd = (
-            f'source "{GATHM_ROOT}/lib/utils.bash" && '
-            f'"{tool_path}" "$@"'
-        )
-
+        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
+        shell_cmd = f'source "{GATHM_ROOT}/lib/utils.bash" && "{tool_path}" "$@"'
         result = subprocess.run(
             ["bash", "-c", shell_cmd, "gathm-tool", *tool_args],
             capture_output=True,
             text=True,
             timeout=120,
-            env=env,
+            env=env
         )
-
         output = result.stdout.strip()
-
         if result.returncode != 0 and result.stderr.strip():
             output += f"\n[stderr]: {result.stderr.strip()}"
-
         return output if output else "(no output)"
-
-    except subprocess.TimeoutExpired:
-        return f"Error: Tool '{tool_name}' timed out after 120 seconds."
-
-    except Exception as exc:
-        return f"Error: {exc}"
+    except Exception as e:
+        return f"Error: {e}"
 
 def classify_high_risk_query(user_input: str) -> Optional[str]:
     normalized = user_input.lower().strip()
@@ -590,11 +525,7 @@ def tool_node(state: AgentState):
 def should_continue(state: AgentState):
     return state.get("next_step", "end")
 
-# Termux uses the lightweight direct LLMProvider path.
-# Do not construct LangGraph there even if LangChain happens to be installed.
-_IS_TERMUX_RUNTIME = shutil.which("termux-setup-storage") is not None
-
-if LANGCHAIN_AVAILABLE and not _IS_TERMUX_RUNTIME:
+if LANGCHAIN_AVAILABLE:
     try:
         llm = _build_llm()
     except RuntimeError:
@@ -604,11 +535,7 @@ if LANGCHAIN_AVAILABLE and not _IS_TERMUX_RUNTIME:
     workflow.add_node("agent", call_model)
     workflow.add_node("action", tool_node)
     workflow.set_entry_point("agent")
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {"action": "action", "end": END},
-    )
+    workflow.add_conditional_edges("agent", should_continue, {"action": "action", "end": END})
     workflow.add_edge("action", "agent")
     app = workflow.compile()
 else:

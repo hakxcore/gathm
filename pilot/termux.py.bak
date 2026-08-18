@@ -1,0 +1,55 @@
+import json, os, re, subprocess, urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+mf = Path.home() / ".gathm" / "model"
+MODEL = os.getenv("GATHM_OLLAMA_MODEL") or (mf.read_text().strip() if mf.is_file() else "gemma3:4b")
+
+def tools():
+    d = ROOT / "tools"
+    return {x.name for x in d.iterdir()
+            if x.is_dir() and (x/x.name).is_file() and os.access(x/x.name, os.X_OK)} if d.is_dir() else set()
+
+def chat(messages):
+    body = json.dumps({"model": MODEL, "messages": messages, "stream": False}).encode()
+    req = urllib.request.Request(URL + "/api/chat", data=body,
+        headers={"Content-Type":"application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=180) as r:
+        return json.loads(r.read())["message"]["content"].strip()
+
+def tool(name, args):
+    r = subprocess.run([str(ROOT/"agent"/"orchestrator.sh"),"run",name,*args],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    return (r.stdout.strip() + ("\n"+r.stderr.strip() if r.returncode and r.stderr.strip() else "")) or "(no output)"
+
+def main():
+    names = tools()
+    msgs = [{"role":"system","content":
+        "You are Gathm, a local Android/Termux AI assistant. "
+        "When a listed tool is needed output exactly TOOL: <tool> <args>. "
+        "Otherwise answer normally. Never invent tools.\n"
+        + "\n".join("- "+x for x in sorted(names))}]
+    print(f"Gathm Termux Pilot • Ollama • {MODEL}")
+    print("Type /exit to quit.\n")
+    while True:
+        try: u = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt): print(); return
+        if u.lower() in {"/exit","/quit","exit","quit"}: return
+        if not u: continue
+        msgs.append({"role":"user","content":u})
+        for _ in range(4):
+            try: a = chat(msgs)
+            except Exception as e:
+                print("[Ollama]", e); msgs.pop(); break
+            m = re.match(r"^\s*TOOL:\s+([A-Za-z0-9_.-]+)(?:\s+(.*))?$", a)
+            if not m:
+                print("\nGathm:", a, "\n")
+                msgs.append({"role":"assistant","content":a})
+                break
+            n, args = m.group(1), (m.group(2) or "").split()
+            result = tool(n,args) if n in names else "Unknown tool: "+n
+            msgs += [{"role":"assistant","content":a},
+                     {"role":"user","content":f"TOOL RESULT:\n{result}\nAnswer the original request."}]
+
+if __name__ == "__main__": main()

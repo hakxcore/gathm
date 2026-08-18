@@ -278,18 +278,10 @@ def normalize_tool_command(command: str) -> str:
     return shlex.join(normalized)
 
 def run_gathm_tool_raw(command: str) -> str:
-    """
-    Execute a Gathm tool.
-
-    Termux uses direct subprocess execution because sourcing
-    lib/utils.bash through `bash -c` can hang on Android/Termux.
-    Desktop keeps the existing utils.bash execution path.
-    """
     try:
         parts = shlex.split(command.strip())
     except ValueError as exc:
         return f"Error: Invalid command syntax ({exc})."
-
     if not parts:
         return "Error: No tool specified."
 
@@ -297,86 +289,29 @@ def run_gathm_tool_raw(command: str) -> str:
     tool_name = normalized_parts[0]
     tool_args = normalized_parts[1:]
 
-    # Built-in browser tool
+    # Dispatch built-in tools before looking in the shell tools directory
     if tool_name == "browser":
         return _run_browser_action(" ".join(tool_args))
 
     tool_path = TOOLS_DIR / tool_name / tool_name
-
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
-
-    # ---------------------------------------------------------
-    # Termux / Android
-    # ---------------------------------------------------------
-    if _is_termux():
-        try:
-            env = {
-                **os.environ,
-                "TERM": "xterm-256color",
-                "GATHM_NON_INTERACTIVE": "1",
-            }
-
-            result = subprocess.run(
-                [str(tool_path), *tool_args],
-                cwd=GATHM_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env,
-            )
-
-            output = result.stdout.strip()
-
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-
-                if stderr:
-                    output += f"\n[stderr]: {stderr}"
-
-            return output if output else "(no output)"
-
-        except subprocess.TimeoutExpired:
-            return f"Error: Tool '{tool_name}' timed out after 120 seconds."
-
-        except Exception as exc:
-            return f"Error: {exc}"
-
-    # ---------------------------------------------------------
-    # Desktop / Linux / macOS / Windows
-    # ---------------------------------------------------------
     try:
-        env = {
-            **os.environ,
-            "TERM": "xterm-256color",
-            "GATHM_NON_INTERACTIVE": "1",
-        }
-
-        shell_cmd = (
-            f'source "{GATHM_ROOT}/lib/utils.bash" && '
-            f'"{tool_path}" "$@"'
-        )
-
+        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
+        shell_cmd = f'source "{GATHM_ROOT}/lib/utils.bash" && "{tool_path}" "$@"'
         result = subprocess.run(
             ["bash", "-c", shell_cmd, "gathm-tool", *tool_args],
             capture_output=True,
             text=True,
             timeout=120,
-            env=env,
+            env=env
         )
-
         output = result.stdout.strip()
-
         if result.returncode != 0 and result.stderr.strip():
             output += f"\n[stderr]: {result.stderr.strip()}"
-
         return output if output else "(no output)"
-
-    except subprocess.TimeoutExpired:
-        return f"Error: Tool '{tool_name}' timed out after 120 seconds."
-
-    except Exception as exc:
-        return f"Error: {exc}"
+    except Exception as e:
+        return f"Error: {e}"
 
 def classify_high_risk_query(user_input: str) -> Optional[str]:
     normalized = user_input.lower().strip()
@@ -590,11 +525,7 @@ def tool_node(state: AgentState):
 def should_continue(state: AgentState):
     return state.get("next_step", "end")
 
-# Termux uses the lightweight direct LLMProvider path.
-# Do not construct LangGraph there even if LangChain happens to be installed.
-_IS_TERMUX_RUNTIME = shutil.which("termux-setup-storage") is not None
-
-if LANGCHAIN_AVAILABLE and not _IS_TERMUX_RUNTIME:
+if LANGCHAIN_AVAILABLE:
     try:
         llm = _build_llm()
     except RuntimeError:
@@ -604,304 +535,13 @@ if LANGCHAIN_AVAILABLE and not _IS_TERMUX_RUNTIME:
     workflow.add_node("agent", call_model)
     workflow.add_node("action", tool_node)
     workflow.set_entry_point("agent")
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {"action": "action", "end": END},
-    )
+    workflow.add_conditional_edges("agent", should_continue, {"action": "action", "end": END})
     workflow.add_edge("action", "agent")
     app = workflow.compile()
 else:
     llm = None
     workflow = None
     app = None
-
-
-def _is_termux() -> bool:
-    """Return True when Pilot is running inside Termux/Android."""
-    return shutil.which("termux-setup-storage") is not None
-
-
-def _termux_system_prompt() -> str:
-    """Small, strict prompt designed for Gemma 3 1B on Termux."""
-    available_tools = discover_tools()
-
-    tool_lines = []
-    for name in available_tools:
-        desc = get_tool_description(name)
-        tool_lines.append(f"- {name}: {desc}")
-
-    tools = "\n".join(tool_lines)
-
-    return f"""You are Pilot, a helpful local AI assistant running on Android.
-
-IMPORTANT:
-You are a small model. Keep your reasoning simple.
-
-AVAILABLE TOOLS:
-{tools}
-
-RULES:
-
-1. NORMAL CONVERSATION:
-For greetings, casual conversation, thanks, simple questions, and general
-conversation, answer directly.
-
-Examples:
-User: hi
-Assistant: Hi! How can I help you?
-
-User: hello
-Assistant: Hello! What can I do for you?
-
-User: thanks
-Assistant: You're welcome!
-
-DO NOT call a tool for greetings or casual conversation.
-
-2. ONLY use a tool when the user's request actually requires that tool.
-
-3. When a tool is required, output EXACTLY one line:
-Action: gathm
-Action Input: TOOL_NAME ARGUMENTS
-
-4. Never invent a tool.
-
-5. Do not use the browser unless the user explicitly asks to browse,
-search the web, open a website, fetch a webpage, or perform a browser action.
-
-6. For math, use the newton tool when appropriate.
-
-7. For cryptocurrency prices, use cryptocurrency.
-
-8. For stock prices, use stocks.
-
-9. For currency conversion, use:
-Action: gathm
-Action Input: currency BASE TARGET AMOUNT
-
-10. After receiving a tool result, answer the user's original request directly.
-
-11. Never output Thought:
-12. Never output Observation:
-13. Never call a tool merely because the word appears in the system prompt.
-
-Answer concisely and naturally.
-"""
-
-def _termux_simple_response(user_input: str) -> str | None:
-    """Handle obvious conversational messages without involving tools."""
-    text = user_input.strip().lower()
-
-    greetings = {
-        "hi",
-        "hello",
-        "hey",
-        "hiya",
-        "hii",
-        "hiii",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    }
-
-    thanks = {
-        "thanks",
-        "thank you",
-        "thx",
-        "ty",
-    }
-
-    if text in greetings:
-        return "Hi! How can I help you?"
-
-    if text in thanks:
-        return "You're welcome! How can I help you?"
-
-    if text in {"who are you", "what are you", "what is gathm"}:
-        return "I'm Gathm Pilot, your local AI assistant running on Termux."
-
-    return None
-
-
-def _termux_direct_tool(user_input: str) -> tuple[str, str] | None:
-    """
-    Deterministic router for obvious tool requests.
-
-    Gemma 3 1B is intentionally not asked to decide whether an obvious
-    command such as 'weather Paris' needs a tool.
-    """
-    text = user_input.strip()
-
-    if not text:
-        return None
-
-    # Weather / forecast
-    m = re.match(
-        r"^\s*(?:weather|forecast)\s+(.+?)\s*$",
-        text,
-        re.IGNORECASE,
-    )
-    if m:
-        location = m.group(1).strip()
-        return ("weather", location)
-
-    return None
-
-
-def _termux_complete(
-    conversation_history: list[dict[str, str]],
-    user_input: str,
-) -> str:
-    """
-    Lightweight Pilot execution path for Termux.
-
-    This deliberately avoids LangChain/LangGraph/Pydantic and talks directly
-    to the unified LLMProvider. Desktop/server LangGraph remains unchanged.
-    """
-    # Handle obvious tool requests deterministically.
-    direct_tool = _termux_direct_tool(user_input)
-
-    if direct_tool is not None:
-        tool_name, tool_arg = direct_tool
-
-        print_tool_exec(f"{tool_name} {tool_arg}")
-
-        result = run_gathm_tool_raw(
-            shlex.join([tool_name, tool_arg])
-        )
-
-        # Give the result back to the small model only for natural-language
-        # presentation. The tool itself has already been executed.
-        cfg = LLMConfig.from_env()
-        provider = LLMProvider(cfg)
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are Gathm. Present the following tool result "
-                    "clearly and concisely to the user. Do not call another "
-                    "tool. Do not output Action, Thought, or Observation."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Original request: {user_input}\n\n"
-                    f"Tool result:\n{result}"
-                ),
-            },
-        ]
-
-        try:
-            answer = provider.complete(messages)
-            if answer and answer.strip():
-                return answer.strip()
-        except Exception:
-            pass
-
-        return result
-
-    # Gemma 3 1B should not have to reason about tools for obvious
-    # conversational messages.
-    simple = _termux_simple_response(user_input)
-    if simple is not None:
-        return simple
-
-    cfg = LLMConfig.from_env()
-    provider = LLMProvider(cfg)
-
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": _termux_system_prompt(),
-        }
-    ]
-
-    messages.extend(conversation_history)
-    messages.append({
-        "role": "user",
-        "content": user_input,
-    })
-
-    max_turns = 10
-
-    for _ in range(max_turns):
-        try:
-            response = provider.complete(messages)
-        except Exception as exc:
-            return f"Local AI error: {exc}"
-
-        if not response or not response.strip():
-            return "Local AI returned an empty response. Please try again."
-
-        tool_input = extract_tool_input(
-            response,
-            set(discover_tools()),
-        )
-
-        if not tool_input:
-            return _clean_agent_response(response)
-
-        try:
-            normalized_input = normalize_tool_command(tool_input)
-        except Exception:
-            normalized_input = tool_input
-
-        print_tool_exec(normalized_input)
-
-        result = run_gathm_tool_raw(normalized_input)
-
-        messages.append({
-            "role": "assistant",
-            "content": response,
-        })
-
-        messages.append({
-            "role": "user",
-            "content": f"Observation: {result}",
-        })
-
-    return (
-        "I reached the maximum number of tool steps for this request. "
-        "Please try the question again."
-    )
-
-
-def _run_termux_pilot(
-    conversation_history: list[dict[str, str]],
-    user_input: str,
-) -> tuple[str, list[dict[str, str]]]:
-    """Execute one Termux Pilot request."""
-    try:
-        reply = _termux_complete(
-            conversation_history,
-            user_input,
-        )
-
-        updated = list(conversation_history)
-        updated.append({
-            "role": "user",
-            "content": user_input,
-        })
-        updated.append({
-            "role": "assistant",
-            "content": reply,
-        })
-
-        updated = updated[-(PILOT_MAX_HISTORY * 2):]
-
-        return reply, updated
-
-    except KeyboardInterrupt:
-        raise
-
-    except Exception as exc:
-        report_to_engineer(str(exc), user_input)
-        raise
-
-
 
 def _handle_slash_command(cmd: str) -> bool:
     """Handle slash commands. Returns True if a command was handled."""
@@ -949,19 +589,11 @@ def main():
     except AttributeError:
         pass  # SIGPIPE not available on Windows
 
-    # Termux uses the lightweight direct LLMProvider runtime.
-    # Other operating systems keep the existing LangGraph runtime.
-    termux_mode = _is_termux()
-
-    if not termux_mode and app is None:
+    if app is None:
         _require_langchain_runtime()
 
     print_tricolor_banner()
-
-    if termux_mode:
-        conversation_history: list[dict[str, str]] = []
-    else:
-        conversation_history: List[BaseMessage] = []
+    conversation_history: List[BaseMessage] = []
 
     while True:
         try:
@@ -994,55 +626,27 @@ def main():
                 conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
                 continue
 
-            # ── AI reasoning loop ─────────────────────────────────────
-            # Termux uses the lightweight direct LLMProvider path.
-            # Desktop/server platforms keep the existing LangGraph path.
+            # ── AI reasoning loop (with shimmer animation) ──
+            state = {"messages": conversation_history + [HumanMessage(content=user_input)]}
             final_agent_reply: Optional[str] = None
             _stream_error = False
             start_waiting()
-
             try:
-                if termux_mode:
-                    final_agent_reply, conversation_history = _run_termux_pilot(
-                        conversation_history,
-                        user_input,
-                    )
-                else:
-                    state = {
-                        "messages": conversation_history + [
-                            HumanMessage(content=user_input)
-                        ]
-                    }
-
-                    for output in app.stream(
-                        state,
-                        config={"recursion_limit": 25},
-                    ):
-                        for key, value in output.items():
-                            if (
-                                key == "agent"
-                                and value.get("next_step") == "end"
-                            ):
-                                final_agent_reply = (
-                                    value["messages"][-1].content
-                                )
-
+                for output in app.stream(state, config={"recursion_limit": 25}):
+                    for key, value in output.items():
+                        if key == "agent" and value.get("next_step") == "end":
+                            final_agent_reply = value["messages"][-1].content  # type: ignore[index]
             except KeyboardInterrupt:
+                # Ctrl+C during AI processing — cancel the current query, not the app
                 stop_waiting()
-                console.print(
-                    "\n  [color(208)]\\[*][/color(208)] Query cancelled."
-                )
+                console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
-
             except Exception as e:
                 report_to_engineer(str(e), user_input)
                 _stream_error = True
                 stop_waiting()
                 render_error(str(e))
-                final_agent_reply = (
-                    "I encountered an error. The Engineer is on it."
-                )
-
+                final_agent_reply = "I encountered an error. The Engineer is on it."
             finally:
                 stop_waiting()
 
@@ -1057,16 +661,11 @@ def main():
                     if tts_enabled():
                         speak(final_agent_reply)
 
-                # Termux history is already updated by _run_termux_pilot().
-                # Desktop/server history continues to use LangChain messages.
-                if not termux_mode:
-                    conversation_history.extend([
-                        HumanMessage(content=user_input),
-                        AIMessage(content=final_agent_reply),
-                    ])
-                    conversation_history = conversation_history[
-                        -PILOT_MAX_HISTORY:
-                    ]
+                conversation_history.extend([
+                    HumanMessage(content=user_input),
+                    AIMessage(content=final_agent_reply),
+                ])
+                conversation_history = conversation_history[-PILOT_MAX_HISTORY:]
 
         except (EOFError, KeyboardInterrupt):
             render_goodbye()
