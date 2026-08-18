@@ -352,8 +352,14 @@ _termux_use_native_pydantic_core() {
 # and provides the stdlib fallback that the actual package would use anyway.
 #
 # Currently stubbed:
-#   uuid-utils   — langchain-core uses it for faster UUID generation but wraps
-#                  the import in try/except and falls back to stdlib uuid.uuid4.
+#   uuid-utils   — langchain-core uses it for faster UUID generation. NOTE: it
+#                  does NOT fall back gracefully. langchain_core.runnables
+#                  resolves names through a lazy module __getattr__, so a
+#                  missing piece surfaces as a bare ImportError at first use:
+#                  "module 'langchain_core.runnables'.'base' not found
+#                  (No module named 'uuid_utils.compat')". The stub therefore
+#                  has to cover every submodule that is imported, not just the
+#                  top-level package.
 _create_termux_native_stubs() {
     local venv="$1"
     local python_cmd="$venv/bin/python3"
@@ -379,16 +385,82 @@ _create_termux_native_stubs() {
     }
 
     # uuid-utils stub --------------------------------------------------------
-    # langchain-core uses it for faster UUID generation; falls back to stdlib
-    # uuid on ImportError, so a pure-Python stub is fully compatible.
-    if [[ ! -d "$site_packages/uuid_utils" ]]; then
+    # Backed by stdlib `uuid`. Must provide the uuid_utils.compat submodule as
+    # well: langchain-core imports `uuid_utils.compat`, and a stub with only
+    # __init__.py made langchain_core.runnables fail to import entirely.
+    #
+    # `compat` is the real package's stdlib-compatible surface — it returns
+    # uuid.UUID instances rather than the Rust type — so a stdlib-backed stub
+    # matches its semantics exactly.
+    #
+    # Rewritten unconditionally when compat.py is absent, so a phone carrying
+    # the older incomplete stub is repaired instead of skipped by the
+    # directory-exists check.
+    if [[ ! -f "$site_packages/uuid_utils/compat.py" ]]; then
         mkdir -p "$site_packages/uuid_utils"
+        cat > "$site_packages/uuid_utils/_stub_impl.py" << 'PYEOF'
+"""Termux stub for uuid-utils (Rust extension, no Android/aarch64 wheel).
+
+Backed by the standard library. uuid1/3/4/5 and the NAMESPACE_* constants come
+straight from `uuid`; uuid6/7/8 do not exist in stdlib before 3.14, so they are
+provided here.
+"""
+import os as _os
+import time as _time
+from uuid import (  # noqa: F401
+    UUID,
+    NAMESPACE_DNS,
+    NAMESPACE_OID,
+    NAMESPACE_URL,
+    NAMESPACE_X500,
+    getnode,
+    uuid1,
+    uuid3,
+    uuid4,
+    uuid5,
+)
+
+try:  # Python 3.14+ ships these.
+    from uuid import uuid6, uuid7, uuid8  # noqa: F401
+except ImportError:
+    def uuid7() -> UUID:
+        """Time-ordered UUIDv7: 48-bit big-endian millisecond timestamp, then
+        random bits, with the version and variant fields set per RFC 9562."""
+        ms = int(_time.time() * 1000) & ((1 << 48) - 1)
+        rand = int.from_bytes(_os.urandom(10), "big")
+        value = (ms << 80) | (rand & ((1 << 80) - 1))
+        value &= ~(0xF << 76)          # clear version nibble
+        value |= 0x7 << 76             # version 7
+        value &= ~(0x3 << 62)          # clear variant bits
+        value |= 0x2 << 62             # RFC 4122 variant
+        return UUID(int=value)
+
+    def uuid6() -> UUID:
+        # Also time-ordered; uuid7 is a valid stand-in for a stub's purposes.
+        return uuid7()
+
+    def uuid8() -> UUID:
+        # v8 is "custom layout" by definition; random is a legitimate choice.
+        return uuid4()
+PYEOF
         cat > "$site_packages/uuid_utils/__init__.py" << 'PYEOF'
-# Termux stub: uuid-utils Rust extension cannot compile on Android/aarch64.
-from uuid import UUID, uuid1, uuid3, uuid4, uuid5
+from uuid_utils._stub_impl import *  # noqa: F401,F403
+from uuid_utils._stub_impl import (  # noqa: F401
+    UUID, getnode, uuid1, uuid3, uuid4, uuid5, uuid6, uuid7, uuid8,
+    NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500,
+)
+PYEOF
+        cat > "$site_packages/uuid_utils/compat.py" << 'PYEOF'
+# uuid_utils.compat — the real package's stdlib-compatible API, which returns
+# uuid.UUID instances. This stub is stdlib-backed, so it already matches.
+from uuid_utils._stub_impl import *  # noqa: F401,F403
+from uuid_utils._stub_impl import (  # noqa: F401
+    UUID, getnode, uuid1, uuid3, uuid4, uuid5, uuid6, uuid7, uuid8,
+    NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500,
+)
 PYEOF
         _write_stub_distinfo "$site_packages" "uuid-utils" "0.14.1" "uuid_utils"
-        ok "uuid-utils stub created (pure Python, Termux-compatible)"
+        ok "uuid-utils stub created (stdlib-backed, includes uuid_utils.compat)"
     fi
 
     # ormsgpack stub ---------------------------------------------------------
