@@ -1144,6 +1144,38 @@ _largest_model_that_fits() {
     echo ""; return 1
 }
 
+# Run `ollama pull` with its download progress visible.
+#
+# ollama writes its progress bar to STDERR, so the previous `2>/dev/null` threw
+# away the only feedback a multi-hundred-MB download produces. The install just
+# sat there for minutes looking hung — which is exactly what it looked like.
+#
+# Deliberately NOT wrapped in run_with_spinner: that captures output to a file
+# and shows only the last line, which mangles a \r-driven progress bar. Run it
+# in the foreground and unredirected instead, the same way install_ollama keeps
+# the official installer in the foreground. ollama draws a real bar (percent,
+# size, rate, ETA) when stderr is a TTY and falls back to periodic plain lines
+# when it is not, so piped installs stay readable too.
+_ollama_pull_with_progress() {
+    local model="$1"
+    local est_mb; est_mb=$(_model_size_mb "$model")
+
+    info "Pulling ${BOLD}${model}${RESET} — roughly ${est_mb} MB."
+    info "Live progress from ollama follows. This is a download, not a hang."
+    echo ""
+
+    local t0=$SECONDS rc=0
+    ollama pull "$model" || rc=$?
+    echo ""
+
+    if (( rc == 0 )); then
+        ok "Pulled $model in $(_format_elapsed $(( SECONDS - t0 )))"
+        return 0
+    fi
+    warn "ollama pull $model failed after $(_format_elapsed $(( SECONDS - t0 ))) (exit $rc)"
+    return "$rc"
+}
+
 # Pull the best ollama model.
 #   $1 (optional) — preferred model tag (e.g. "llama3.1:8b")
 #
@@ -1173,8 +1205,7 @@ _pull_ollama_model() {
             _save_model_config "$requested_model"
             return 0
         fi
-        info "Pulling model: $requested_model (this may take a few minutes)..."
-        if ollama pull "$requested_model" 2>/dev/null; then
+        if _ollama_pull_with_progress "$requested_model"; then
             _save_model_config "$requested_model"
             return 0
         fi
@@ -1239,9 +1270,8 @@ _pull_ollama_model() {
     if _is_termux; then
         default_model=$(_termux_model_for_ram)
     fi
-    info "No local models found. Pulling $default_model as default (this may take a few minutes)..."
-    if ollama pull "$default_model" 2>/dev/null; then
-        ok "Default model $default_model ready"
+    info "No local models found — falling back to the default model."
+    if _ollama_pull_with_progress "$default_model"; then
         _save_model_config "$default_model"
     else
         warn "Could not pull $default_model — run manually: ollama pull $default_model"
