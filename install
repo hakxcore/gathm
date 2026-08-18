@@ -2562,32 +2562,77 @@ verify() {
     if [[ -x "$pilot_py" ]]; then
         local missing_mods
         missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
-# import name -> pip package name
-mods = {
-    "pydantic_core": "pydantic", "langchain_core": "langchain-core",
-    "langgraph": "langgraph", "rich": "rich", "dotenv": "python-dotenv",
-    "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
-    "requests": "requests",
-}
+# Import what Pilot actually imports, not just the top-level packages.
+#
+# Importing `langchain_core` and `langgraph` alone is not a useful check: both
+# top-level packages import cleanly even when the submodules Pilot needs are
+# broken. langchain_core resolves public names lazily via module __getattr__,
+# so a version mismatch only surfaces on the real `from ... import ...`. That
+# gap let verify() report "All checks passed!" on a phone where Pilot then
+# died at startup on langchain_core.runnables.base.
+#
+# Each entry is (statement to execute, pip package to blame).
+checks = [
+    ("import pydantic_core", "pydantic"),
+    ("from langchain_core.messages import AIMessage, BaseMessage, HumanMessage",
+     "langchain-core"),
+    ("from langchain_core.runnables import Runnable", "langchain-core"),
+    ("from langgraph.graph import StateGraph, END", "langgraph"),
+    ("import rich", "rich"),
+    ("import dotenv", "python-dotenv"),
+    ("import prompt_toolkit", "prompt_toolkit"),
+    ("import bs4", "beautifulsoup4"),
+    ("import requests", "requests"),
+]
 missing = []
-for m, pkg in mods.items():
+details = []
+for stmt, pkg in checks:
     try:
-        __import__(m)
-    except Exception:
-        missing.append(pkg)
+        exec(stmt, {})
+    except Exception as exc:
+        if pkg not in missing:
+            missing.append(pkg)
+        # Keep the real exception: "langchain-core is missing" is misleading
+        # when the package is installed and something it imports is not. The
+        # underlying message names the actual culprit.
+        details.append("%s: %s: %s" % (stmt.split(" import ")[0], type(exc).__name__, exc))
+# Line 1: packages to blame. Remaining lines: what actually went wrong.
 print(" ".join(missing))
+for d in details:
+    print(d)
 PY
 )
-        if [[ -z "$missing_mods" ]]; then
+        # First line is the package list; any following lines are the real
+        # exceptions, which is what actually identifies the problem.
+        local _dep_pkgs _dep_details
+        _dep_pkgs=$(printf '%s\n' "$missing_mods" | head -1)
+        _dep_details=$(printf '%s\n' "$missing_mods" | tail -n +2)
+        if [[ -z "$_dep_pkgs" ]]; then
             ok "Pilot runtime (venv + dependencies)"
         else
-            warn "Pilot runtime missing/broken: $missing_mods"
-            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
+            warn "Pilot runtime missing/broken: $_dep_pkgs"
+            if [[ -n "$_dep_details" ]]; then
+                printf '%s\n' "$_dep_details" | sed 's/^/       /'
+            fi
+            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $_dep_pkgs)"
         fi
 
         # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
         if "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
             ok "GUI server dependencies (fastapi, uvicorn)"
+            # uvicorn loads the app as "api.server:app", so that module path has
+            # to resolve from the repo root. find_spec checks it without
+            # executing the module, so this needs no running server.
+            if "$pilot_py" -c "
+import importlib.util, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+sys.exit(0 if importlib.util.find_spec('api.server') else 1)
+" 2>/dev/null; then
+                ok "GUI app importable (api.server)"
+            else
+                warn "GUI app not importable as api.server (GUI won't start)"
+                note_missing "GUI app (api.server)" "check $SCRIPT_DIR/api/server.py is present and importable"
+            fi
         else
             warn "GUI server dependencies missing (GUI won't start; Pilot CLI still works)"
             note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"

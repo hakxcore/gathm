@@ -1020,6 +1020,15 @@ def main():
 ╚══════════════════════════════════════════════════╝
 """)
 
+    # uvicorn imports the app by module path, so the repo root has to be on
+    # sys.path. When this file is run as a script — `python3 api/server.py`,
+    # which is how the installer and the gathm-api shortcut both launch it —
+    # sys.path[0] is the api/ directory instead, and "api.server:app" fails
+    # with ModuleNotFoundError: No module named 'api'.
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+
     uvicorn.run(
         "api.server:app",
         host=host,

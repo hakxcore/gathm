@@ -19,7 +19,14 @@ LANGCHAIN_AVAILABLE = True
 try:
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
     from langgraph.graph import StateGraph, END
-except ModuleNotFoundError as exc:
+except ImportError as exc:
+    # ImportError, not just ModuleNotFoundError. langchain_core resolves public
+    # names lazily through a module __getattr__ and re-raises any miss as a
+    # bare ImportError -- e.g. "module 'langchain_core.runnables'.'base' not
+    # found" when a version mismatch or a broken install prevents a submodule
+    # from importing. That is not a ModuleNotFoundError, so a narrower except
+    # let it escape and crashed Pilot with a traceback instead of falling back
+    # to the degraded no-LangChain mode this block exists to provide.
     LANGCHAIN_IMPORT_ERROR = exc
     LANGCHAIN_AVAILABLE = False
     AIMessage = Any  # type: ignore[assignment]
