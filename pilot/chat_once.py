@@ -58,45 +58,15 @@ def _read_request() -> dict:
 
 
 def _describe_failure(exc: BaseException) -> str:
-    """Turn a raw agent exception into something the user can act on.
-
-    A dead Ollama server surfaced as bare "agent error: [Errno 111]
-    Connection refused", which says nothing about what to start. Walk the
-    exception chain looking for a refused/unreachable connection and name the
-    server and the fix instead.
-    """
-    seen = []
-    cur: BaseException | None = exc
-    while cur is not None and len(seen) < 10:
-        seen.append(cur)
-        cur = cur.__cause__ or cur.__context__
-
-    text = " | ".join("%s: %s" % (type(e).__name__, e) for e in seen).lower()
-    refused = (
-        "errno 111" in text
-        or "connection refused" in text
-        or "connectionerror" in text
-        or "failed to establish a new connection" in text
-        or "max retries exceeded" in text
-        or "all connection attempts failed" in text
-        or "cannot connect to host" in text
-    )
-    if not refused:
-        return "agent error: %s" % exc
-
-    backend = os.environ.get("GATHM_LLM_BACKEND", "ollama")
-    if backend == "ollama":
-        url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        host = url.split("/v1")[0]
-        return (
-            "cannot reach the Ollama server at %s — it is not running. "
-            "Start it with:  ollama serve  (then retry)" % host
-        )
-    return (
-        "cannot reach the %s LLM backend — the connection was refused. "
-        "Check that it is running and reachable." % backend
-    )
-
+    """Delegate to the agent's describer so both paths say the same thing."""
+    try:
+        from main import describe_agent_failure  # type: ignore[import]
+    except ImportError:
+        try:
+            from pilot.main import describe_agent_failure  # type: ignore[import]
+        except ImportError:
+            return "agent error: %s" % exc
+    return describe_agent_failure(exc)
 
 def main() -> int:
     req = _read_request()

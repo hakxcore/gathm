@@ -526,26 +526,47 @@ def clean_transcript(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# audiocpp_cli labels the transcript on stdout, e.g.
+#   text_output=How are you, hello.
+# which is how "text_output=" ended up prepended to a perfectly good
+# transcription on-device.
+_LABEL_RE = re.compile(r"^\s*(text_output|text|transcript|result|output)\s*[=:]\s*",
+                       re.I)
+
+
+def _strip_label(line: str) -> str:
+    return _LABEL_RE.sub("", line or "").strip()
+
+
 def _transcript_from_stdout(text: str) -> str:
     """Last-resort scrape when no JSON was produced.
 
     Framework logs, the metrics block and progress lines all share stdout with
-    the transcript, so lines that look like instrumentation are dropped and the
-    longest remaining line wins — a transcript is prose, log lines are not.
+    the transcript. A labelled line wins outright; otherwise instrumentation is
+    dropped and the longest remaining line is taken, since a transcript is prose
+    and log lines are not.
     """
     noise = ("rtf", "wall", "load", "sample rate", "backend", "model", "warn",
              "error", "info", "debug", "audio duration", "threads")
+    labelled = ""
     best = ""
     for raw in (text or "").splitlines():
         line = clean_transcript(raw)
-        if not line or line.startswith(("[", "{", "#", "-")):
+        if not line:
+            continue
+        if _LABEL_RE.match(line):
+            stripped = _strip_label(line)
+            if stripped and len(stripped) > len(labelled):
+                labelled = stripped
+            continue
+        if line.startswith(("[", "{", "#", "-")):
             continue
         low = line.lower()
         if any(tok in low for tok in noise) and ":" in line:
             continue
         if len(line) > len(best):
             best = line
-    return best
+    return labelled or best
 
 
 def transcribe(audio_path: str) -> tuple[bool, str]:
@@ -604,7 +625,7 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
                 with open(seg_path) as fh:
                     pieces: list = []
                     _collect_text(json.load(fh), pieces)
-                text = clean_transcript(" ".join(pieces))
+                text = clean_transcript(" ".join(_strip_label(p) for p in pieces))
         except Exception:  # noqa: BLE001 - fall back to stdout below
             text = ""
         if not text:

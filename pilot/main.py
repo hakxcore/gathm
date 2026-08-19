@@ -158,6 +158,48 @@ def print_tricolor_banner():
     render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
 
+def describe_agent_failure(exc: BaseException) -> str:
+    """Turn a raw agent exception into something the user can act on.
+
+    A dead Ollama server surfaced as bare "[Errno 111] Connection refused" in
+    the TUI and "agent error: [Errno 111] ..." over the API — neither says what
+    to start. Walk the
+    exception chain looking for a refused/unreachable connection and name the
+    server and the fix instead.
+    """
+    seen = []
+    cur: BaseException | None = exc
+    while cur is not None and len(seen) < 10:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+
+    text = " | ".join("%s: %s" % (type(e).__name__, e) for e in seen).lower()
+    refused = (
+        "errno 111" in text
+        or "connection refused" in text
+        or "connectionerror" in text
+        or "failed to establish a new connection" in text
+        or "max retries exceeded" in text
+        or "all connection attempts failed" in text
+        or "cannot connect to host" in text
+    )
+    if not refused:
+        return "agent error: %s" % exc
+
+    backend = os.environ.get("GATHM_LLM_BACKEND", "ollama")
+    if backend == "ollama":
+        url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        host = url.split("/v1")[0]
+        return (
+            "cannot reach the Ollama server at %s — it is not running. "
+            "Start it with:  ollama serve  (then retry)" % host
+        )
+    return (
+        "cannot reach the %s LLM backend — the connection was refused. "
+        "Check that it is running and reachable." % backend
+    )
+
+
 def report_to_engineer(error_msg: str, task: str):
     """Notify the user and trigger the AutoGen Engineer."""
     print(f"\n{SAFFRON}[!] Issue Detected:{RESET} {error_msg}")
@@ -975,11 +1017,15 @@ def main():
                 console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
+                # The TUI used to print the raw exception, so a stopped Ollama
+                # server read as "[Errno 111] Connection refused" with no hint
+                # that `ollama serve` is the fix. Same describer as the API path.
+                described = describe_agent_failure(e)
                 report_to_engineer(str(e), user_input)
                 _stream_error = True
                 stop_waiting()
-                render_error(str(e))
-                final_agent_reply = "I encountered an error. The Engineer is on it."
+                render_error(described)
+                final_agent_reply = described
             finally:
                 stop_waiting()
 
