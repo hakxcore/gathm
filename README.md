@@ -465,6 +465,12 @@ reclaim the tab no longer loses the conversation or the model's context; type
 Shift+Enter adds a newline), and the mic button shows a recording indicator with
 an elapsed timer while it captures.
 
+If the server refuses to start with `address already in use`, an older Gathm
+API server is still on that port — and it is the one the browser talks to, so
+pulling new code appears to change nothing. Stop it with
+`lsof -ti:8080 | xargs kill` (the server now says this instead of a bare
+`[Errno 48]`).
+
 **Voice input needs a secure origin.** Browsers only expose a microphone to
 `https://` pages or to `localhost`/`127.0.0.1`. Opening the GUI on the phone's
 LAN address gives no microphone at all — the page says so rather than appearing

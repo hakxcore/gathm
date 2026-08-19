@@ -558,6 +558,42 @@ def asr_enabled() -> bool:
     return bool(cfg["bin"]) and bool(cfg["model"]) and os.path.isdir(cfg["model"])
 
 
+def _is_termux() -> bool:
+    """Termux, by its two definitive signals.
+
+    Deliberately not "is termux-setup-storage on PATH": a stray script of that
+    name anywhere on PATH would make a desktop claim to be Android and hand the
+    user Termux-only advice.
+    """
+    if "com.termux" in (os.environ.get("PREFIX") or ""):
+        return True
+    return os.path.isdir("/data/data/com.termux/files/usr")
+
+
+def asr_unavailable_reason() -> str:
+    """Why transcription cannot run, phrased for this platform. "" if it can.
+
+    The rebuild command is Termux-specific, and telling a Mac user to run
+    `GATHM_AUDIOCPP_MODELS=… ./install` is advice that cannot work: audio.cpp is
+    not part of the install there at all. Say what is actually true instead.
+    """
+    if asr_enabled():
+        return ""
+    cfg = resolve_asr()
+    if not cfg["bin"]:
+        if _is_termux():
+            return "audiocpp_cli is not installed — run ./install"
+        return ("voice input needs the audio.cpp speech runtime, which Gathm "
+                "builds on Termux only; transcription is not available on this "
+                "platform yet")
+    if not _is_termux():
+        return ("this audio.cpp build has no speech-to-text model; Gathm only "
+                "installs one on Termux")
+    return ("no speech-to-text model installed — rebuild with "
+            "GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
+            "GATHM_AUDIOCPP_FORCE=1 ./install")
+
+
 def _collect_text(obj, out: list) -> None:
     """Depth-first walk collecting every "text" value, in document order.
 
@@ -631,9 +667,7 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
     if not cfg["bin"]:
         return False, "audiocpp_cli not found (run ./install on Termux)"
     if not cfg["model"]:
-        return False, ("no speech-to-text model installed — rebuild with "
-                       "GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
-                       "GATHM_AUDIOCPP_FORCE=1 ./install")
+        return False, asr_unavailable_reason()
     if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
         return False, f"no audio to transcribe ({audio_path})"
 
@@ -822,12 +856,7 @@ def record(seconds: int, out_path: str) -> tuple[bool, str]:
 def listen(seconds: int | None = None) -> tuple[bool, str]:
     """Record, convert, transcribe. Returns (ok, text) or (False, reason)."""
     if not asr_enabled():
-        cfg = resolve_asr()
-        if not cfg["bin"]:
-            return False, "audiocpp_cli not installed (run ./install on Termux)"
-        return False, ("no speech-to-text model installed — rebuild with "
-                       "GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
-                       "GATHM_AUDIOCPP_FORCE=1 ./install")
+        return False, asr_unavailable_reason()
     if seconds is None:
         try:
             seconds = int(os.environ.get("GATHM_LISTEN_SECONDS", "8"))

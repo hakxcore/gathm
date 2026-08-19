@@ -549,10 +549,12 @@ async function startVoice() {
     if (!asrAvailable) {
         await checkTranscribe();
         if (!asrAvailable) {
+            // The server's reason is platform-specific — it knows whether a
+            // Termux rebuild is the fix or whether this platform has no
+            // transcription at all. Do not append advice of our own.
             addMessage('Voice input is unavailable: ' +
-                       (asrReason || 'the server reports no speech-to-text model') +
-                       '. Rebuild with: GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr ' +
-                       'GATHM_AUDIOCPP_FORCE=1 ./install', 'bot', 'bot-error');
+                       (asrReason || 'the server reports no speech-to-text engine') +
+                       '.', 'bot', 'bot-error');
             return;
         }
     }

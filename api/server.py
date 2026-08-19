@@ -1055,14 +1055,11 @@ async def transcribe_status():
         return {"available": False, "reason": "lib/speech.py not importable"}
     cfg = mod.resolve_asr()
     available = mod.asr_enabled()
-    reason = ""
-    if not cfg["bin"]:
-        reason = "audiocpp_cli not installed"
-    elif not available:
-        reason = "no speech-to-text model installed"
     return {
         "available": available,
-        "reason": reason,
+        # Phrased for the platform: the Termux rebuild command is not advice a
+        # macOS user can act on, and the GUI shows this text verbatim.
+        "reason": mod.asr_unavailable_reason(),
         "family": cfg["family"],
         "model": cfg["model"],
     }
@@ -1080,10 +1077,7 @@ async def transcribe_audio(request: Request):
     if mod is None:
         raise HTTPException(503, "speech runtime unavailable")
     if not mod.asr_enabled():
-        cfg = mod.resolve_asr()
-        if not cfg["bin"]:
-            raise HTTPException(503, "audiocpp_cli not installed")
-        raise HTTPException(503, "no speech-to-text model installed")
+        raise HTTPException(503, mod.asr_unavailable_reason())
 
     audio = await request.body()
     if not audio:
@@ -1262,6 +1256,30 @@ def main():
     _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
+
+    # Check the port before uvicorn does. Its own failure is a one-line
+    # "[Errno 48] address already in use" printed *after* "Application startup
+    # complete", which reads like the server came up — and an older server left
+    # running on the port is then the one the browser talks to, so a pull looks
+    # like it changed nothing. Name that cause and how to clear it.
+    import socket  # noqa: PLC0415 - only needed on this path
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError:
+        kill_hint = (f"lsof -ti:{port} | xargs kill" if sys.platform != "win32"
+                     else f"netstat -ano | findstr :{port}")
+        print(
+            f"ERROR: something is already listening on {host}:{port}.\n"
+            "       If that is an older Gathm API server, the browser is still\n"
+            "       talking to it and code changes will not take effect until it\n"
+            f"       is stopped:\n\n           {kill_hint}\n\n"
+            f"       Or start this one elsewhere:  gathm-api --port {port + 1}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    finally:
+        probe.close()
 
     uvicorn.run(
         "api.server:app",
