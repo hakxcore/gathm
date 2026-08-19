@@ -402,6 +402,7 @@ def render_help() -> None:
         ("/clear",  "Clear screen and redraw welcome"),
         ("/model",  "Show current model / backend info"),
         ("/speak",  "Voice status; /speak on|off, or /speak <text> to test"),
+        ("/listen", "Record from the mic and ask what you said (/listen 5)"),
         ("/quit",   "Exit Pilot"),
         ("?",       "Show this help screen"),
     ]:

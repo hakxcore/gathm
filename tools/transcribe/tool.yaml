@@ -1,0 +1,28 @@
+name: transcribe
+version: "1.0.0"
+description: "Transcribes speech in an audio file to text on-device, with no network"
+category: media
+requires_internet: false
+
+dependencies:
+  system: [python3]
+
+input_schema:
+  arguments:
+    - name: audio_file
+      type: string
+      required: false
+      description: "Path to the audio file to transcribe (wav, m4a, mp3, opus)"
+  flags:
+    - flag: "l"
+      description: "Record from the microphone for N seconds, then transcribe"
+    - flag: "-h"
+      description: "Show the help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "The recognized speech as plain text"
+
+fallback_tool: null
+tags: [media, speech, transcription, audio, offline, stt]

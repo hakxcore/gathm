@@ -587,6 +587,55 @@ else:
     workflow = None
     app = None
 
+def _voice_input(arg: str) -> Optional[str]:
+    """/listen — record from the mic and return the transcript as the query.
+
+    Deliberately not a tool: the agent needs the words before it can decide
+    anything, so listening happens at the input edge, ahead of the graph.
+    """
+    try:
+        from lib import speech
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"\n  [color(196)][x][/color(196)] speech unavailable: {exc}")
+        return None
+
+    seconds = None
+    if arg:
+        try:
+            seconds = int(arg.split()[0])
+        except ValueError:
+            console.print(f"\n  [color(214)][!][/color(214)] /listen takes seconds, "
+                          f"got '{arg}'")
+            return None
+
+    if not speech.asr_enabled():
+        cfg = speech.resolve_asr()
+        if not cfg["bin"]:
+            console.print("\n  [color(214)][!][/color(214)] Speech runtime not "
+                          "installed. Run ./install on Termux.")
+        else:
+            console.print("\n  [color(214)][!][/color(214)] No speech-to-text model "
+                          "installed. Add it with:")
+            console.print("      [dim]GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
+                          "GATHM_AUDIOCPP_FORCE=1 ./install[/dim]")
+        return None
+
+    if speech.find_recorder() is None:
+        console.print("\n  [color(214)][!][/color(214)] No way to record audio. On "
+                      "Termux: [dim]pkg install termux-api[/dim] plus the "
+                      "Termux:API app.")
+        return None
+
+    secs = seconds or int(os.getenv("GATHM_LISTEN_SECONDS", "8"))
+    console.print(f"\n  [color(208)]🎤 Listening for {secs}s...[/color(208)]")
+    ok, text = speech.listen(seconds)
+    if not ok:
+        console.print(f"  [color(196)][x][/color(196)] {text}")
+        return None
+    console.print(f"  [dim]heard:[/dim] {text}")
+    return text
+
+
 def _handle_speak_command(arg: str) -> None:
     """/speak — inspect, toggle, or test the audio.cpp voice.
 
@@ -703,6 +752,15 @@ def main():
             # long reply outlives the turn that produced it. Whatever the user
             # types next takes precedence over hearing the rest of it.
             stop_speaking()
+
+            # /listen is not a slash command like the others: it produces the
+            # query rather than printing something, so the transcript falls
+            # through into the normal turn below.
+            if user_input.lower() == "/listen" or user_input.lower().startswith("/listen "):
+                heard = _voice_input(user_input[len("/listen"):].strip())
+                if not heard:
+                    continue
+                user_input = heard
 
             # ── Exit ──
             if user_input.lower() in ("exit", "quit", "/quit", "/exit"):

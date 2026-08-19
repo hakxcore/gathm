@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Author: Hakxcore
+# Description: Transcribes speech in an audio file to text, on-device.
+
+# Source the shared utility library
+source "$(dirname "$0")/../../lib/utils.bash"
+
+currentVersion="1.0.0"
+
+GATHM_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SPEECH_LIB="$GATHM_ROOT/lib/speech.py"
+
+usage()
+{
+  cat <<USAGE
+Transcribe (v$currentVersion)
+Description: Turns speech in an audio file into text using the on-device
+             audio.cpp runtime. No network, no API key.
+
+Usage: transcribe <audio-file>
+  -l <secs>   Record from the microphone for <secs> seconds, then transcribe
+  -h          Show the help
+  -v          Get the tool version
+
+Examples:
+  transcribe recording.wav
+  transcribe -l 5
+
+Setup: the speech-to-text model ships with ./install on Termux. If it is
+missing, rebuild the runtime with the ASR family compiled in:
+  GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr GATHM_AUDIOCPP_FORCE=1 ./install
+USAGE
+}
+
+RECORD_SECS=""
+
+while getopts "l:vh" opt; do
+  case "$opt" in
+    l) RECORD_SECS="$OPTARG" ;;
+    v) echo "Version $currentVersion"; exit 0 ;;
+    h) usage; exit 0 ;;
+    *) usage; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+check_dependencies python3
+
+if [[ ! -f "$SPEECH_LIB" ]]; then
+    echo "Error: speech library missing ($SPEECH_LIB)"
+    exit 1
+fi
+
+if [[ -n "$RECORD_SECS" ]]; then
+    if [[ ! "$RECORD_SECS" =~ ^[0-9]+$ ]]; then
+        echo "Error: -l takes a number of seconds, got '$RECORD_SECS'"
+        exit 1
+    fi
+    python3 "$SPEECH_LIB" --listen "$RECORD_SECS"
+    exit $?
+fi
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+AUDIO="$1"
+if [[ ! -f "$AUDIO" ]]; then
+    echo "Error: File not found: $AUDIO"
+    exit 1
+fi
+
+python3 "$SPEECH_LIB" --transcribe "$AUDIO"

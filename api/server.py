@@ -394,6 +394,11 @@ def _pilot_python() -> str:
 # so a generous value costs nothing when the reply is fast.
 CHAT_TIMEOUT = int(os.environ.get("GATHM_CHAT_TIMEOUT", "600"))
 
+# Ceiling on an uploaded recording. 16 kHz mono 16-bit WAV is ~32 KB/s, so 25 MB
+# is over ten minutes of speech — far more than a spoken query, and short of
+# anything that would exhaust memory on a phone.
+MAX_AUDIO_BYTES = int(os.environ.get("GATHM_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
+
 
 _SPEECH_MODULE: Any = None
 _SPEECH_TRIED = False
@@ -1039,6 +1044,87 @@ async def speech_status():
         "model": cfg["model"],
     }
 
+@app.get("/api/v1/transcribe/status", tags=["speech"])
+async def transcribe_status():
+    """Whether the browser's microphone can be turned into text here."""
+    mod = _speech()
+    if mod is None:
+        return {"available": False, "reason": "lib/speech.py not importable"}
+    cfg = mod.resolve_asr()
+    available = mod.asr_enabled()
+    reason = ""
+    if not cfg["bin"]:
+        reason = "audiocpp_cli not installed"
+    elif not available:
+        reason = "no speech-to-text model installed"
+    return {
+        "available": available,
+        "reason": reason,
+        "family": cfg["family"],
+        "model": cfg["model"],
+    }
+
+@app.post("/api/v1/transcribe", tags=["speech"])
+async def transcribe_audio(request: Request):
+    """Transcribe an uploaded recording. Body is the raw audio bytes.
+
+    Raw body rather than multipart on purpose: multipart would pull in
+    python-multipart, and the browser has a Blob to hand either way. The GUI
+    records 16 kHz mono WAV, which is what the ASR models want, so no
+    conversion is needed on this path.
+    """
+    mod = _speech()
+    if mod is None:
+        raise HTTPException(503, "speech runtime unavailable")
+    if not mod.asr_enabled():
+        cfg = mod.resolve_asr()
+        if not cfg["bin"]:
+            raise HTTPException(503, "audiocpp_cli not installed")
+        raise HTTPException(503, "no speech-to-text model installed")
+
+    audio = await request.body()
+    if not audio:
+        raise HTTPException(400, "no audio in the request body")
+    if len(audio) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, f"recording too large (max {MAX_AUDIO_BYTES // 1024 // 1024} MB)")
+
+    suffix = ".wav"
+    ctype = (request.headers.get("content-type") or "").lower()
+    for mime, ext in (("webm", ".webm"), ("ogg", ".ogg"), ("mp4", ".m4a"),
+                      ("mpeg", ".mp3")):
+        if mime in ctype:
+            suffix = ext
+            break
+
+    import tempfile  # noqa: PLC0415 - only this route needs it
+    fd, path = tempfile.mkstemp(prefix="gathm-upload-", suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(audio)
+        # Anything that is not already a WAV goes through ffmpeg first; the
+        # models want 16 kHz mono and will not resample a webm container.
+        if suffix != ".wav":
+            ok, converted = await asyncio.to_thread(mod.to_wav16, path)
+            if not ok:
+                raise HTTPException(503, str(converted))
+            work = converted
+        else:
+            work = path
+        ok, text = await asyncio.to_thread(mod.transcribe, work)
+        if work != path:
+            try:
+                os.unlink(work)
+            except Exception:  # noqa: BLE001
+                pass
+        if not ok:
+            raise HTTPException(422, str(text))
+        return {"text": text}
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:  # noqa: BLE001
+            pass
+
 @app.post("/api/v1/speech", tags=["speech"])
 async def speech_synthesize(body: SpeechRequest):
     """Render text to a WAV with audio.cpp and return the audio itself.
@@ -1107,6 +1193,8 @@ async def api_info():
             "GET /api/v1/agent/status": "Agent status",
             "GET /api/v1/speech/status": "Whether replies can be spoken",
             "POST /api/v1/speech": "Render text to speech (audio/wav)",
+            "GET /api/v1/transcribe/status": "Whether audio can be transcribed",
+            "POST /api/v1/transcribe": "Transcribe raw audio bytes to text",
             "POST /api/v1/agent/heal": "Self-heal tools",
             "POST /api/v1/jobs": "Submit async job — returns 202 + job_id immediately",
             "GET /api/v1/jobs": "List all jobs (filter: ?status=running)",

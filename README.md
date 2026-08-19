@@ -4,7 +4,7 @@ Formerly **Termux-Snippets**.
 
 Gathm is a modular, local-first command intelligence framework for security, networking, and operator workflows. It combines:
 
-- A large tool catalog (53 tools in this branch)
+- A large tool catalog (55 tools in this branch)
 - An orchestration layer (`gathm`) with planning, health, retry, recovery, and caching
 - Multiple user interfaces (CLI, TUI, API server, GUI)
 - Cross-platform support (Linux, macOS, Termux, WSL/Git Bash/MSYS2)
@@ -41,7 +41,7 @@ gathm/
 │   ├── cache.bash             # Output caching with TTL
 │   ├── ratelimit.bash         # Per-tool rate limiting
 │   └── schema.bash            # JSON helpers + manifest parsing
-├── tools/                     # 53 tool wrappers/scripts + tool.yaml manifests
+├── tools/                     # 55 tool wrappers/scripts + tool.yaml manifests
 ├── pilot/                     # Local AI TUI assistant
 ├── engineer/                  # AutoGen-based engineering agent
 ├── api/server.py              # REST API server
@@ -140,6 +140,42 @@ so `./install` also installs `mpv`. `termux-media-player`, `ffplay`, `play`,
 `paplay` and `aplay` are used if already present, or force one with
 `GATHM_AUDIO_PLAYER`.
 
+#### How Gathm listens
+
+The same binary transcribes (`--task asr`), so voice input uses the same
+install. The compiled ASR family is **`sense_asr`** — SenseVoice-Small, ~250 MB
+at q8_0, 23 languages with auto-detection, offline. The Qwen3 ASR models are the
+obvious alternative and are 3-7x larger (0.6B ≈ 700 MB, 1.7B ≈ 1.8 GB) for
+nothing Gathm needs, which is a bad trade on a phone already hosting the LLM.
+
+Listening is deliberately **not** a tool the model can call: the agent needs the
+words before it can decide anything, so transcription happens at the input edge,
+ahead of the reasoning graph.
+
+- **Pilot:** `/listen` records from the microphone and asks what you said.
+  `/listen 5` sets the length (default 8s, or `GATHM_LISTEN_SECONDS`).
+- **GUI:** the mic button now records as well as animating. Tap it, speak, tap
+  again — the transcript lands in the input box and sends. The browser encodes
+  16 kHz mono WAV itself, so no server-side conversion is involved.
+- **Anywhere:** `gathm run transcribe recording.wav` turns a file into text, and
+  is the one speech capability the agent *can* invoke, because "transcribe this
+  file" is a genuine request with a file argument.
+
+Voice input needs two things beyond the runtime, both installed by `./install`:
+`termux-api` for `termux-microphone-record` (**plus the Termux:API app from
+F-Droid**, which an installer cannot do for you) and `ffmpeg`, because the
+recorder encodes AAC and the models want 16 kHz WAV.
+
+Upgrading an install built before `sense_asr` was compiled in:
+
+```bash
+GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr GATHM_AUDIOCPP_FORCE=1 ./install
+```
+
+That reuses the existing build directory, so it compiles the new family rather
+than starting over. `./install --check` says plainly whether the loader, the
+weights, the recorder and the converter are each present.
+
 In Pilot:
 
 ```text
@@ -147,15 +183,19 @@ In Pilot:
 /speak off          silence replies for this session
 /speak on           turn them back on
 /speak hello there  say a phrase, printing the reason if nothing comes out
+/listen             record, transcribe, and ask what you said
+/listen 5           the same, for 5 seconds
 ```
 
 Useful checks:
 
 ```bash
-python3 lib/speech.py "hello from gathm"   # speak a phrase end to end
-python3 lib/speech.py --check              # runtime / model / player report
-audiocpp_cli --list-loaders   # should list: pocket_tts: tts (offline)
-./install --check             # reports runtime, loader, voice model, playback
+python3 lib/speech.py "hello from gathm"    # speak a phrase end to end
+python3 lib/speech.py --listen 5            # record, then print what you said
+python3 lib/speech.py --transcribe clip.wav # transcribe a file
+python3 lib/speech.py --check              # runtime / model / player / mic report
+audiocpp_cli --list-loaders   # should list pocket_tts: tts and sense_asr: asr
+./install --check             # reports every piece of both directions
 ```
 
 Speech options:
@@ -166,6 +206,12 @@ Speech options:
 | `GATHM_SPEAK_MAX_CHARS` | how much of a long reply to read (default 600) |
 | `GATHM_SPEAK_TIMEOUT` | seconds allowed for one synthesis (default 180) |
 | `GATHM_AUDIO_PLAYER` | force a playback command, e.g. `mpv --no-video` |
+| `GATHM_LISTEN_SECONDS` | default recording length (default 8) |
+| `GATHM_ASR_TIMEOUT` | seconds allowed for one transcription (default 300) |
+| `GATHM_AUDIO_RECORDER` | force a recording command |
+| `GATHM_AUDIOCPP_ASR_PACKAGE` | ASR weights to install (default `sensevoice_small_q8`) |
+| `GATHM_AUDIOCPP_ASR_FAMILY` | ASR family to use (default `sense_asr`) |
+| `GATHM_AUDIOCPP_SKIP_ASR_MODEL` | `1` builds the loader but skips the weights |
 
 Build options:
 
@@ -282,6 +328,11 @@ curl http://127.0.0.1:8080/api/v1/speech/status
 curl -X POST http://127.0.0.1:8080/api/v1/speech \
   -H "Content-Type: application/json" \
   -d '{"text":"hello from gathm"}' --output reply.wav
+
+# Transcription: raw audio bytes in, {"text": ...} out
+curl http://127.0.0.1:8080/api/v1/transcribe/status
+curl -X POST http://127.0.0.1:8080/api/v1/transcribe \
+  -H "Content-Type: audio/wav" --data-binary @recording.wav
 ```
 
 Enable API auth:
@@ -309,9 +360,9 @@ Open `http://127.0.0.1:5173`.
 Tool categories from `tools/*/tool.yaml`:
 
 - `security` (19): certinfo, cipher, crypt, cve, dnssec, headersaudit, katana, naabu, nuclei, pdchain, portscan, pwned, robotsaudit, shodan, siteciphers, tipcheck, uncover, urlscan, wafdetect
-- `networking` (14): asn, dns, dnsx, geo, httpprobe, httpx, ipinfo, rdap, rdns, shorturl, subdomains, subfinder, transfer, whois
+- `networking` (15): asn, dns, dnsx, geo, httpprobe, httpx, ipinfo, rdap, rdns, shareterminal, shorturl, subdomains, subfinder, transfer, whois
 - `data` (8): cheat, covidinfo, cryptocurrency, define, googler, movie, news, weather
-- `media` (4): gif, jukebox, lyrics, meme
+- `media` (5): gif, jukebox, lyrics, meme, transcribe
 - `utility` (4): imganalyze, maltego, qrify, strix
 - `finance` (2): currency, stocks
 - `science` (1): newton
@@ -357,6 +408,8 @@ Key environment variables:
   (audio.cpp speech runtime on Termux; see [Voice on Termux](#voice-on-termux-pilot-speech))
 - `GATHM_SPEAK` / `GATHM_SPEAK_MAX_CHARS` / `GATHM_SPEAK_TIMEOUT` / `GATHM_AUDIO_PLAYER`
   (spoken replies)
+- `GATHM_LISTEN_SECONDS` / `GATHM_ASR_TIMEOUT` / `GATHM_AUDIO_RECORDER`
+  / `GATHM_AUDIOCPP_ASR_MODEL` / `GATHM_AUDIOCPP_ASR_FAMILY` (voice input)
 - `OMDB_API_KEY` (movie tool)
 - `VT_API_KEY` / `VIRUSTOTAL_API_KEY` (tipcheck VirusTotal)
 - `ABUSEIPDB_API_KEY` (tipcheck AbuseIPDB)

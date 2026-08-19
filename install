@@ -1786,9 +1786,14 @@ AUDIOCPP_REPO="https://github.com/0xShug0/audio.cpp.git"
 # the difference between a build that finishes and one that does not.
 #
 # pocket_tts specifically: this is the configuration that has actually been
-# built and verified on Termux. Add families here (e.g. qwen3_asr for
-# transcription) via GATHM_AUDIOCPP_MODELS — each one costs build time.
-AUDIOCPP_DEFAULT_MODELS="pocket_tts"
+# built and verified on Termux. Add families here via GATHM_AUDIOCPP_MODELS —
+# each one costs build time.
+#
+# sense_asr is the listening half: SenseVoice-Small, ~250 MB at q8_0, 23
+# languages, offline. The Qwen3 ASR models are the obvious alternative and are
+# 3-7x larger (0.6B ≈ 700 MB, 1.7B ≈ 1.8 GB) for nothing Gathm needs, which is
+# a bad trade on a phone that is already hosting the LLM.
+AUDIOCPP_DEFAULT_MODELS="pocket_tts,sense_asr"
 
 # The voice weights, and how the CLI is invoked to use them. These are the
 # values verified end-to-end on-device:
@@ -1818,6 +1823,21 @@ AUDIOCPP_TTS_VOICE="${GATHM_AUDIOCPP_TTS_VOICE:-alba}"
 # tree. Only a hint — _audiocpp_model_dir falls back to locating the .gguf, so
 # an overridden package in a different target directory still resolves.
 AUDIOCPP_TTS_MODEL_REL="models/PocketTTS-GGUF/english"
+
+# The transcription weights. sensevoice_small_q8 is the sense_asr family's
+# default package in upstream's model_specs/sense_asr.json; it lands in
+# SenseVoice-Small-GGUF and covers 23 languages with auto-detection, offline
+# and streaming. Invoked as:
+#
+#   audiocpp_cli --task asr --family sense_asr \
+#       --model models/SenseVoice-Small-GGUF --backend cpu --audio clip.wav
+AUDIOCPP_ASR_PACKAGE="${GATHM_AUDIOCPP_ASR_PACKAGE:-sensevoice_small_q8}"
+AUDIOCPP_ASR_FAMILY="${GATHM_AUDIOCPP_ASR_FAMILY:-sense_asr}"
+AUDIOCPP_ASR_MODEL_REL="models/SenseVoice-Small-GGUF"
+
+# Set by the TTS smoke test so the ASR smoke test can transcribe it back —
+# turning two separate "it ran" checks into one real round trip.
+_AUDIOCPP_SMOKE_WAV=""
 
 # True on Termux/Android. Prefers the platform detected by main(), falling
 # back to detection so this is also correct when called from `--check`.
@@ -2231,12 +2251,52 @@ _audiocpp_model_dir() {
     # `|| true` guards `set -o pipefail`: head closing the pipe kills find with
     # SIGPIPE, which would otherwise fail this precisely when there is a lot to
     # find.
-    hit=$(find "$src/models" -maxdepth 4 -name '*.gguf' -type f 2>/dev/null | head -1) || true
+    # Prefer a TTS-looking path before anything else: with an ASR family also
+    # installed, models/ holds weights this function must not return.
+    hit=$(find "$src/models" -maxdepth 4 -iname '*.gguf' -type f -ipath '*tts*' \
+            2>/dev/null | head -1) || true
+    if [[ -z "$hit" ]]; then
+        hit=$(find "$src/models" -maxdepth 4 -name '*.gguf' -type f \
+                -not -ipath "*$(basename "$AUDIOCPP_ASR_MODEL_REL")*" \
+                -not -ipath '*asr*' 2>/dev/null | head -1) || true
+    fi
     if [[ -n "$hit" ]]; then
         dirname "$hit"; return 0
     fi
     echo ""
     return 1
+}
+
+# Where the transcription weights live, same two-step logic as the voice model.
+_audiocpp_asr_model_dir() {
+    local src="$1" hit f
+    for f in "$src/$AUDIOCPP_ASR_MODEL_REL"/*.gguf; do
+        if [[ -f "$f" ]]; then
+            echo "$src/$AUDIOCPP_ASR_MODEL_REL"; return 0
+        fi
+    done
+    hit=$(find "$src/models" -maxdepth 4 -iname '*.gguf' -type f \
+            \( -ipath '*asr*' -o -ipath '*sensevoice*' \) 2>/dev/null | head -1) || true
+    if [[ -n "$hit" ]]; then
+        dirname "$hit"; return 0
+    fi
+    echo ""
+    return 1
+}
+
+_audiocpp_has_asr_model() {
+    local src="$1" dir
+    dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$dir" ]]
+}
+
+# Was the ASR family actually compiled into this binary? An install built
+# before sense_asr became a default has TTS only, and downloading 250 MB of
+# weights it cannot load would be worse than saying so.
+_audiocpp_asr_loader_present() {
+    local bin="$1"
+    [[ -n "$bin" ]] || return 1
+    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_ASR_FAMILY"
 }
 
 # Are the voice weights on disk?
@@ -2320,6 +2380,168 @@ _audiocpp_install_tts_model() {
     return 1
 }
 
+# Download the transcription weights. Same shape as the voice model, with a
+# smaller free-space floor because SenseVoice-Small is ~250 MB, not ~1 GB.
+_audiocpp_install_asr_model() {
+    local src="$1"
+    local mgr="$src/tools/model_manager_v2.py"
+
+    if _audiocpp_has_asr_model "$src"; then
+        ok "Speech-to-text model already installed ($(_audiocpp_asr_model_dir "$src"))"
+        return 0
+    fi
+
+    if [[ "${GATHM_AUDIOCPP_SKIP_ASR_MODEL:-${GATHM_AUDIOCPP_SKIP_MODEL:-0}}" == "1" ]]; then
+        warn "Skipping speech-to-text model download"
+        note_missing "audio.cpp speech-to-text model" \
+            "python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    if [[ ! -f "$mgr" ]]; then
+        warn "model_manager_v2.py not found at $mgr — cannot fetch the ASR model"
+        note_missing "audio.cpp speech-to-text model" \
+            "grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf"
+        return 1
+    fi
+
+    local py; py=$(_python_cmd)
+    if [[ -z "$py" ]]; then
+        pkg install -y python 2>/dev/null || true
+        py=$(_python_cmd)
+    fi
+    if [[ -z "$py" ]]; then
+        warn "Python not available — cannot run the model manager"
+        note_missing "audio.cpp speech-to-text model" \
+            "pkg install python && python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 768 )); then
+        warn "Only ${free_mb} MB free — skipping the speech-to-text model (needs ~350 MB)"
+        note_missing "audio.cpp speech-to-text model (${free_mb} MB free)" \
+            "free up ~350 MB, then: python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    info "Downloading speech-to-text model $AUDIOCPP_ASR_PACKAGE (~250 MB)..."
+    run_with_spinner "model_manager install $AUDIOCPP_ASR_PACKAGE" -- \
+        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_ASR_PACKAGE' \
+                    --models-root '$src/models' --progress" || true
+
+    if _audiocpp_has_asr_model "$src"; then
+        ok "Speech-to-text model installed ($(_audiocpp_asr_model_dir "$src"))"
+        return 0
+    fi
+
+    warn "Speech-to-text model download did not complete."
+    echo -e "     Retry with: ${BOLD}cd $src && $py tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE${RESET}"
+    note_missing "audio.cpp speech-to-text model" \
+        "cd $src && python tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE"
+    return 1
+}
+
+# Record the ASR weights and family for lib/speech.py to find.
+_audiocpp_save_asr_path() {
+    local src="$1" model_dir
+    model_dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 0
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$model_dir"          > "$HOME/.gathm/audiocpp_asr_model"  2>/dev/null || true
+    echo "$AUDIOCPP_ASR_FAMILY" > "$HOME/.gathm/audiocpp_asr_family" 2>/dev/null || true
+    _audiocpp_write_env GATHM_AUDIOCPP_ASR_MODEL  "$model_dir"
+    _audiocpp_write_env GATHM_AUDIOCPP_ASR_FAMILY "$AUDIOCPP_ASR_FAMILY"
+}
+
+# Microphone capture. audio.cpp takes a file, so something has to produce one:
+# on Android that is termux-microphone-record (termux-api package *and* the
+# Termux:API app), and since it cannot encode WAV, ffmpeg converts to the
+# 16 kHz mono the ASR models want.
+_audiocpp_install_recorder() {
+    _is_termux || return 0
+    if ! command -v termux-microphone-record &>/dev/null; then
+        info "Installing microphone support..."
+        pkg install -y termux-api 2>/dev/null || true
+    fi
+    command -v ffmpeg &>/dev/null || pkg install -y ffmpeg 2>/dev/null || true
+
+    local rc=0
+    if command -v termux-microphone-record &>/dev/null; then
+        ok "Microphone capture (termux-microphone-record)"
+        info "Voice input also needs the Termux:API app from F-Droid, and mic permission."
+    else
+        warn "No microphone capture — transcribing existing files still works"
+        note_missing "microphone capture for voice input" \
+            "pkg install termux-api, plus the Termux:API app from F-Droid"
+        rc=1
+    fi
+    if command -v ffmpeg &>/dev/null; then
+        ok "Audio conversion (ffmpeg)"
+    else
+        warn "ffmpeg missing — recordings cannot be converted to 16 kHz WAV"
+        note_missing "ffmpeg for voice input" "pkg install ffmpeg"
+        rc=1
+    fi
+    return $rc
+}
+
+# Transcribe the WAV the TTS smoke test just produced. One check, both
+# directions: if this prints words, the whole speech loop works on this device.
+_audiocpp_asr_smoke_test() {
+    local bin="$1" src="$2"
+    local model_dir; model_dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 1
+    [[ -n "$_AUDIOCPP_SMOKE_WAV" && -s "$_AUDIOCPP_SMOKE_WAV" ]] || return 1
+
+    local seg="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; seg="${seg:-/tmp}"
+    seg="$seg/gathm-asr-smoketest.$$.json"
+    rm -f "$seg" 2>/dev/null || true
+
+    info "Testing transcription..."
+    if run_with_spinner "transcribing the test phrase" -- \
+            "$bin" --task asr \
+                   --family "$AUDIOCPP_ASR_FAMILY" \
+                   --model "$model_dir" \
+                   --backend cpu \
+                   --audio "$_AUDIOCPP_SMOKE_WAV" \
+                   --segments-out "$seg"; then
+        ok "Transcription works (family '$AUDIOCPP_ASR_FAMILY')"
+        rm -f "$seg" 2>/dev/null || true
+        return 0
+    fi
+
+    rm -f "$seg" 2>/dev/null || true
+    warn "Transcription model is installed but the test run failed."
+    echo -e "     Try manually: ${BOLD}$bin --task asr --family $AUDIOCPP_ASR_FAMILY \\"
+    echo -e "       --model $model_dir --backend cpu --audio some.wav --metrics${RESET}"
+    note_missing "audio.cpp transcription" "see the manual command above"
+    return 1
+}
+
+# Set up the listening half: weights, config, a round-trip test, and the tools
+# needed to capture audio in the first place.
+_audiocpp_setup_listening() {
+    local bin="$1" src="$2"
+
+    if ! _audiocpp_asr_loader_present "$bin"; then
+        warn "This build has no '$AUDIOCPP_ASR_FAMILY' loader — voice input unavailable"
+        echo -e "     Add it with: ${BOLD}GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS \\"
+        echo -e "       GATHM_AUDIOCPP_FORCE=1 ./install${RESET}"
+        info "The rebuild reuses the existing build directory, so it compiles the"
+        info "new family only rather than starting over."
+        note_missing "speech-to-text (loader not compiled in)" \
+            "GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS GATHM_AUDIOCPP_FORCE=1 ./install"
+        return 1
+    fi
+
+    if _audiocpp_install_asr_model "$src"; then
+        _audiocpp_save_asr_path "$src"
+        _audiocpp_asr_smoke_test "$bin" "$src" || true
+        _audiocpp_install_recorder || true
+    fi
+}
+
 # Synthesize a throwaway WAV to prove the whole chain works: binary links,
 # loaders are compiled in, weights load, the voice resolves, audio comes out.
 # Cheaper to find out here than the first time Pilot tries to talk.
@@ -2344,7 +2566,9 @@ _audiocpp_smoke_test() {
         && [[ -s "$out" ]]; then
         local kb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1024 ))
         ok "Speech synthesis works (${kb} KB WAV, voice '$AUDIOCPP_TTS_VOICE')"
-        rm -f "$out" 2>/dev/null || true
+        # Kept, not deleted: the ASR smoke test transcribes this exact file, and
+        # _audiocpp_setup_voice removes it once both directions have run.
+        _AUDIOCPP_SMOKE_WAV="$out"
         return 0
     fi
 
@@ -2375,6 +2599,13 @@ _audiocpp_setup_voice() {
         _audiocpp_save_model_path "$src"
         _audiocpp_smoke_test "$bin" "$src" || true
         _audiocpp_install_player || true
+    fi
+    # Listening is independent of speaking: a build with the ASR loader can
+    # transcribe even if the voice model never downloaded.
+    _audiocpp_setup_listening "$bin" "$src" || true
+    if [[ -n "$_AUDIOCPP_SMOKE_WAV" ]]; then
+        rm -f "$_AUDIOCPP_SMOKE_WAV" 2>/dev/null || true
+        _AUDIOCPP_SMOKE_WAV=""
     fi
 }
 
@@ -2917,6 +3148,35 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
             warn "No voice model downloaded yet (Pilot stays silent until one is)"
             note_missing "audio.cpp voice model" \
                 "cd $audio_src && python tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE"
+        fi
+        # ── Listening (what lets Pilot hear) ──
+        if _audiocpp_asr_loader_present "$audio_bin"; then
+            ok "Transcription loader compiled in ($AUDIOCPP_ASR_FAMILY)"
+            if _audiocpp_has_asr_model "$audio_src"; then
+                ok "Speech-to-text model ($(_audiocpp_asr_model_dir "$audio_src"))"
+                if command -v termux-microphone-record &>/dev/null; then
+                    ok "Microphone capture (termux-microphone-record)"
+                elif [[ "$plat" == "termux" ]]; then
+                    warn "No microphone capture — file transcription still works"
+                    note_missing "microphone capture for voice input" \
+                        "pkg install termux-api, plus the Termux:API app from F-Droid"
+                fi
+                # Recordings arrive as AAC/Opus; the ASR models want 16 kHz WAV.
+                if command -v ffmpeg &>/dev/null; then
+                    ok "Audio conversion (ffmpeg)"
+                elif [[ "$plat" == "termux" ]]; then
+                    warn "ffmpeg missing — recordings cannot be converted for the model"
+                    note_missing "ffmpeg for voice input" "pkg install ffmpeg"
+                fi
+            else
+                warn "No speech-to-text model downloaded yet (voice input unavailable)"
+                note_missing "audio.cpp speech-to-text model" \
+                    "cd $audio_src && python tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE"
+            fi
+        elif [[ "$plat" == "termux" ]]; then
+            warn "Built without the '$AUDIOCPP_ASR_FAMILY' loader (no voice input)"
+            note_missing "speech-to-text (loader not compiled in)" \
+                "GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS GATHM_AUDIOCPP_FORCE=1 ./install"
         fi
     elif [[ -n "$audio_bin" ]]; then
         warn "audiocpp_cli found but won't run ($audio_bin)"

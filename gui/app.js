@@ -36,8 +36,15 @@ async function checkConnectivity() {
     botStatus.textContent = isOnline ? 'Online - Voice & Text' : 'Offline - API not reachable';
 }
 
+// Re-checked whenever connectivity is: a server that starts later, or one
+// rebuilt with the ASR family, should light the features up without a reload.
+async function refreshCapabilities() {
+    await checkConnectivity();
+    if (isOnline) { checkSpeech(); checkTranscribe(); }
+}
+
 checkConnectivity();
-setInterval(checkConnectivity, 30000);
+setInterval(refreshCapabilities, 30000);
 
 // -- Scroll ----------------------------------------------------------------
 function scrollToBottom() {
@@ -261,6 +268,114 @@ let micStream   = null;
 let rafId       = null;
 let voiceActive = false;
 
+// Recording rides along on the same graph that drives the visualiser, so voice
+// input needs no second getUserMedia and no second permission prompt.
+let recorderNode  = null;
+let pcmChunks     = [];
+let pcmRate       = 16000;
+let asrAvailable  = false;
+
+async function checkTranscribe() {
+    try {
+        const res = await fetch(API_BASE + '/api/v1/transcribe/status',
+                                { signal: AbortSignal.timeout(4000) });
+        asrAvailable = res.ok ? !!(await res.json()).available : false;
+    } catch (_) {
+        asrAvailable = false;
+    }
+}
+
+checkTranscribe();
+
+// The API wants 16 kHz mono 16-bit WAV — what the ASR models read. MediaRecorder
+// would give webm/opus and need ffmpeg on the server, so the PCM is captured
+// raw, downsampled, and framed as a WAV here instead.
+function encodeWav(chunks, inRate, outRate) {
+    let total = 0;
+    chunks.forEach(function(c) { total += c.length; });
+    const merged = new Float32Array(total);
+    let at = 0;
+    chunks.forEach(function(c) { merged.set(c, at); at += c.length; });
+
+    const ratio = inRate / outRate;
+    const outLen = Math.floor(merged.length / ratio);
+    const pcm = new Int16Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+        // Average the source window instead of point-sampling it: plain
+        // decimation aliases, and aliasing is exactly what wrecks recognition.
+        const start = Math.floor(i * ratio);
+        const end = Math.min(Math.floor((i + 1) * ratio), merged.length);
+        let sum = 0, n = 0;
+        for (let j = start; j < end; j++) { sum += merged[j]; n++; }
+        const sample = n ? sum / n : 0;
+        const clamped = Math.max(-1, Math.min(1, sample));
+        pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+    }
+
+    const buf = new ArrayBuffer(44 + pcm.length * 2);
+    const view = new DataView(buf);
+    const ascii = function(off, str) {
+        for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+    };
+    ascii(0, 'RIFF');
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);            // PCM
+    view.setUint16(22, 1, true);            // mono
+    view.setUint32(24, outRate, true);
+    view.setUint32(28, outRate * 2, true);  // byte rate
+    view.setUint16(32, 2, true);            // block align
+    view.setUint16(34, 16, true);           // bits per sample
+    ascii(36, 'data');
+    view.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, pcm[i], true);
+    return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function transcribeAndSend() {
+    const chunks = pcmChunks;
+    pcmChunks = [];
+    if (!chunks.length) return;
+
+    const seconds = chunks.reduce(function(n, c) { return n + c.length; }, 0) / pcmRate;
+    if (seconds < 0.4) {                    // a stray tap, not speech
+        botStatus.textContent = 'Too short — hold the mic while you speak';
+        setTimeout(checkConnectivity, 2500);
+        return;
+    }
+
+    botStatus.textContent = 'Transcribing…';
+    try {
+        const res = await fetch(API_BASE + '/api/v1/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/wav' },
+            body: encodeWav(chunks, pcmRate, 16000),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(function() { return {}; });
+            botStatus.textContent = err.detail || 'Could not transcribe that';
+            setTimeout(checkConnectivity, 3000);
+            return;
+        }
+        const text = ((await res.json()).text || '').trim();
+        if (!text) {
+            botStatus.textContent = 'Nothing recognised — try again';
+            setTimeout(checkConnectivity, 2500);
+            return;
+        }
+        // Land it in the input and send, so the transcript is visible and
+        // correctable rather than vanishing into a request.
+        messageInput.value = text;
+        checkConnectivity();
+        sendMessage();
+    } catch (err) {
+        botStatus.textContent = 'Transcription failed: ' + err.message;
+        setTimeout(checkConnectivity, 3000);
+    }
+}
+
 const bars = Array.from(freqBars.querySelectorAll('.fb'));
 
 async function startVoice() {
@@ -281,11 +396,30 @@ async function startVoice() {
     const src = audioCtx.createMediaStreamSource(micStream);
     src.connect(analyser);
 
+    // Tap the same source for recording when the server can transcribe.
+    pcmChunks = [];
+    pcmRate = audioCtx.sampleRate;
+    if (asrAvailable && audioCtx.createScriptProcessor) {
+        recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
+        recorderNode.onaudioprocess = function(e) {
+            if (!voiceActive) return;
+            pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        };
+        src.connect(recorderNode);
+        // A ScriptProcessor only runs while connected to the destination; the
+        // gain of zero keeps the mic from being played back through it.
+        const mute = audioCtx.createGain();
+        mute.gain.value = 0;
+        recorderNode.connect(mute);
+        mute.connect(audioCtx.destination);
+    }
+
     voiceActive = true;
     aiOrb.setAttribute('data-live', 'true');
     setOrbState('speaking');
     micBtn.classList.add('active');
-    botStatus.textContent = 'Listening...';
+    botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
+                                         : 'Listening...';
 
     driveFrequency();
 }
@@ -294,6 +428,12 @@ function stopVoice() {
     voiceActive = false;
     if (rafId) cancelAnimationFrame(rafId);
     if (micStream) micStream.getTracks().forEach(function(t) { t.stop(); });
+    if (recorderNode) {
+        recorderNode.onaudioprocess = null;
+        try { recorderNode.disconnect(); } catch (_) { /* already torn down */ }
+        recorderNode = null;
+    }
+    const hadAudio = pcmChunks.length > 0;
     if (audioCtx) audioCtx.close();
     audioCtx = null; analyser = null; micStream = null; rafId = null;
 
@@ -303,7 +443,9 @@ function stopVoice() {
     aiOrb.removeAttribute('data-live');
     setOrbState('idle');
     micBtn.classList.remove('active');
-    checkConnectivity();
+
+    if (hadAudio) transcribeAndSend();     // ends with sendMessage() on success
+    else checkConnectivity();
 }
 
 function driveFrequency() {
