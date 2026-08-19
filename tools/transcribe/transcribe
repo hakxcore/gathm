@@ -51,12 +51,33 @@ if [[ ! -f "$SPEECH_LIB" ]]; then
     exit 1
 fi
 
+# lib/speech.py reports failures on stderr, which the orchestrator does not
+# show — `gathm run transcribe missing.wav` printed nothing at all. Failures
+# belong on stdout here, like every other tool's "Error: ..." line, so the
+# reason survives whichever layer is calling.
+run_speech() {
+    local err out status
+    err=$(mktemp "${TMPDIR:-/tmp}/gathm-transcribe.XXXXXX")
+    out=$(python3 "$SPEECH_LIB" "$@" 2>"$err"); status=$?
+    if (( status == 0 )); then
+        [[ -n "$out" ]] && printf '%s\n' "$out"
+    else
+        local reason
+        reason=$(tr -d '\r' < "$err" | grep -v '^$' | tail -1)
+        [[ -z "$reason" ]] && reason="$out"
+        [[ -z "$reason" ]] && reason="transcription failed"
+        printf 'Error: %s\n' "${reason#\[speech\] }"
+    fi
+    rm -f "$err" 2>/dev/null || true
+    return $status
+}
+
 if [[ -n "$RECORD_SECS" ]]; then
     if [[ ! "$RECORD_SECS" =~ ^[0-9]+$ ]]; then
         echo "Error: -l takes a number of seconds, got '$RECORD_SECS'"
         exit 1
     fi
-    python3 "$SPEECH_LIB" --listen "$RECORD_SECS"
+    run_speech --listen "$RECORD_SECS"
     exit $?
 fi
 
@@ -71,4 +92,4 @@ if [[ ! -f "$AUDIO" ]]; then
     exit 1
 fi
 
-python3 "$SPEECH_LIB" --transcribe "$AUDIO"
+run_speech --transcribe "$AUDIO"

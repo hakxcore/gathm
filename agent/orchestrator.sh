@@ -199,10 +199,15 @@ cmd_run() {
         fi
     fi
 
-    # Execute with full recovery pipeline
-    local output
-    output=$(execute_with_recovery "$tool_name" "${tool_args[@]}")
-    local exit_code=$?
+    # Execute with full recovery pipeline.
+    # `|| exit_code=$?` is load-bearing: this script runs under `set -e`, so a
+    # bare assignment from a failing command substitution aborts the whole
+    # script right here — before the exit-code handling below, before
+    # `echo "$output"`, before _update_memory. Every failing tool therefore
+    # exited 1 with no output at all, including the circuit-breaker and
+    # dependency messages written specifically to explain the failure.
+    local output exit_code=0
+    output=$(execute_with_recovery "$tool_name" "${tool_args[@]}") || exit_code=$?
 
     # Cache successful results
     if [[ $exit_code -eq 0 && "$skip_cache" == "false" && -n "$output" ]]; then
@@ -541,9 +546,11 @@ cmd_chain() {
             return 1
         fi
 
+        # Same `set -e` hazard as cmd_run: without `|| exit_code=$?` a failing
+        # step killed the script instead of reporting which step failed.
+        local exit_code=0
         # shellcheck disable=SC2086
-        prev_output=$(execute_with_recovery "$tool_name" $tool_args 2>&1)
-        local exit_code=$?
+        prev_output=$(execute_with_recovery "$tool_name" $tool_args 2>&1) || exit_code=$?
 
         if [[ $exit_code -ne 0 ]]; then
             echo -e "${RED}Pipeline failed at step $step ($tool_name)${RESETBG}" >&2

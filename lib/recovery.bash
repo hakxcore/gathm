@@ -67,14 +67,16 @@ execute_with_recovery() {
 
     if [[ "$depth" -ge "$max_fallback_depth" ]]; then
         log_error "recovery" "Fallback depth limit ($max_fallback_depth) reached, aborting chain: $chain -> $tool_name"
-        echo '{"error":"fallback_depth_exceeded","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Maximum fallback depth reached. Possible cycle in fallback configuration."}' >&2
+        # stdout, not stderr: callers capture this function's stdout, so a
+        # message on stderr is dropped and the failure becomes silent.
+        echo '{"error":"fallback_depth_exceeded","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Maximum fallback depth reached. Possible cycle in fallback configuration."}'
         return 1
     fi
 
     case ":${chain}:" in
         *":${tool_name}:"*)
             log_error "recovery" "Fallback cycle detected: $chain -> $tool_name"
-            echo '{"error":"fallback_cycle","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Cycle detected in fallback chain. Check tool manifest fallback_tool fields."}' >&2
+            echo '{"error":"fallback_cycle","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Cycle detected in fallback chain. Check tool manifest fallback_tool fields."}'
             return 1
             ;;
     esac
@@ -95,7 +97,7 @@ execute_with_recovery() {
             return $?
         fi
         log_error "recovery" "No fallback available for $tool_name, circuit is open"
-        echo '{"error":"service_unavailable","tool":"'"$tool_name"'","message":"Circuit breaker is open. Tool temporarily disabled due to repeated failures."}' >&2
+        echo '{"error":"service_unavailable","tool":"'"$tool_name"'","message":"Circuit breaker is open. Tool temporarily disabled due to repeated failures. Retry in up to '"$CB_RECOVERY_TIMEOUT"'s, or reset it now with: gathm heal '"$tool_name"'"}'
         return 1
     fi
 
