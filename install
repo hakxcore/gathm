@@ -2081,17 +2081,43 @@ _audiocpp_cache_file() {
     echo "$AUDIOCPP_CACHE_DIR/audiocpp_cli-${arch}-${models}"
 }
 
+# Does this binary have every family the current config asks for? The cache key
+# records the requested families, so caching a binary that lacks one would
+# mislabel it — and a later restore would hand back something that cannot do
+# what the key promises. Checking the binary itself is the only honest test.
+_audiocpp_binary_has_families() {
+    local bin="$1" models loaders fam
+    models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+    loaders=$("$bin" --list-loaders 2>/dev/null) || return 1
+    [[ -n "$loaders" ]] || return 1
+    local -a fams=()
+    IFS=',' read -ra fams <<< "$models"
+    for fam in "${fams[@]+"${fams[@]}"}"; do
+        fam="${fam// /}"
+        [[ -n "$fam" ]] || continue
+        grep -qi -- "$fam" <<< "$loaders" || return 1
+    done
+    return 0
+}
+
 # Does this binary run, and does it have the loaders we expect?
 _audiocpp_binary_usable() {
     local bin="$1"
     [[ -x "$bin" ]] || return 1
     "$bin" --list-loaders >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1 || return 1
-    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY"
+    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY" || return 1
+    _audiocpp_binary_has_families "$bin"
 }
 
 # Keep a copy of a good build for next time.
 _audiocpp_cache_save() {
     local bin="$1" target
+    # Never cache a binary that does not match the key we would file it under.
+    # An install predating sense_asr has a pocket_tts-only binary, and the
+    # default family list now names both — caching it would poison the cache.
+    if ! _audiocpp_binary_has_families "$bin"; then
+        return 0
+    fi
     target=$(_audiocpp_cache_file)
     mkdir -p "$AUDIOCPP_CACHE_DIR" 2>/dev/null || return 0
     if cp "$bin" "$target.tmp" 2>/dev/null && mv "$target.tmp" "$target" 2>/dev/null; then
