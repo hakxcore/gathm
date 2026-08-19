@@ -454,6 +454,16 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
     if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
         return False, f"no audio to transcribe ({audio_path})"
 
+    # Anything that is not a WAV goes through ffmpeg first. A phone recording is
+    # AAC or Opus, and handing that straight to the model is a decode error, not
+    # a transcript — `transcribe voicenote.m4a` has to just work.
+    converted = None
+    if not audio_path.lower().endswith(".wav"):
+        good, result = to_wav16(audio_path)
+        if not good:
+            return False, result
+        converted = audio_path = result
+
     try:
         timeout = int(os.environ.get("GATHM_ASR_TIMEOUT", "300"))
     except ValueError:
@@ -497,10 +507,13 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
             return False, "nothing was recognised in the recording"
         return True, text
     finally:
-        try:
-            os.unlink(seg_path)
-        except Exception:
-            pass
+        for path in (seg_path, converted):
+            if not path:
+                continue
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 
 
 def find_recorder() -> str | None:
