@@ -2081,6 +2081,22 @@ _audiocpp_cache_file() {
     echo "$AUDIOCPP_CACHE_DIR/audiocpp_cli-${arch}-${models}"
 }
 
+# Ask the binary what loaders it has — from inside the checkout when there is
+# one. audiocpp_cli resolves model_specs/<family>.json relative to the working
+# directory, so run from anywhere else it reports
+# "model contract spec not found for family 'sense_asr'" and --list-loaders
+# fails outright, which is how a perfectly good ASR build looked missing.
+_audiocpp_list_loaders() {
+    local bin="$1" src
+    [[ -n "$bin" ]] || return 1
+    src=$(_audiocpp_src_dir)
+    if [[ -d "$src/model_specs" ]]; then
+        ( cd "$src" 2>/dev/null && "$bin" --list-loaders 2>/dev/null )
+    else
+        "$bin" --list-loaders 2>/dev/null
+    fi
+}
+
 # Does this binary have every family the current config asks for? The cache key
 # records the requested families, so caching a binary that lacks one would
 # mislabel it — and a later restore would hand back something that cannot do
@@ -2088,7 +2104,7 @@ _audiocpp_cache_file() {
 _audiocpp_binary_has_families() {
     local bin="$1" models loaders fam
     models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
-    loaders=$("$bin" --list-loaders 2>/dev/null) || return 1
+    loaders=$(_audiocpp_list_loaders "$bin") || return 1
     [[ -n "$loaders" ]] || return 1
     local -a fams=()
     IFS=',' read -ra fams <<< "$models"
@@ -2104,8 +2120,8 @@ _audiocpp_binary_has_families() {
 _audiocpp_binary_usable() {
     local bin="$1"
     [[ -x "$bin" ]] || return 1
-    "$bin" --list-loaders >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1 || return 1
-    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY" || return 1
+    _audiocpp_list_loaders "$bin" >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1 || return 1
+    _audiocpp_list_loaders "$bin" | grep -qi "$AUDIOCPP_TTS_FAMILY" || return 1
     _audiocpp_binary_has_families "$bin"
 }
 
@@ -2228,6 +2244,10 @@ _audiocpp_cmake_build() {
         -DENGINE_BUILD_EXAMPLES=OFF
         -DENGINE_BUILD_TESTS=OFF
         -DENGINE_BUILD_WARMBENCH=OFF
+        # Compiles the package specs into the binary. Upstream's own answer to
+        # "model contract spec not found": without it the CLI must be run from
+        # the source tree for any family whose spec is not embedded in its GGUF.
+        -DAUDIOCPP_DEPLOYMENT_BUILD=ON
     )
     if [[ "$model_set" == "custom" ]]; then
         cm_args+=( -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS="$models" )
@@ -2446,7 +2466,7 @@ _audiocpp_has_asr_model() {
 _audiocpp_asr_loader_present() {
     local bin="$1"
     [[ -n "$bin" ]] || return 1
-    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_ASR_FAMILY"
+    _audiocpp_list_loaders "$bin" | grep -qi "$AUDIOCPP_ASR_FAMILY"
 }
 
 # Are the voice weights on disk?
@@ -2650,12 +2670,12 @@ _audiocpp_asr_smoke_test() {
 
     info "Testing transcription..."
     if run_with_spinner "transcribing the test phrase" -- \
-            "$bin" --task asr \
-                   --family "$AUDIOCPP_ASR_FAMILY" \
-                   --model "$model_dir" \
+            bash -c "cd '$src' 2>/dev/null || true; '$bin' --task asr \
+                   --family '$AUDIOCPP_ASR_FAMILY' \
+                   --model '$model_dir' \
                    --backend cpu \
-                   --audio "$_AUDIOCPP_SMOKE_WAV" \
-                   --segments-out "$seg"; then
+                   --audio '$_AUDIOCPP_SMOKE_WAV' \
+                   --segments-out '$seg'"; then
         ok "Transcription works (family '$AUDIOCPP_ASR_FAMILY')"
         rm -f "$seg" 2>/dev/null || true
         return 0
@@ -2706,13 +2726,13 @@ _audiocpp_smoke_test() {
 
     info "Testing speech synthesis..."
     if run_with_spinner "synthesizing a test phrase" -- \
-            "$bin" --task tts \
-                   --family "$AUDIOCPP_TTS_FAMILY" \
-                   --model "$model_dir" \
+            bash -c "cd '$src' 2>/dev/null || true; '$bin' --task tts \
+                   --family '$AUDIOCPP_TTS_FAMILY' \
+                   --model '$model_dir' \
                    --backend cpu \
-                   --voice-id "$AUDIOCPP_TTS_VOICE" \
-                   --text "Gathm speech is online." \
-                   --out "$out" \
+                   --voice-id '$AUDIOCPP_TTS_VOICE' \
+                   --text 'Gathm speech is online.' \
+                   --out '$out'" \
         && [[ -s "$out" ]]; then
         local kb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1024 ))
         ok "Speech synthesis works (${kb} KB WAV, voice '$AUDIOCPP_TTS_VOICE')"
@@ -3310,9 +3330,9 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
     # --list-loaders is the better probe than --help: it only reports
     # "pocket_tts: tts (offline)" if the TTS family was actually compiled in.
     if [[ -n "$audio_bin" ]] \
-            && { "$audio_bin" --list-loaders >/dev/null 2>&1 || "$audio_bin" --help >/dev/null 2>&1; }; then
+            && { _audiocpp_list_loaders "$audio_bin" >/dev/null 2>&1 || "$audio_bin" --help >/dev/null 2>&1; }; then
         ok "Speech runtime (audio.cpp: $audio_bin)"
-        if "$audio_bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY"; then
+        if _audiocpp_list_loaders "$audio_bin" | grep -qi "$AUDIOCPP_TTS_FAMILY"; then
             ok "TTS loader compiled in ($AUDIOCPP_TTS_FAMILY)"
         fi
         # The binary alone cannot speak — it needs weights.

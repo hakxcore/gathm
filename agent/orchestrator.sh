@@ -16,7 +16,23 @@
 
 set -euo pipefail
 
-AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# Resolve this script through any symlinks before deriving the install dir.
+# ~/.local/bin/gathm-agent is a symlink to the checkout, and BASH_SOURCE[0] is the
+# *link* path — so a plain dirname pointed INSTALL_DIR at ~/.local/bin and every
+# subcommand died on a missing lib/utils.bash. Hand-rolled rather than
+# `readlink -f`, which is not portable to macOS's BSD readlink.
+_gathm_self="${BASH_SOURCE[0]}"
+_gathm_hops=0
+while [[ -L "$_gathm_self" && $_gathm_hops -lt 20 ]]; do
+    _gathm_link="$(readlink "$_gathm_self")"
+    if [[ "$_gathm_link" == /* ]]; then
+        _gathm_self="$_gathm_link"
+    else
+        _gathm_self="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)/$_gathm_link"
+    fi
+    _gathm_hops=$((_gathm_hops + 1))
+done
+AGENT_DIR="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)"
 GATHM_ROOT="$(cd "$AGENT_DIR/.." &>/dev/null && pwd)"
 
 # Source all libraries

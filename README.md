@@ -80,8 +80,15 @@ On Termux, `./install` builds [audio.cpp](https://github.com/0xShug0/audio.cpp)
 `~/.local/bin/audiocpp_cli`. No Python audio packages are involved, which is the
 point: the usual speech wheels cannot load on Android at all.
 
-This step is **Termux-only**. Other platforms are untouched and keep whatever
-Python/audio dependencies they already use.
+This step is **Termux-only**, because Android is the platform with no built-in
+speech at all. Elsewhere Gathm speaks through the OS instead of building
+anything: `say` on macOS, `spd-say` or `espeak-ng` on Linux. audio.cpp wins when
+it is installed; otherwise the system voice is used, so `python3 lib/speech.py
+"hello"` and spoken Pilot replies work on macOS with no setup. Override the
+command with `GATHM_SPEAK_COMMAND`. Voice *input* remains audio.cpp-only, so it
+is Termux-only for now.
+
+`python3 lib/speech.py --check` reports which engine is in use.
 
 The install does four things:
 
@@ -200,6 +207,13 @@ Voice input needs two things beyond the runtime, both installed by `./install`:
 F-Droid**, which an installer cannot do for you) and `ffmpeg`, because the
 recorder encodes AAC and the models want 16 kHz WAV.
 
+`audiocpp_cli` resolves its model contract specs (`model_specs/<family>.json`)
+relative to the working directory, so Gathm runs it from the audio.cpp checkout.
+Run it by hand from elsewhere and a family whose spec is not embedded in its
+GGUF fails with `model contract spec not found for family 'sense_asr'` — either
+`cd` into the checkout first, or rebuild, since new builds pass
+`-DAUDIOCPP_DEPLOYMENT_BUILD=ON` to compile the specs into the binary.
+
 Upgrading an install built before `sense_asr` was compiled in:
 
 ```bash
@@ -240,6 +254,7 @@ Speech options:
 | `GATHM_SPEAK_MAX_CHARS` | how much of a long reply to read (default 600) |
 | `GATHM_SPEAK_TIMEOUT` | seconds allowed for one synthesis (default 180) |
 | `GATHM_AUDIO_PLAYER` | force a playback command, e.g. `mpv --no-video` |
+| `GATHM_SPEAK_COMMAND` | force the OS speech command, e.g. `say -v Daniel` |
 | `GATHM_LISTEN_SECONDS` | default recording length (default 8) |
 | `GATHM_ASR_TIMEOUT` | seconds allowed for one transcription (default 300) |
 | `GATHM_AUDIO_RECORDER` | force a recording command |

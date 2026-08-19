@@ -79,25 +79,97 @@ def _read_config_file(name: str) -> str:
         return ""
 
 
+def _audiocpp_src(model_dir: str = "") -> str:
+    """The audio.cpp checkout, or "" — needed as the working directory.
+
+    audiocpp_cli resolves its model contract specs (model_specs/<family>.json)
+    relative to where it is run from, not from where the binary lives. Run
+    anywhere else and a family whose spec is not embedded in the GGUF fails with
+    "model contract spec not found for family ...", which is exactly what
+    sense_asr did on-device.
+    """
+    src = os.environ.get("GATHM_AUDIOCPP_SRC") or _read_config_file("audiocpp_src")
+    if src and os.path.isdir(os.path.join(src, "model_specs")):
+        return src
+    if src and os.path.isdir(src):
+        return src
+    # Fall back to walking up from the weights: models/<Family>/<lang> sits
+    # inside the checkout, so the tree with model_specs/ is a parent of it.
+    path = model_dir
+    for _ in range(5):
+        if not path or path == os.path.dirname(path):
+            break
+        path = os.path.dirname(path)
+        if os.path.isdir(os.path.join(path, "model_specs")):
+            return path
+    return ""
+
+
 def resolve() -> dict:
-    """Return {bin, model, family, voice}; bin/model empty when unavailable."""
+    """Return {bin, model, family, voice, src}; bin/model empty when unavailable."""
     binary = os.environ.get("GATHM_AUDIOCPP_BIN") or _read_config_file("audiocpp_path")
     if not binary or not os.path.exists(binary):
         binary = shutil.which("audiocpp_cli") or ""
+    model = os.environ.get("GATHM_AUDIOCPP_MODEL") or _read_config_file("audiocpp_model")
     return {
         "bin": binary,
-        "model": os.environ.get("GATHM_AUDIOCPP_MODEL") or _read_config_file("audiocpp_model"),
+        "model": model,
         "family": os.environ.get("GATHM_AUDIOCPP_FAMILY") or _read_config_file("audiocpp_family") or "pocket_tts",
         "voice": os.environ.get("GATHM_AUDIOCPP_VOICE") or _read_config_file("audiocpp_voice") or "alba",
+        "src": _audiocpp_src(model),
     }
 
 
-def enabled() -> bool:
-    """False when speech is switched off or the runtime/voice is not installed."""
-    if os.environ.get("GATHM_SPEAK", "1").strip().lower() in ("0", "off", "false", "no"):
-        return False
+# Speech engines that need no build and no pip. audio.cpp exists because Android
+# has nothing like these; macOS and most desktop Linux do, and using them means
+# Gathm speaks on those platforms without a compiler or a 250 MB download.
+# Each entry is (binary, args...) where {t} is replaced by the text.
+_SYSTEM_VOICES = [
+    ("say", "{t}"),                       # macOS, built in
+    ("spd-say", "-w", "{t}"),             # speech-dispatcher (most Linux desktops)
+    ("espeak-ng", "{t}"),
+    ("espeak", "{t}"),
+]
+
+
+def find_system_voice() -> list | None:
+    """The OS's own text-to-speech command, or None."""
+    forced = os.environ.get("GATHM_SPEAK_COMMAND")
+    if forced:
+        parts = forced.split()
+        if shutil.which(parts[0]):
+            return parts + (["{t}"] if "{t}" not in forced else [])
+        return None
+    for entry in _SYSTEM_VOICES:
+        if shutil.which(entry[0]):
+            return list(entry)
+    return None
+
+
+def engine() -> str:
+    """Which engine would speak: "audio.cpp", "system", or "" for none.
+
+    audio.cpp wins when it is installed with weights, because that is the
+    on-device path Gathm builds for Termux. Everywhere else the OS voice is both
+    better and free, so it is used rather than leaving the platform silent.
+    """
     cfg = resolve()
-    return bool(cfg["bin"]) and bool(cfg["model"])
+    if cfg["bin"] and cfg["model"]:
+        return "audio.cpp"
+    if find_system_voice():
+        return "system"
+    return ""
+
+
+def speech_disabled() -> bool:
+    return os.environ.get("GATHM_SPEAK", "1").strip().lower() in ("0", "off", "false", "no")
+
+
+def enabled() -> bool:
+    """False when speech is switched off, or no engine can speak."""
+    if speech_disabled():
+        return False
+    return bool(engine())
 
 
 def find_player() -> list | None:
@@ -170,12 +242,14 @@ def _kill_tree(proc, grace: float = 0.5) -> None:
             continue
 
 
-def _run_tracked(argv: list, timeout: int) -> tuple[int, str, str]:
+def _run_tracked(argv: list, timeout: int, cwd: str | None = None) -> tuple[int, str, str]:
     """Run a child process that stop() is able to kill mid-flight."""
     kwargs = {}
     if hasattr(os, "setsid"):
         # Own process group, so _kill_tree can take the whole thing down.
         kwargs["start_new_session"] = True
+    if cwd and os.path.isdir(cwd):
+        kwargs["cwd"] = cwd
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, **kwargs)
     with _proc_lock:
@@ -238,7 +312,7 @@ def synthesize(text: str, out_path: str) -> tuple[bool, str]:
         "--out", out_path,
     ]
     try:
-        rc, out, err = _run_tracked(cmd, timeout)
+        rc, out, err = _run_tracked(cmd, timeout, cwd=cfg["src"])
     except subprocess.TimeoutExpired:
         return False, f"synthesis timed out after {timeout}s"
     except Exception as exc:  # noqa: BLE001
@@ -296,6 +370,26 @@ def play(path: str) -> tuple[bool, str]:
     return True, argv[0]
 
 
+def _speak_system(text: str, quiet: bool) -> bool:
+    """Speak through the OS's own voice — no synthesis file, no player."""
+    voice = find_system_voice()
+    if not voice:
+        return False
+    argv = [text if a == "{t}" else a.replace("{t}", text) for a in voice]
+    try:
+        rc, _out, err = _run_tracked(argv, 300)
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            print(f"[speech] {argv[0]}: {exc}", file=sys.stderr)
+        return False
+    if rc != 0:
+        tail = (err or "").strip().splitlines()
+        if not quiet:
+            print(f"[speech] {argv[0]}: {tail[-1] if tail else rc}", file=sys.stderr)
+        return False
+    return True
+
+
 def speak(text: str, quiet: bool = True) -> bool:
     """Say `text` out loud, blocking until it finishes.
 
@@ -309,6 +403,15 @@ def speak(text: str, quiet: bool = True) -> bool:
 
     with _proc_lock:
         my_gen = _generation
+
+    if engine() == "system":
+        # Serialised the same way, so a new question still cuts off the old
+        # answer, but there is no wav and no separate player to arrange.
+        with _speak_lock:
+            with _proc_lock:
+                if my_gen != _generation:
+                    return False
+            return _speak_system(body, quiet)
 
     with _speak_lock:
         with _proc_lock:
@@ -379,14 +482,17 @@ _TAG_RE = re.compile(r"<\|[^|]*\|>")
 
 
 def resolve_asr() -> dict:
-    """Return {bin, model, family} for transcription; model empty if absent."""
+    """Return {bin, model, family, src} for transcription; model empty if absent."""
+    base = resolve()
+    model = (os.environ.get("GATHM_AUDIOCPP_ASR_MODEL")
+             or _read_config_file("audiocpp_asr_model"))
     return {
-        "bin": resolve()["bin"],
-        "model": (os.environ.get("GATHM_AUDIOCPP_ASR_MODEL")
-                  or _read_config_file("audiocpp_asr_model")),
+        "bin": base["bin"],
+        "model": model,
         "family": (os.environ.get("GATHM_AUDIOCPP_ASR_FAMILY")
                    or _read_config_file("audiocpp_asr_family")
                    or ASR_DEFAULT_FAMILY),
+        "src": base["src"] or _audiocpp_src(model),
     }
 
 
@@ -480,7 +586,7 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
         "--segments-out", seg_path,
     ]
     try:
-        rc, out, err = _run_tracked(cmd, timeout)
+        rc, out, err = _run_tracked(cmd, timeout, cwd=cfg["src"])
     except subprocess.TimeoutExpired:
         return False, f"transcription timed out after {timeout}s"
     except Exception as exc:  # noqa: BLE001
@@ -645,11 +751,14 @@ def diagnose() -> int:
     asr = resolve_asr()
     player = find_player()
     recorder = find_recorder()
+    print("engine       : %s" % (engine() or "NONE"))
     print("audiocpp_cli : %s" % (cfg["bin"] or "NOT FOUND"))
     print("voice model  : %s" % (cfg["model"] or "NOT CONFIGURED"))
     print("family/voice : %s / %s" % (cfg["family"], cfg["voice"]))
     print("player       : %s" % (" ".join(player) if player else
                                  "NONE (pkg install mpv)"))
+    system_voice = find_system_voice()
+    print("system voice : %s" % (" ".join(system_voice) if system_voice else "none"))
     print("GATHM_SPEAK  : %s" % os.environ.get("GATHM_SPEAK", "1"))
     print("speaking     : %s" % enabled())
     print("")
@@ -659,6 +768,8 @@ def diagnose() -> int:
     print("converter    : %s" % (shutil.which("ffmpeg") or
                                  "NONE (pkg install ffmpeg)"))
     print("listening    : %s" % asr_enabled())
+    if engine() == "system":
+        return 0 if enabled() else 1   # the OS voice does its own playback
     return 0 if (enabled() and player) else 1
 
 

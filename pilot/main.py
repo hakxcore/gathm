@@ -644,7 +644,7 @@ Action Input: [tool_name] [arguments]
 8. You MUST remember conversation context for follow-ups (for example, if user asks "where is it compromised?" after an email breach check).
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
-11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
+11. If a tool fails, say in one sentence WHAT failed and quote the error text you were given, then add that the engineer has been notified. Never replace the error with a generic message — the user cannot fix what they cannot see.
 12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
 {browser_help}
 When you have a final answer, provide it directly without the Action format.
@@ -671,6 +671,17 @@ When you have a final answer, provide it directly without the Action format.
         "next_step": "end"
     }
 
+def _looks_like_tool_failure(output: str) -> bool:
+    """Whether a tool's output is an error rather than an answer."""
+    text = (output or "").strip()
+    if not text or text == "(no output)":
+        return True
+    lowered = text.lower()
+    return (lowered.startswith(("error:", "usage:")) or "[stderr]:" in lowered
+            or "command not found" in lowered or "not installed" in lowered
+            or '"error"' in lowered)
+
+
 def tool_node(state: AgentState):
     last_message = state["messages"][-1]
     content = last_message.content
@@ -684,6 +695,17 @@ def tool_node(state: AgentState):
             normalized_input = tool_input
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
+
+        # Label a failure as a failure. Left as a bare "Observation:", a tool
+        # error was answered with the canned engineer line and the actual
+        # reason never reached the user — which is how a broken weather lookup
+        # became "This issue will be taken care by our engineer".
+        if _looks_like_tool_failure(result):
+            return {"messages": [HumanMessage(content=(
+                f"Observation: the tool FAILED. Its exact output was:\n{result}\n"
+                "Tell the user what failed and quote that error, then say the "
+                "engineer has been notified. Do not try the same tool again."
+            ))]}
         return {"messages": [HumanMessage(content=f"Observation: {result}")]}
     return {"messages": [HumanMessage(content="Error: Could not parse tool input.")]}
 
