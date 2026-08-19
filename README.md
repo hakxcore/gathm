@@ -588,6 +588,17 @@ On a restricted network, "empty response" and "could not fetch" mean the host is
 unreachable rather than the tool being broken, so run it somewhere with open
 internet.
 
+Two portability notes the harness surfaced, both handled in `lib/utils.bash`:
+
+- macOS has no GNU `timeout`, so tools that called it directly either failed on
+  every invocation or ran unbounded. `run_bounded <seconds> <cmd…>` picks
+  `timeout`, `gtimeout`, or a `perl alarm`, and runs the command unbounded only
+  as a last resort.
+- `openssl` on macOS is Apple's LibreSSL 2.8.3, whose `s_client` can return
+  nothing for a host a modern client reaches fine. `certinfo` falls back to
+  Python's TLS stack for the handshake (parsing still uses `openssl x509`), and
+  `GATHM_OPENSSL` points it at a newer binary if you have one.
+
 Fallback:
 
 ```bash

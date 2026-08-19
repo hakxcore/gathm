@@ -6,6 +6,10 @@ source "$(dirname "$0")/../../lib/utils.bash"
 
 currentVersion="3.0.0"
 
+# Where fetch_peer_certificate leaves openssl's stderr for the caller to read.
+CERTINFO_ERR_FILE="${TMPDIR:-/tmp}/gathm-certinfo-$$.err"
+trap 'rm -f "$CERTINFO_ERR_FILE" 2>/dev/null || true' EXIT
+
 usage() {
   cat <<EOF
 CertInfo (v$currentVersion)
@@ -35,15 +39,44 @@ fetch_peer_certificate() {
   local host="$2"
   local raw
 
-  if command -v timeout >/dev/null 2>&1; then
-    raw=$(timeout 10 bash -c "echo | openssl s_client -servername \"$host\" -connect \"$server\" 2>/dev/null" 2>/dev/null)
-  elif command -v gtimeout >/dev/null 2>&1; then
-    raw=$(gtimeout 10 bash -c "echo | openssl s_client -servername \"$host\" -connect \"$server\" 2>/dev/null" 2>/dev/null)
-  else
-    raw=$(echo | openssl s_client -servername "$host" -connect "$server" 2>/dev/null)
+  # run_bounded picks timeout/gtimeout/perl, so this is one path everywhere.
+  # -showcerts because LibreSSL (which is what `openssl` is on macOS) does not
+  # always emit the leaf certificate without it, and an empty PEM here was
+  # reported as "could not retrieve certificate" from a server that answered.
+  #
+  # openssl's own complaint goes to a file, not a variable: this function runs
+  # inside $( ), so anything it sets is lost and anything it echoes would be
+  # captured as certificate data instead of shown to the user.
+  local openssl_bin="${GATHM_OPENSSL:-openssl}"
+  raw=$(echo | run_bounded 10 "$openssl_bin" s_client -showcerts -servername "$host" \
+                    -connect "$server" 2>"$CERTINFO_ERR_FILE")
+
+  local pem
+  pem=$(echo "$raw" | awk '/-----BEGIN CERTIFICATE-----/{flag=1} flag{print} /-----END CERTIFICATE-----/{exit}')
+
+  # Fall back to Python's TLS stack when openssl produced no certificate. On
+  # macOS `openssl` is Apple's LibreSSL 2.8.3 — years old — and its s_client can
+  # come back empty against a host that a modern client reaches without trouble.
+  # python3 is already a declared dependency, uses the system trust store, and
+  # only the handshake moves here: the PEM is still parsed by openssl below.
+  if [[ -z "${pem// }" ]] && command -v python3 >/dev/null 2>&1; then
+    pem=$(python3 - "$host" "${server##*:}" <<'PY' 2>>"$CERTINFO_ERR_FILE"
+import socket, ssl, sys
+host, port = sys.argv[1], int(sys.argv[2] or 443)
+ctx = ssl.create_default_context()
+# The point here is to see the certificate, not to vet it: an expired or
+# self-signed certificate is exactly what someone runs certinfo to look at.
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+with socket.create_connection((host, port), timeout=10) as raw_sock:
+    with ctx.wrap_socket(raw_sock, server_hostname=host) as tls:
+        der = tls.getpeercert(binary_form=True)
+print(ssl.DER_cert_to_PEM_cert(der), end="")
+PY
+    )
   fi
 
-  echo "$raw" | awk '/-----BEGIN CERTIFICATE-----/{flag=1} flag{print} /-----END CERTIFICATE-----/{exit}'
+  printf '%s' "$pem"
 }
 
 inspect_certificate() {
@@ -66,6 +99,12 @@ inspect_certificate() {
   cert_pem=$(fetch_peer_certificate "$server" "$host")
   if [[ -z "$cert_pem" ]]; then
     echo "Error: Could not retrieve certificate from $server"
+    local why=""
+    [[ -s "$CERTINFO_ERR_FILE" ]] && why=$(grep -m1 -iE \
+        "error|refused|timed out|unknown|unable|verify|no route|resolve" \
+        "$CERTINFO_ERR_FILE" 2>/dev/null)
+    [[ -n "$why" ]] && echo "       openssl said: ${why#*:}"
+    echo "       Reproduce with: openssl s_client -servername $host -connect $server"
     return 1
   fi
 

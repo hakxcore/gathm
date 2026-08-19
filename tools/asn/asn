@@ -71,8 +71,8 @@ lookup_asn() {
 
   local response
   response=$(httpGet "$endpoint")
-  if [[ -z "$response" ]]; then
-    echo "Error: Empty response from BGPView API."
+  if ! printf '%s' "$response" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    httpJsonError "$endpoint" "$response" "the BGPView API"
     return 1
   fi
 

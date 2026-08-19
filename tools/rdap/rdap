@@ -52,10 +52,11 @@ query_rdap() {
     object_type="ip"
   fi
 
+  local url="$BASE_URL/$object_type/$endpoint_target"
   local response
-  response=$(httpGet "$BASE_URL/$object_type/$endpoint_target")
-  if [[ -z "$response" ]]; then
-    echo "Error: Empty response from RDAP service."
+  response=$(httpGet "$url")
+  if ! printf '%s' "$response" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    httpJsonError "$url" "$response" "rdap.org"
     return 1
   fi
 
