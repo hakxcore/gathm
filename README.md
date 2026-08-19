@@ -96,8 +96,42 @@ The install does four things:
 4. Downloads the `pocket_tts_english_q8_0` voice package with the project's own
    model manager, then synthesizes a throwaway WAV to prove the chain works.
 
-Expect 20-60 minutes for the build on a phone. Everything is skipped on re-runs
-once installed.
+Expect 20-60 minutes for the build on a phone — **once**. After that the
+installer avoids compiling entirely:
+
+1. If `GATHM_AUDIOCPP_BIN_URL` is set, it downloads that binary (verifying
+   `GATHM_AUDIOCPP_BIN_SHA256` when given).
+2. Otherwise it reuses the cached build in `~/.cache/gathm/audiocpp/`, kept
+   outside `~/.gathm` so `--uninstall` does not throw it away.
+3. Only if neither applies does it configure and compile.
+
+Both shortcuts are verified by actually running `--list-loaders` before being
+installed, so a stale, truncated, or wrong-architecture file falls through to a
+source build instead of leaving you with a binary that cannot speak.
+
+The cache key is `audiocpp_cli-<arch>-<families>`, so a build made for
+`pocket_tts` alone is not reused for a config that also wants `sense_asr`.
+
+**Reusing one build across devices.** Build once, then publish the binary and
+point every other install at it:
+
+```bash
+# on the device that already built it
+cp ~/.local/bin/audiocpp_cli audiocpp_cli-aarch64
+sha256sum audiocpp_cli-aarch64          # note the hash
+# attach the file to a GitHub release, then on every other device:
+GATHM_AUDIOCPP_BIN_URL=https://github.com/<you>/<repo>/releases/download/v1/audiocpp_cli-aarch64 \
+GATHM_AUDIOCPP_BIN_SHA256=<hash> ./install
+```
+
+What this cannot do is give you one binary for everything. `audiocpp_cli` is a
+native executable linked against Termux's `libc++_shared.so`, so a build is
+specific to the OS *and* the CPU architecture: a Termux aarch64 binary will not
+run on glibc Linux, macOS, or a 32-bit phone, and each target needs its own
+build and its own URL. Check audio.cpp's own license before redistributing a
+binary built from it.
+
+`GATHM_AUDIOCPP_FORCE_BUILD=1` skips both shortcuts and compiles from source.
 
 Once installed you can speak a phrase directly:
 
@@ -224,6 +258,10 @@ Build options:
 | `GATHM_AUDIOCPP_MODEL_SET` | `custom` (default), `full`, or `core` |
 | `GATHM_AUDIOCPP_JOBS` | compile parallelism (auto-capped by available RAM) |
 | `GATHM_AUDIOCPP_FORCE` | `1` rebuilds even if `audiocpp_cli` already exists |
+| `GATHM_AUDIOCPP_BIN_URL` | download a prebuilt `audiocpp_cli` instead of compiling |
+| `GATHM_AUDIOCPP_BIN_SHA256` | expected sha256 of that download |
+| `GATHM_AUDIOCPP_CACHE` | where built binaries are cached (default `~/.cache/gathm/audiocpp`) |
+| `GATHM_AUDIOCPP_FORCE_BUILD` | `1` ignores the cache and any URL, and compiles |
 
 The resolved binary, model directory, family, and voice are written to
 `~/.gathm/audiocpp_*` and to `.env` as `GATHM_AUDIOCPP_BIN`,
@@ -251,6 +289,46 @@ falls to `gemma3:1b`.
 
 Override with `GATHM_OLLAMA_MODEL` for a specific model, or
 `GATHM_TERMUX_LARGE_MIN_RAM_MB` to move the 4b threshold.
+
+## Response Speed
+
+Gathm is slower per answer than talking to the model directly with
+`ollama run gemma3:1b`, and most of the gap is prompt size rather than the model:
+the agent has to describe its tools before the model can choose one.
+
+| | tool text sent to the model |
+|---|---|
+| `ollama run gemma3:1b` | none |
+| Gathm, before narrowing | ~5.3 KB / ~1,300 tokens, every turn |
+| Gathm, a routed question ("weather in Delhi") | ~85 bytes / ~21 tokens |
+| Gathm, a vague question | ~2 KB / ~500 tokens |
+| Gathm, "what can you do" | the full catalogue, deliberately |
+
+On CPU-only hardware that prefill is the wait. Three things reduce it:
+
+- **Per-query tool narrowing.** Only tools scoring against the question are
+  listed, ranked by name, description, and manifest tags, with prefix matching so
+  "derivative" still finds `newton` and "registered" still finds `whois`. Asking
+  what Gathm can do still lists everything. `GATHM_TOOL_SHORTLIST=0` restores the
+  old behaviour; the default is 10 tools.
+- **The model stays loaded.** Ollama unloads an idle model after 5 minutes by
+  default, so the next question paid a full reload. Gathm now asks for
+  `keep_alive=30m` — tune with `GATHM_OLLAMA_KEEP_ALIVE` (`-1` never unloads,
+  `0` unloads immediately, at the cost of RAM).
+- **Small talk skips tools entirely.** A greeting is answered from a short
+  prompt with no tool list at all.
+
+What remains, and is not yet optimized: the API server starts a fresh Python
+process per turn (`pilot/chat_once.py`), so the GUI pays LangChain's import cost
+on every message — noticeable on a phone, and worth a persistent worker later.
+
+| Variable | Purpose |
+|---|---|
+| `GATHM_TOOL_SHORTLIST` | tools listed per question (default 10, `0` = all) |
+| `GATHM_OLLAMA_KEEP_ALIVE` | how long Ollama keeps the model resident (default `30m`) |
+| `GATHM_OLLAMA_NUM_PREDICT` | cap on generated tokens (unset by default) |
+| `GATHM_OLLAMA_NUM_CTX` | context window override (unset by default) |
+| `GATHM_CHAT_TIMEOUT` | seconds the API waits for one agent turn (default 600) |
 
 ## Quick Start
 
@@ -354,6 +432,17 @@ python3 -m http.server 5173
 ```
 
 Open `http://127.0.0.1:5173`.
+
+The chat is kept in `localStorage`, so closing the browser or letting Android
+reclaim the tab no longer loses the conversation or the model's context; type
+`/clear` to start fresh. The input box grows with a long prompt (Enter sends,
+Shift+Enter adds a newline), and the mic button shows a recording indicator with
+an elapsed timer while it captures.
+
+**Voice input needs a secure origin.** Browsers only expose a microphone to
+`https://` pages or to `localhost`/`127.0.0.1`. Opening the GUI on the phone's
+LAN address gives no microphone at all — the page says so rather than appearing
+to record. Use `http://127.0.0.1:8080` on the device itself.
 
 ## Tool Catalog
 

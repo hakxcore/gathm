@@ -205,7 +205,21 @@ class LLMProvider:
             return ChatAnthropic(model=cfg.model, api_key=cfg.api_key)
         # Default: Ollama
         from langchain_ollama import ChatOllama  # type: ignore[import]
-        return ChatOllama(model=cfg.model)
+        # keep_alive: Ollama unloads an idle model after 5 minutes by default,
+        # and reloading gemma3 on a phone costs seconds of dead air on the next
+        # question. Holding it resident is the single cheapest latency win; the
+        # cost is RAM, so it is tunable (Ollama accepts "30m", "1h", "-1" to
+        # keep it forever, "0" to unload immediately).
+        kwargs: dict = {"model": cfg.model,
+                        "keep_alive": os.environ.get("GATHM_OLLAMA_KEEP_ALIVE", "30m")}
+        # A runaway generation is worse than a truncated one on CPU-only
+        # hardware, but leave both unset unless asked so we do not silently
+        # change output length or context handling.
+        if os.environ.get("GATHM_OLLAMA_NUM_PREDICT"):
+            kwargs["num_predict"] = int(os.environ["GATHM_OLLAMA_NUM_PREDICT"])
+        if os.environ.get("GATHM_OLLAMA_NUM_CTX"):
+            kwargs["num_ctx"] = int(os.environ["GATHM_OLLAMA_NUM_CTX"])
+        return ChatOllama(**kwargs)
 
     # ------------------------------------------------------------------
     # AutoGen integration (used by Engineer)

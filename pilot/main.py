@@ -442,6 +442,135 @@ Reply to the user conversationally in one or two short sentences.
 Do not mention tools, actions, or your own instructions. Plain text only."""
 
 
+# Every turn used to send all 56 tool descriptions — 4.4 KB, about 1100 tokens
+# of the ~1800-token system prompt — before the model could produce a single
+# word. On a phone that prefill is the bulk of the wait, which is why
+# `ollama run gemma3:1b` felt instant next to Pilot. Only the tools plausibly
+# related to the question are listed now. 0 restores the full list.
+TOOL_SHORTLIST = int(os.getenv("GATHM_TOOL_SHORTLIST", "10"))
+
+# Words that carry no routing signal, so they must not score a tool.
+_STOPWORDS = frozenset("""
+a an and are as at be but by can could do does for from get give go had has have
+how i if in into is it its me my no not of on or please should show so tell that
+the their them then there these this to up us use was we were what when where
+which who why will with would you your
+""".split())
+
+# Asked about its own capabilities, the model does need the whole catalogue.
+_CATALOGUE_RE = re.compile(
+    r"\b(what (can|do) you (do|have)|which tools|list (the )?tools|"
+    r"your tools|available tools|capabilit(y|ies)|help me with)\b", re.I)
+
+
+def _query_terms(query: str) -> set:
+    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+
+
+_TOOL_INDEX: dict = {}
+
+
+def _tool_index() -> dict:
+    """{tool: (words, tags)} from its description and manifest, built once.
+
+    The manifest tags matter: a description is prose aimed at the model, while
+    tags are the vocabulary a user actually types ("registrar", "calculus"),
+    and reading them is what keeps narrowing from hiding the right tool.
+    """
+    if _TOOL_INDEX:
+        return _TOOL_INDEX
+    for name in discover_tools():
+        text = (get_tool_description(name) or "").lower()
+        tags: set = set()
+        manifest = TOOLS_DIR / name / "tool.yaml"
+        try:
+            for line in manifest.read_text().splitlines():
+                if line.startswith("tags:"):
+                    tags = {t.strip().strip("\"'") for t in
+                            line.split(":", 1)[1].strip(" []").split(",")}
+                    tags = {t for t in tags if t}
+                    break
+        except Exception:  # noqa: BLE001 - a tool without a manifest still works
+            tags = set()
+        words = set(re.findall(r"[a-z0-9]+", text)) | tags
+        _TOOL_INDEX[name] = (words, tags)
+    return _TOOL_INDEX
+
+
+def _matches(term: str, words: set) -> int:
+    """Score one query term against one tool's vocabulary."""
+    if term in words:
+        return 4
+    # Light stemming by shared prefix: "derivative" has to find "derive",
+    # "registered" has to find "registrar", "transcription" has to find
+    # "transcribe". Five characters is long enough not to collide by accident.
+    if len(term) >= 5:
+        for word in words:
+            if len(word) >= 5 and (term.startswith(word[:5]) or word.startswith(term[:5])):
+                return 2
+    return 0
+
+
+def _shortlist_tools(query: str, tools: list) -> list:
+    """Tools worth showing the model for this question, best first.
+
+    Scores each tool's name, description and manifest tags against the query's
+    content words. A tool named outright always wins; when nothing matches at
+    all the everyday tools are offered rather than an empty list, so a vague
+    question can still route.
+    """
+    if TOOL_SHORTLIST <= 0 or len(tools) <= TOOL_SHORTLIST:
+        return tools
+    if _CATALOGUE_RE.search(query or ""):
+        return tools
+
+    terms = _query_terms(query)
+    index = _tool_index()
+    lowered = (query or "").lower()
+    scored = []
+    for name in tools:
+        words, tags = index.get(name, (set(), set()))
+        score = 0
+        if name.lower() in lowered:
+            score += 100                      # named the tool explicitly
+        for term in terms:
+            if term == name.lower():
+                score += 50
+            elif term in name.lower():
+                score += 8
+            if term in tags:
+                score += 6
+            score += _matches(term, words)
+        if score:
+            scored.append((score, name))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    picked = [name for _score, name in scored[:TOOL_SHORTLIST]]
+
+    if not picked:
+        # No signal at all: the common cases, so "how hot is it" still finds a way.
+        fallback = ["weather", "dns", "ipinfo", "define", "googler", "news",
+                    "stocks", "cryptocurrency", "currency", "browser"]
+        picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
+    return picked
+
+
+_BROWSER_HELP = """13. For WEB BROWSING use the 'browser' tool. Available actions:
+    - browser open <url>              → open URL in the user's system browser
+    - browser fetch <url>             → read page text (HTTP, works everywhere)
+    - browser navigate <url>          → go to URL in the controlled session
+    - browser click <selector|text>   → click element (CSS selector or visible text)
+    - browser type <selector> <text>  → type text into a field
+    - browser fill <selector> <value> → fill a form field
+    - browser read                    → read current page text
+    - browser scroll up|down          → scroll the page
+    - browser screenshot [url]        → capture a screenshot
+    - browser search <query>          → DuckDuckGo search and return results
+    - browser close                   → close the controlled browser session
+    Works on all platforms including Termux (requires `pkg install chromium` on Termux)."""
+
+
 # System prompt for models without native tool support
 def call_model(state: AgentState):
     _require_langchain_runtime()
@@ -463,6 +592,7 @@ def call_model(state: AgentState):
 
     # Re-discover tools to ensure we have the latest descriptions
     available_tools = discover_tools()
+    available_tools = _shortlist_tools(_last, available_tools)
 
     # When offline, flag tools that need internet so the model doesn't try
     # them (and can tell the user why). Online, the list is left clean.
@@ -490,6 +620,10 @@ requires an internet connection and offer to retry once they're back online.
 Tools you CAN use offline: {usable}.
 """
 
+    # Only spell out the browser sub-commands when the browser is actually on
+    # offer — otherwise it is ~800 characters of prompt for an unlisted tool.
+    browser_help = _BROWSER_HELP if "browser" in available_tools else ""
+
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
 You have access to the following gathm tools:
 {tool_descriptions}
@@ -512,20 +646,7 @@ Action Input: [tool_name] [arguments]
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
 12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
-13. For WEB BROWSING use the 'browser' tool. Available actions:
-    - browser open <url>              → open URL in the user's system browser
-    - browser fetch <url>             → read page text (HTTP, works everywhere)
-    - browser navigate <url>          → go to URL in the controlled session
-    - browser click <selector|text>   → click element (CSS selector or visible text)
-    - browser type <selector> <text>  → type text into a field
-    - browser fill <selector> <value> → fill a form field
-    - browser read                    → read current page text
-    - browser scroll up|down          → scroll the page
-    - browser screenshot [url]        → capture a screenshot
-    - browser search <query>          → DuckDuckGo search and return results
-    - browser close                   → close the controlled browser session
-    Works on all platforms including Termux (requires `pkg install chromium` on Termux).
-
+{browser_help}
 When you have a final answer, provide it directly without the Action format.
 """
     messages = [HumanMessage(content=system_prompt)] + state["messages"]

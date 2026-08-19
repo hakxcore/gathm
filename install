@@ -1839,6 +1839,19 @@ AUDIOCPP_ASR_MODEL_REL="models/SenseVoice-Small-GGUF"
 # turning two separate "it ran" checks into one real round trip.
 _AUDIOCPP_SMOKE_WAV=""
 
+# Compiling audio.cpp costs 20-60 minutes on a phone, so a binary that already
+# works is worth keeping. The cache lives outside ~/.gathm on purpose: uninstall
+# removes that directory, and a reinstall should not mean another hour of clang.
+# Delete it by hand (or with --purge-audio-cache) to force a rebuild.
+AUDIOCPP_CACHE_DIR="${GATHM_AUDIOCPP_CACHE:-$HOME/.cache/gathm/audiocpp}"
+
+# A prebuilt binary can also come from elsewhere entirely: build once, publish
+# it (e.g. as a GitHub release asset), then point every other device at it.
+#   GATHM_AUDIOCPP_BIN_URL=https://…/audiocpp_cli-aarch64
+#   GATHM_AUDIOCPP_BIN_SHA256=<sha256>   (optional but recommended)
+AUDIOCPP_BIN_URL="${GATHM_AUDIOCPP_BIN_URL:-}"
+AUDIOCPP_BIN_SHA256="${GATHM_AUDIOCPP_BIN_SHA256:-}"
+
 # True on Termux/Android. Prefers the platform detected by main(), falling
 # back to detection so this is also correct when called from `--check`.
 _is_termux() {
@@ -2055,6 +2068,117 @@ _audiocpp_patch_termux_sentencepiece() {
     warn "Apply manually, then re-run:"
     warn "  echo '$line' >> $spm"
     return 0
+}
+
+# Cache key: the machine type plus the families compiled in. A binary built for
+# pocket_tts alone cannot serve a config that also expects sense_asr, and an
+# aarch64 build is useless on anything else, so both belong in the name.
+_audiocpp_cache_file() {
+    local arch models
+    arch=$(uname -m 2>/dev/null || echo unknown)
+    models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+    models="${models//,/-}"
+    echo "$AUDIOCPP_CACHE_DIR/audiocpp_cli-${arch}-${models}"
+}
+
+# Does this binary run, and does it have the loaders we expect?
+_audiocpp_binary_usable() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 1
+    "$bin" --list-loaders >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1 || return 1
+    "$bin" --list-loaders 2>/dev/null | grep -qi "$AUDIOCPP_TTS_FAMILY"
+}
+
+# Keep a copy of a good build for next time.
+_audiocpp_cache_save() {
+    local bin="$1" target
+    target=$(_audiocpp_cache_file)
+    mkdir -p "$AUDIOCPP_CACHE_DIR" 2>/dev/null || return 0
+    if cp "$bin" "$target.tmp" 2>/dev/null && mv "$target.tmp" "$target" 2>/dev/null; then
+        chmod +x "$target" 2>/dev/null || true
+        ok "Cached this build for future installs ($target)"
+    else
+        rm -f "$target.tmp" 2>/dev/null || true
+    fi
+}
+
+# Reuse a cached build instead of compiling, when one matches and still runs.
+_audiocpp_cache_restore() {
+    local cached; cached=$(_audiocpp_cache_file)
+    [[ -f "$cached" ]] || return 1
+    chmod +x "$cached" 2>/dev/null || true
+    if ! _audiocpp_binary_usable "$cached"; then
+        warn "Cached binary at $cached will not run — rebuilding"
+        return 1
+    fi
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+    if cp "$cached" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
+        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+        ok "Reused the cached audio.cpp build — no compile needed"
+        return 0
+    fi
+    return 1
+}
+
+# Fetch a prebuilt binary. This is the way to skip compiling on every device:
+# build once, publish, then set GATHM_AUDIOCPP_BIN_URL everywhere else.
+_audiocpp_fetch_prebuilt() {
+    [[ -n "$AUDIOCPP_BIN_URL" ]] || return 1
+    local tmp="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; tmp="${tmp:-/tmp}"
+    local out="$tmp/audiocpp_cli.download.$$"
+    rm -f "$out" 2>/dev/null || true
+
+    info "Downloading prebuilt audiocpp_cli from $AUDIOCPP_BIN_URL"
+    if ! run_with_spinner "downloading audiocpp_cli" -- \
+            curl -fL --connect-timeout 20 --retry 2 -o "$out" "$AUDIOCPP_BIN_URL"; then
+        warn "Download failed — falling back to building from source"
+        rm -f "$out" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ -n "$AUDIOCPP_BIN_SHA256" ]]; then
+        local got=""
+        if command -v sha256sum &>/dev/null; then
+            got=$(sha256sum "$out" 2>/dev/null | awk '{print $1}')
+        elif command -v shasum &>/dev/null; then
+            got=$(shasum -a 256 "$out" 2>/dev/null | awk '{print $1}')
+        fi
+        if [[ -z "$got" ]]; then
+            warn "No sha256 tool available — cannot verify the download"
+        elif [[ "$got" != "$AUDIOCPP_BIN_SHA256" ]]; then
+            # warn, not step_fail: the step has not failed, it falls back to
+            # building from source. step_fail would also mark the step failed
+            # and then be contradicted by a successful build.
+            warn "Checksum mismatch on the downloaded binary — refusing to install it"
+            warn "  expected $AUDIOCPP_BIN_SHA256"
+            warn "  got      $got"
+            note_missing "prebuilt audiocpp_cli (checksum mismatch)" \
+                "check GATHM_AUDIOCPP_BIN_URL and GATHM_AUDIOCPP_BIN_SHA256"
+            rm -f "$out" 2>/dev/null || true
+            return 1
+        else
+            ok "Checksum verified"
+        fi
+    fi
+
+    chmod +x "$out" 2>/dev/null || true
+    if ! _audiocpp_binary_usable "$out"; then
+        warn "The downloaded binary does not run here (wrong architecture or"
+        warn "built without the $AUDIOCPP_TTS_FAMILY loader) — building instead"
+        rm -f "$out" 2>/dev/null || true
+        return 1
+    fi
+
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+    if cp "$out" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
+        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+        _audiocpp_cache_save "$LOCAL_BIN/audiocpp_cli"
+        rm -f "$out" 2>/dev/null || true
+        ok "Installed the prebuilt audiocpp_cli — no compile needed"
+        return 0
+    fi
+    rm -f "$out" 2>/dev/null || true
+    return 1
 }
 
 # Configure + compile the audiocpp_cli target. CPU only, twice if needed.
@@ -2614,6 +2738,34 @@ _audiocpp_setup_voice() {
 install_audio_cpp_termux() {
     local src; src=$(_audiocpp_src_dir)
 
+    # Before anything expensive: can we avoid compiling altogether? A published
+    # binary wins, then a cached build from a previous install on this device.
+    # Both are verified by actually running --list-loaders, so a stale or
+    # wrong-architecture file falls through to the source build rather than
+    # installing something broken.
+    if [[ "${GATHM_AUDIOCPP_FORCE_BUILD:-0}" != "1" ]]; then
+        if _audiocpp_fetch_prebuilt; then
+            local pre; pre=$(_audiocpp_bin) || true
+            _audiocpp_save_config "$pre" "$src"
+            step_done "audio.cpp installed from a prebuilt binary"
+            _audiocpp_setup_voice "$pre" "$src"
+            return 0
+        fi
+        if _audiocpp_cache_restore; then
+            local cachedbin; cachedbin=$(_audiocpp_bin) || true
+            _audiocpp_save_config "$cachedbin" "$src"
+            step_done "audio.cpp restored from cache (no compile)"
+            # The weights live in the source tree, so it still has to exist for
+            # the voice/ASR models — clone it, but skip the build entirely.
+            if [[ ! -d "$src/.git" ]]; then
+                _audiocpp_install_build_deps
+                _audiocpp_clone_or_update "$src" || true
+            fi
+            _audiocpp_setup_voice "$cachedbin" "$src"
+            return 0
+        fi
+    fi
+
     # Source tree plus a full ggml build needs real space, and a phone that
     # runs out mid-compile fails in a way that is tedious to diagnose.
     # `|| true`: the detector returns non-zero when free space is unknown.
@@ -2661,6 +2813,7 @@ install_audio_cpp_termux() {
 
     local bin; bin=$(_audiocpp_bin) || true
     _audiocpp_save_config "$bin" "$src"
+    _audiocpp_cache_save "$bin"
     step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
     _audiocpp_setup_voice "$bin" "$src"
 }
@@ -2680,6 +2833,9 @@ install_audio_cpp() {
     local existing; existing=$(_audiocpp_bin) || true
     if [[ -n "$existing" && "${GATHM_AUDIOCPP_FORCE:-0}" != "1" ]]; then
         _audiocpp_save_config "$existing" "$(_audiocpp_src_dir)"
+        # Seed the cache from a binary that already works, so the next install
+        # (or a reinstall after uninstall) needs no compile.
+        [[ -f "$(_audiocpp_cache_file)" ]] || _audiocpp_cache_save "$existing"
         step_done "audio.cpp already installed ($existing)"
         _audiocpp_setup_voice "$existing" "$(_audiocpp_src_dir)"
         return 0

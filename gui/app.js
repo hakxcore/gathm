@@ -15,6 +15,11 @@ const sendBtn      = document.getElementById('sendBtn');
 const micBtn       = document.getElementById('micBtn');
 const speakBtn     = document.getElementById('speakBtn');
 
+// -- Conversation memory ---------------------------------------------------
+// Declared up here because both persistence and sending touch it.
+let history = [];                 // prior turns sent to the agent for context
+const HISTORY_MAX = 12;           // keep the last N turns
+
 // -- Orb state -------------------------------------------------------------
 function setOrbState(state) {
     if (aiOrb) aiOrb.className = 'ai-orb ' + state;
@@ -60,26 +65,71 @@ function formatTime() {
     return h + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
 }
 
+// -- Persistence -----------------------------------------------------------
+// The transcript used to live only in memory, so closing the browser — or
+// Android reclaiming the tab — wiped the conversation and the model's context
+// with it. Both are saved and restored now.
+const STORE_KEY = 'gathmChat';
+const STORE_MAX = 200;            // messages kept; older ones are dropped
+let transcript = [];              // [{text, sender, cssClass, time}]
+
+function saveChat() {
+    try {
+        localStorage.setItem(STORE_KEY, JSON.stringify({
+            transcript: transcript.slice(-STORE_MAX),
+            history: history.slice(-HISTORY_MAX * 2),
+        }));
+    } catch (_) { /* private mode / quota — not worth breaking the chat over */ }
+}
+
+function restoreChat() {
+    let saved = null;
+    try {
+        saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    } catch (_) {
+        saved = null;
+    }
+    if (!saved || !Array.isArray(saved.transcript) || !saved.transcript.length) return;
+    transcript = saved.transcript;
+    history = Array.isArray(saved.history) ? saved.history : [];
+    transcript.forEach(function(m) { renderMessage(m); });
+    scrollToBottom();
+}
+
+function clearChat() {
+    transcript = [];
+    history = [];
+    chatArea.innerHTML = '';
+    try { localStorage.removeItem(STORE_KEY); } catch (_) { /* nothing to do */ }
+}
+
 // -- Messages --------------------------------------------------------------
-function addMessage(text, sender, cssClass) {
+function renderMessage(m) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'message-wrapper ' + sender;
+    wrapper.className = 'message-wrapper ' + m.sender;
 
     const msg = document.createElement('div');
-    msg.className = 'message ' + (cssClass || sender + '-text');
+    msg.className = 'message ' + (m.cssClass || m.sender + '-text');
 
     const p = document.createElement('p');
-    p.textContent = text;
+    p.textContent = m.text;
     msg.appendChild(p);
     wrapper.appendChild(msg);
 
     const time = document.createElement('div');
-    time.className = 'message-time ' + sender + '-time';
-    time.textContent = formatTime();
+    time.className = 'message-time ' + m.sender + '-time';
+    time.textContent = m.time || formatTime();
 
     chatArea.appendChild(wrapper);
     chatArea.appendChild(time);
+}
+
+function addMessage(text, sender, cssClass) {
+    const m = { text: text, sender: sender, cssClass: cssClass, time: formatTime() };
+    transcript.push(m);
+    renderMessage(m);
     scrollToBottom();
+    saveChat();
 }
 
 // -- Typing indicator ------------------------------------------------------
@@ -128,6 +178,7 @@ function formatAgentReply(data) {
 // plays it. That keeps playback on the user's device — the API process may have
 // no audio output at all — and on Termux the browser is the same phone.
 let speechAvailable = false;
+let asrReason      = '';          // why transcription is unavailable, if it is
 let speakEnabled    = localStorage.getItem('gathmSpeak') !== '0';
 let currentAudio    = null;
 
@@ -198,16 +249,26 @@ checkSpeech();
 
 // -- Send via API ----------------------------------------------------------
 let isSending = false;
-let history = [];                 // conversation memory for multi-turn context
-const HISTORY_MAX = 12;           // keep the last N turns
 
 async function sendMessage() {
     const text = messageInput.value.trim();
     if (!text || isSending) return;
 
     stopSpeaking();               // a new question outranks the old answer
+
+    // The transcript is persistent now, so there has to be a way to drop it.
+    if (text === '/clear' || text === '/reset') {
+        clearChat();
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        botStatus.textContent = 'Chat cleared';
+        setTimeout(checkConnectivity, 2000);
+        return;
+    }
+
     addMessage(text, 'user');
     messageInput.value = '';
+    messageInput.style.height = 'auto';
     isSending = true;
     sendBtn.disabled = true;
     showTyping();
@@ -238,6 +299,7 @@ async function sendMessage() {
         if (history.length > HISTORY_MAX * 2) {
             history = history.slice(-HISTORY_MAX * 2);
         }
+        saveChat();
 
     } catch (err) {
         hideTyping();
@@ -254,9 +316,25 @@ async function sendMessage() {
 }
 
 sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', function(e) {
-    if (e.key === 'Enter') sendMessage();
+
+// The input is a textarea now, so Enter has to be handled deliberately:
+// Enter sends, Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
+messageInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        sendMessage();
+    }
 });
+
+// Grow with the text up to the CSS max-height, then scroll inside the box.
+function autoGrow() {
+    messageInput.style.height = 'auto';
+    messageInput.style.height = messageInput.scrollHeight + 'px';
+}
+messageInput.addEventListener('input', autoGrow);
+
+restoreChat();
+autoGrow();
 
 // =========================================================================
 // Voice mode -- Web Audio API drives real frequency visualization
@@ -279,9 +357,17 @@ async function checkTranscribe() {
     try {
         const res = await fetch(API_BASE + '/api/v1/transcribe/status',
                                 { signal: AbortSignal.timeout(4000) });
-        asrAvailable = res.ok ? !!(await res.json()).available : false;
+        if (res.ok) {
+            const js = await res.json();
+            asrAvailable = !!js.available;
+            asrReason = js.reason || '';
+        } else {
+            asrAvailable = false;
+            asrReason = 'server has no transcribe endpoint (old version?)';
+        }
     } catch (_) {
         asrAvailable = false;
+        asrReason = 'cannot reach the API';
     }
 }
 
@@ -334,6 +420,61 @@ function encodeWav(chunks, inRate, outRate) {
     return new Blob([buf], { type: 'audio/wav' });
 }
 
+// A recording with no visible sign of recording is indistinguishable from a
+// dead button — which is exactly how it looked. This bubble goes into the chat
+// while capture runs and is replaced by the transcript.
+let recEl = null;
+let recTimer = null;
+
+function showRecording() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message-wrapper user';
+    wrapper.id = 'recordingWrapper';
+
+    const msg = document.createElement('div');
+    msg.className = 'message user-text';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'recording-bubble';
+    const dot = document.createElement('div');
+    dot.className = 'recording-dot';
+    const label = document.createElement('span');
+    label.textContent = 'Recording… tap the mic to stop';
+    const timer = document.createElement('span');
+    timer.className = 'recording-timer';
+    timer.textContent = '0:00';
+
+    bubble.appendChild(dot);
+    bubble.appendChild(label);
+    bubble.appendChild(timer);
+    msg.appendChild(bubble);
+    wrapper.appendChild(msg);
+    chatArea.appendChild(wrapper);
+    scrollToBottom();
+    recEl = wrapper;
+
+    const started = Date.now();
+    recTimer = setInterval(function() {
+        const s = Math.floor((Date.now() - started) / 1000);
+        timer.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }, 250);
+}
+
+function setRecordingLabel(text) {
+    if (!recEl) return;
+    if (recTimer) { clearInterval(recTimer); recTimer = null; }
+    const bubble = recEl.querySelector('.recording-bubble');
+    if (bubble) bubble.innerHTML = '';
+    const span = document.createElement('span');
+    span.textContent = text;
+    if (bubble) bubble.appendChild(span);
+}
+
+function hideRecording() {
+    if (recTimer) { clearInterval(recTimer); recTimer = null; }
+    if (recEl) { recEl.remove(); recEl = null; }
+}
+
 async function transcribeAndSend() {
     const chunks = pcmChunks;
     pcmChunks = [];
@@ -341,11 +482,14 @@ async function transcribeAndSend() {
 
     const seconds = chunks.reduce(function(n, c) { return n + c.length; }, 0) / pcmRate;
     if (seconds < 0.4) {                    // a stray tap, not speech
+        setRecordingLabel('Too short — hold the mic while you speak');
+        setTimeout(hideRecording, 2500);
         botStatus.textContent = 'Too short — hold the mic while you speak';
         setTimeout(checkConnectivity, 2500);
         return;
     }
 
+    setRecordingLabel('Transcribing ' + seconds.toFixed(1) + 's of audio…');
     botStatus.textContent = 'Transcribing…';
     try {
         const res = await fetch(API_BASE + '/api/v1/transcribe', {
@@ -355,22 +499,30 @@ async function transcribeAndSend() {
         });
         if (!res.ok) {
             const err = await res.json().catch(function() { return {}; });
-            botStatus.textContent = err.detail || 'Could not transcribe that';
+            const why = err.detail || 'could not transcribe that';
+            setRecordingLabel('Transcription failed: ' + why);
+            setTimeout(hideRecording, 6000);
+            botStatus.textContent = why;
             setTimeout(checkConnectivity, 3000);
             return;
         }
         const text = ((await res.json()).text || '').trim();
         if (!text) {
-            botStatus.textContent = 'Nothing recognised — try again';
+            setRecordingLabel('Nothing recognised — try again, closer to the mic');
+            setTimeout(hideRecording, 5000);
             setTimeout(checkConnectivity, 2500);
             return;
         }
+        hideRecording();
         // Land it in the input and send, so the transcript is visible and
         // correctable rather than vanishing into a request.
         messageInput.value = text;
+        autoGrow();
         checkConnectivity();
         sendMessage();
     } catch (err) {
+        setRecordingLabel('Transcription failed: ' + err.message);
+        setTimeout(hideRecording, 6000);
         botStatus.textContent = 'Transcription failed: ' + err.message;
         setTimeout(checkConnectivity, 3000);
     }
@@ -380,15 +532,48 @@ const bars = Array.from(freqBars.querySelectorAll('.fb'));
 
 async function startVoice() {
     stopSpeaking();               // don't record ourselves talking
+
+    // navigator.mediaDevices exists only in a secure context. Over plain HTTP
+    // that means localhost/127.0.0.1 ONLY — opening the GUI on the phone's LAN
+    // address gives an undefined mediaDevices and an inscrutable dead button.
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const where = location.protocol + '//' + location.host;
+        addMessage('The browser will not give this page a microphone, because ' +
+                   where + ' is not a secure origin. Open the GUI as ' +
+                   'http://127.0.0.1:8080 (or over HTTPS) and the mic will work.',
+                   'bot', 'bot-error');
+        return;
+    }
+
+    // Say why voice input cannot work, rather than recording into a void.
+    if (!asrAvailable) {
+        await checkTranscribe();
+        if (!asrAvailable) {
+            addMessage('Voice input is unavailable: ' +
+                       (asrReason || 'the server reports no speech-to-text model') +
+                       '. Rebuild with: GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr ' +
+                       'GATHM_AUDIOCPP_FORCE=1 ./install', 'bot', 'bot-error');
+            return;
+        }
+    }
+
     try {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (err) {
+        addMessage('Microphone blocked: ' + (err && err.name ? err.name : 'denied') +
+                   '. Allow mic access for this site in the browser\'s site settings.',
+                   'bot', 'bot-error');
         botStatus.textContent = 'Microphone access denied';
         setTimeout(checkConnectivity, 3000);
         return;
     }
 
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Mobile browsers hand back a suspended context; a suspended context runs
+    // no ScriptProcessor, so capture would silently produce zero samples.
+    if (audioCtx.state === 'suspended') {
+        try { await audioCtx.resume(); } catch (_) { /* best effort */ }
+    }
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 64;
     analyser.smoothingTimeConstant = 0.75;
@@ -420,6 +605,14 @@ async function startVoice() {
     micBtn.classList.add('active');
     botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
                                          : 'Listening...';
+    if (recorderNode) {
+        showRecording();
+    } else if (asrAvailable) {
+        // ASR is available but this browser has no ScriptProcessor at all.
+        addMessage('This browser cannot capture audio for transcription ' +
+                   '(no ScriptProcessor support). The visualiser still works.',
+                   'bot', 'bot-error');
+    }
 
     driveFrequency();
 }
@@ -444,8 +637,15 @@ function stopVoice() {
     setOrbState('idle');
     micBtn.classList.remove('active');
 
-    if (hadAudio) transcribeAndSend();     // ends with sendMessage() on success
-    else checkConnectivity();
+    if (hadAudio) {
+        transcribeAndSend();               // ends with sendMessage() on success
+    } else {
+        if (recEl) {
+            setRecordingLabel('No audio captured — check the mic permission');
+            setTimeout(hideRecording, 5000);
+        }
+        checkConnectivity();
+    }
 }
 
 function driveFrequency() {
