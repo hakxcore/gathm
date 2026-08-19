@@ -671,6 +671,33 @@ When you have a final answer, provide it directly without the Action format.
         "next_step": "end"
     }
 
+# Terminal art is for humans. `weather` alone returns ~3.5 KB of box-drawing and
+# ANSI escapes, which a 1B model has to read as ~1000 tokens of noise before it
+# can answer — and did not survive: it produced the canned failure line for a
+# lookup that had actually worked. Observations are stripped and capped.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
+_BOX_RE = re.compile(r"[\u2500-\u257f\u2580-\u259f]+")
+OBS_MAX_CHARS = int(os.getenv("GATHM_OBS_MAX_CHARS", "1500"))
+
+
+def _clean_observation(output: str) -> str:
+    """Reduce a tool's terminal output to what a model can actually use."""
+    text = _ANSI_RE.sub("", output or "")
+    text = _BOX_RE.sub(" ", text)
+    # Collapse the runs of spaces that the art leaves behind, and drop the blank
+    # lines that come with it, without joining separate lines together.
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    text = "\n".join(lines)
+    if OBS_MAX_CHARS > 0 and len(text) > OBS_MAX_CHARS:
+        text = (text[:OBS_MAX_CHARS].rstrip()
+                + f"\n[... output truncated at {OBS_MAX_CHARS} characters ...]")
+    return text
+
+
 def _looks_like_tool_failure(output: str) -> bool:
     """Whether a tool's output is an error rather than an answer."""
     text = (output or "").strip()
@@ -702,11 +729,13 @@ def tool_node(state: AgentState):
         # became "This issue will be taken care by our engineer".
         if _looks_like_tool_failure(result):
             return {"messages": [HumanMessage(content=(
-                f"Observation: the tool FAILED. Its exact output was:\n{result}\n"
+                f"Observation: the tool FAILED. Its exact output was:\n"
+                f"{_clean_observation(result)}\n"
                 "Tell the user what failed and quote that error, then say the "
                 "engineer has been notified. Do not try the same tool again."
             ))]}
-        return {"messages": [HumanMessage(content=f"Observation: {result}")]}
+        return {"messages": [HumanMessage(content=
+                                          f"Observation: {_clean_observation(result)}")]}
     return {"messages": [HumanMessage(content="Error: Could not parse tool input.")]}
 
 def should_continue(state: AgentState):

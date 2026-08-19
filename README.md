@@ -202,6 +202,10 @@ ahead of the reasoning graph.
   is the one speech capability the agent *can* invoke, because "transcribe this
   file" is a genuine request with a file argument.
 
+Recordings are written under `~/.gathm/tmp`, not `$TMPDIR`: on Termux the
+capture is performed by the separate Termux:API app, which cannot reliably write
+into Termux's private `usr/tmp` — the file simply never appears.
+
 Voice input needs two things beyond the runtime, both installed by `./install`:
 `termux-api` for `termux-microphone-record` (**plus the Termux:API app from
 F-Droid**, which an installer cannot do for you) and `ffmpeg`, because the
@@ -258,6 +262,7 @@ Speech options:
 | `GATHM_LISTEN_SECONDS` | default recording length (default 8) |
 | `GATHM_ASR_TIMEOUT` | seconds allowed for one transcription (default 300) |
 | `GATHM_AUDIO_RECORDER` | force a recording command |
+| `GATHM_OBS_MAX_CHARS` | cap on tool output shown to the model (default 1500, `0` = no cap) |
 | `GATHM_AUDIOCPP_ASR_PACKAGE` | ASR weights to install (default `sensevoice_small_q8`) |
 | `GATHM_AUDIOCPP_ASR_FAMILY` | ASR family to use (default `sense_asr`) |
 | `GATHM_AUDIOCPP_SKIP_ASR_MODEL` | `1` builds the loader but skips the weights |
@@ -332,6 +337,9 @@ On CPU-only hardware that prefill is the wait. Three things reduce it:
   `0` unloads immediately, at the cost of RAM).
 - **Small talk skips tools entirely.** A greeting is answered from a short
   prompt with no tool list at all.
+- **Tool output is stripped before the model reads it.** `weather` alone returns
+  ~3.5 KB of box-drawing and ANSI escapes; the model now gets the text without
+  the art, capped by `GATHM_OBS_MAX_CHARS`.
 
 What remains, and is not yet optimized: the API server starts a fresh Python
 process per turn (`pilot/chat_once.py`), so the GUI pays LangChain's import cost

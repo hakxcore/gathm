@@ -655,6 +655,29 @@ def to_wav16(path: str) -> tuple[bool, str]:
     return True, wav
 
 
+def record_dir() -> str:
+    """Where to record to.
+
+    Not $TMPDIR: on Termux that is the app's private usr/tmp, and the recording
+    is performed by the separate Termux:API app, which cannot reliably write
+    there — the file simply never appears, which is why a hand-run recording
+    into $HOME worked while lib/speech.py's own came back empty.
+    """
+    home = os.path.expanduser("~")
+    for candidate in (os.path.join(home, ".gathm", "tmp"), home,
+                      tempfile.gettempdir()):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe = os.path.join(candidate, ".gathm-write-probe")
+            with open(probe, "w") as fh:
+                fh.write("x")
+            os.unlink(probe)
+            return candidate
+        except Exception:  # noqa: BLE001 - try the next one
+            continue
+    return tempfile.gettempdir()
+
+
 def record(seconds: int, out_path: str) -> tuple[bool, str]:
     """Record from the microphone. Returns (ok, path-or-reason)."""
     rec = find_recorder()
@@ -667,21 +690,35 @@ def record(seconds: int, out_path: str) -> tuple[bool, str]:
         # Returns immediately and records in the background, so the wait and
         # the explicit stop are ours to do. It picks the encoder from -e; WAV
         # is not one of the options, hence the conversion afterwards.
-        m4a = out_path + ".m4a"
+        m4a = os.path.splitext(out_path)[0] + ".m4a"
+        started = ""
         try:
-            rc, _out, err = _run_tracked(
+            rc, out, err = _run_tracked(
                 [name, "-f", m4a, "-l", str(seconds), "-e", "aac"], 30)
+            started = ((out or "") + (err or "")).strip()
             if rc != 0:
-                tail = (err or "").strip().splitlines()
+                tail = started.splitlines()
                 return False, (tail[-1] if tail else
                                "termux-microphone-record failed — is the "
                                "Termux:API app installed and mic permission granted?")
             time.sleep(seconds + 1)          # -l is a limit, not a wait
             _run_tracked([name, "-q"], 15)   # stop, and flush the file
+            # The file is written by another process, so give it a moment to
+            # appear rather than declaring failure on a race.
+            for _ in range(12):
+                if os.path.exists(m4a) and os.path.getsize(m4a) > 0:
+                    break
+                time.sleep(0.25)
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
-        if not os.path.exists(m4a) or os.path.getsize(m4a) == 0:
-            return False, "the recording came out empty"
+        if not os.path.exists(m4a):
+            return False, (f"the recorder never created {m4a} — "
+                           + (started or "check that the Termux:API app is "
+                                         "installed and has microphone permission"))
+        if os.path.getsize(m4a) == 0:
+            return False, (f"the recording at {m4a} is empty — "
+                           "grant Termux:API microphone permission, or another "
+                           "app may be holding the mic")
         return True, m4a
 
     if name == "arecord":
@@ -722,7 +759,8 @@ def listen(seconds: int | None = None) -> tuple[bool, str]:
     seconds = max(1, min(int(seconds), 300))
 
     stop()  # never record ourselves talking
-    fd, raw = tempfile.mkstemp(prefix="gathm-listen-", suffix=".wav")
+    fd, raw = tempfile.mkstemp(prefix="gathm-listen-", suffix=".wav",
+                               dir=record_dir())
     os.close(fd)
     extra = []
     try:
@@ -767,6 +805,7 @@ def diagnose() -> int:
     print("recorder     : %s" % (recorder or "NONE (pkg install termux-api)"))
     print("converter    : %s" % (shutil.which("ffmpeg") or
                                  "NONE (pkg install ffmpeg)"))
+    print("record dir   : %s" % record_dir())
     print("listening    : %s" % asr_enabled())
     if engine() == "system":
         return 0 if enabled() else 1   # the OS voice does its own playback
