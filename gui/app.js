@@ -13,6 +13,7 @@ const chatArea     = document.getElementById('chatArea');
 const messageInput = document.getElementById('messageInput');
 const sendBtn      = document.getElementById('sendBtn');
 const micBtn       = document.getElementById('micBtn');
+const speakBtn     = document.getElementById('speakBtn');
 
 // -- Orb state -------------------------------------------------------------
 function setOrbState(state) {
@@ -115,6 +116,79 @@ function formatAgentReply(data) {
         || JSON.stringify(data, null, 2);
 }
 
+// -- Spoken replies --------------------------------------------------------
+// The server renders speech with audio.cpp and hands back a WAV; the browser
+// plays it. That keeps playback on the user's device — the API process may have
+// no audio output at all — and on Termux the browser is the same phone.
+let speechAvailable = false;
+let speakEnabled    = localStorage.getItem('gathmSpeak') !== '0';
+let currentAudio    = null;
+
+async function checkSpeech() {
+    try {
+        const res = await fetch(API_BASE + '/api/v1/speech/status',
+                                { signal: AbortSignal.timeout(4000) });
+        speechAvailable = res.ok ? !!(await res.json()).available : false;
+    } catch (_) {
+        speechAvailable = false;
+    }
+    updateSpeakBtn();
+}
+
+function updateSpeakBtn() {
+    if (!speakBtn) return;
+    speakBtn.hidden = !speechAvailable;      // no voice runtime → no control
+    speakBtn.classList.toggle('active', speakEnabled);
+    speakBtn.setAttribute('aria-label', speakEnabled ? 'Mute replies' : 'Speak replies');
+    speakBtn.innerHTML = '<i data-lucide="' + (speakEnabled ? 'volume-2' : 'volume-x') +
+                         '" class="btn-icon"></i>';
+    lucide.createIcons();
+}
+
+function stopSpeaking() {
+    if (currentAudio) {
+        try { currentAudio.pause(); } catch (_) { /* already gone */ }
+        currentAudio = null;
+    }
+    if (!voiceActive) setOrbState('idle');
+}
+
+async function speakReply(text) {
+    if (!speechAvailable || !speakEnabled || !text) return;
+    stopSpeaking();
+    try {
+        const res = await fetch(API_BASE + '/api/v1/speech', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text }),
+        });
+        if (!res.ok) return;                  // silence is the right failure here
+        const url = URL.createObjectURL(await res.blob());
+        const audio = new Audio(url);
+        currentAudio = audio;
+        if (!voiceActive) setOrbState('speaking');
+        const done = function() {
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            if (!voiceActive) setOrbState('idle');
+        };
+        audio.onended = done;
+        audio.onerror = done;
+        await audio.play().catch(done);       // autoplay may need a tap first
+    } catch (_) { /* speech is a bonus, never an error path */ }
+}
+
+if (speakBtn) {
+    speakBtn.addEventListener('click', function() {
+        speakEnabled = !speakEnabled;
+        localStorage.setItem('gathmSpeak', speakEnabled ? '1' : '0');
+        if (!speakEnabled) stopSpeaking();
+        updateSpeakBtn();
+    });
+}
+
+checkSpeech();
+
 // -- Send via API ----------------------------------------------------------
 let isSending = false;
 let history = [];                 // conversation memory for multi-turn context
@@ -124,6 +198,7 @@ async function sendMessage() {
     const text = messageInput.value.trim();
     if (!text || isSending) return;
 
+    stopSpeaking();               // a new question outranks the old answer
     addMessage(text, 'user');
     messageInput.value = '';
     isSending = true;
@@ -148,6 +223,7 @@ async function sendMessage() {
         const data = await res.json();
         const reply = formatAgentReply(data);
         addMessage(reply, 'bot');
+        speakReply(reply);        // fire-and-forget; text is already on screen
 
         // Remember this turn so follow-ups have context
         history.push({ role: 'user', content: text });
@@ -188,6 +264,7 @@ let voiceActive = false;
 const bars = Array.from(freqBars.querySelectorAll('.fb'));
 
 async function startVoice() {
+    stopSpeaking();               // don't record ourselves talking
     try {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (err) {

@@ -43,6 +43,38 @@ try:
 except ImportError:
     pass
 
+# ── speech (optional) ────────────────────────────────────────────
+# audio.cpp is installed by ./install on Termux; lib/speech.py drives it.
+# Absent or unbuilt, every call below is a no-op, so the TUI is unaffected.
+_GATHM_ROOT = Path(__file__).resolve().parent.parent
+if str(_GATHM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_GATHM_ROOT))
+try:
+    from lib import speech as _speech
+except Exception:  # noqa: BLE001 - never let speech break the UI
+    _speech = None
+
+
+def speak_reply(text: str) -> None:
+    """Read a reply aloud in the background. Silent when speech is off."""
+    if _speech is None:
+        return
+    try:
+        _speech.speak_async(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def stop_speaking() -> None:
+    """Cut off whatever is being said — called when the user speaks up next."""
+    if _speech is None:
+        return
+    try:
+        _speech.stop()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════
 # Palette
 # Gathm tricolor mapped to OpenClaw's lobster-inspired semantic palette:
@@ -349,6 +381,11 @@ def render_response(text: str) -> None:
         )
     )
 
+    # Say it out loud too. This is the single choke point for assistant replies
+    # in the TUI, so hooking it here covers both the normal answer and the
+    # safety refusal without duplicating the call at each site.
+    speak_reply(text)
+
 
 # ══════════════════════════════════════════════════════════════════
 # Help screen
@@ -364,6 +401,7 @@ def render_help() -> None:
         ("/tools",  "List all available Gathm tools"),
         ("/clear",  "Clear screen and redraw welcome"),
         ("/model",  "Show current model / backend info"),
+        ("/speak",  "Voice status; /speak on|off, or /speak <text> to test"),
         ("/quit",   "Exit Pilot"),
         ("?",       "Show this help screen"),
     ]:

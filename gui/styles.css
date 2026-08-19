@@ -507,6 +507,16 @@ body {
     box-shadow: 0 0 20px rgba(200,50,50,0.25);
 }
 
+.speak-btn {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid var(--border);
+}
+.speak-btn.active {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+    box-shadow: 0 0 18px rgba(74,123,247,0.28);
+}
+.speak-btn[hidden] { display: none; }
+
 .btn-icon {
     width: 18px;
     height: 18px;

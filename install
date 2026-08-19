@@ -1898,6 +1898,41 @@ _audiocpp_install_build_deps() {
     pkg install -y openmp 2>/dev/null || true
 }
 
+# Synthesis is only half of speaking — something has to play the WAV, and
+# Android ships no CLI audio player at all. Without one, Pilot renders perfect
+# audio to a temp file and stays silent.
+AUDIOCPP_PLAYERS="termux-media-player mpv ffplay play paplay aplay"
+
+# Echo the first usable playback command, or nothing.
+_audiocpp_player() {
+    local p
+    for p in $AUDIOCPP_PLAYERS; do
+        if command -v "$p" &>/dev/null; then echo "$p"; return 0; fi
+    done
+    return 1
+}
+
+# Make sure a player exists. mpv is the one that reliably outputs audio on
+# Termux (termux-media-player also works but needs the separate Termux:API app
+# from F-Droid, which an installer cannot do on the user's behalf).
+_audiocpp_install_player() {
+    local existing; existing=$(_audiocpp_player) || true
+    if [[ -n "$existing" ]]; then
+        ok "Audio player present ($existing)"
+        return 0
+    fi
+    info "Installing an audio player so replies can be heard..."
+    pkg install -y mpv 2>/dev/null || true
+    existing=$(_audiocpp_player) || true
+    if [[ -n "$existing" ]]; then
+        ok "Audio player installed ($existing)"
+        return 0
+    fi
+    warn "No audio player found — speech will be synthesized but not played"
+    note_missing "audio player for speech playback" "pkg install mpv"
+    return 1
+}
+
 # Run an audio.cpp Git operation with a finite wall-clock deadline.  Android
 # can keep an HTTPS socket half-open indefinitely after a network hand-off;
 # Git then prints only "Cloning into ..." while the spinner runs forever.
@@ -2339,6 +2374,7 @@ _audiocpp_setup_voice() {
     if _audiocpp_install_tts_model "$src"; then
         _audiocpp_save_model_path "$src"
         _audiocpp_smoke_test "$bin" "$src" || true
+        _audiocpp_install_player || true
     fi
 }
 
@@ -2869,6 +2905,14 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
         # The binary alone cannot speak — it needs weights.
         if _audiocpp_has_model "$audio_src"; then
             ok "Voice model ($(_audiocpp_model_dir "$audio_src"), voice '$AUDIOCPP_TTS_VOICE')"
+            # Synthesis without playback is silence, so this is part of "works".
+            local audio_player; audio_player=$(_audiocpp_player) || true
+            if [[ -n "$audio_player" ]]; then
+                ok "Audio playback ($audio_player)"
+            else
+                warn "No audio player — Pilot renders speech but cannot play it"
+                note_missing "audio player for speech playback" "pkg install mpv"
+            fi
         else
             warn "No voice model downloaded yet (Pilot stays silent until one is)"
             note_missing "audio.cpp voice model" \

@@ -395,6 +395,32 @@ def _pilot_python() -> str:
 CHAT_TIMEOUT = int(os.environ.get("GATHM_CHAT_TIMEOUT", "600"))
 
 
+_SPEECH_MODULE: Any = None
+_SPEECH_TRIED = False
+
+
+def _speech():
+    """Import lib/speech.py lazily, or None when it is unusable.
+
+    Imported on demand rather than at module scope because `python3
+    api/server.py` puts api/ on sys.path[0], not the repo root — the same
+    reason the GUI's chat route needed the path fix in main().
+    """
+    global _SPEECH_MODULE, _SPEECH_TRIED
+    if _SPEECH_TRIED:
+        return _SPEECH_MODULE
+    _SPEECH_TRIED = True
+    root = str(GATHM_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from lib import speech as _mod  # noqa: PLC0415
+        _SPEECH_MODULE = _mod
+    except Exception:  # noqa: BLE001
+        _SPEECH_MODULE = None
+    return _SPEECH_MODULE
+
+
 def run_chat_agent(query: str, history: list = None, timeout: int | None = None) -> dict:
     """Run the real Pilot LLM agent for one turn and return its reply.
 
@@ -682,6 +708,10 @@ class ChatRequest(BaseModel):
     """GUI chat turn. `history` is prior turns as {"role", "content"} dicts."""
     query: str
     history: list = []
+
+class SpeechRequest(BaseModel):
+    """Text to render as speech for the browser to play."""
+    text: str
 
 class TaskRequest(BaseModel):
     task: str
@@ -977,6 +1007,69 @@ async def cancel_job(job_id: str, request: Request):
     return JSONResponse({"id": job_id, "status": "cancelled"})
 
 # ---------------------------------------------------------------------------
+# Routes: speech
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/speech/status", tags=["speech"])
+async def speech_status():
+    """Whether replies can be spoken, and with what.
+
+    The GUI checks this once on load so it only asks for audio when the voice
+    runtime is actually installed (Termux) — elsewhere it stays text-only
+    instead of firing requests that can never succeed.
+    """
+    mod = _speech()
+    if mod is None:
+        return {"available": False, "reason": "lib/speech.py not importable"}
+    cfg = mod.resolve()
+    available = bool(cfg["bin"] and cfg["model"]) and mod.enabled()
+    reason = ""
+    if not cfg["bin"]:
+        reason = "audiocpp_cli not installed"
+    elif not cfg["model"]:
+        reason = "no voice model configured"
+    elif not mod.enabled():
+        reason = "speech disabled (GATHM_SPEAK=0)"
+    return {
+        "available": available,
+        "reason": reason,
+        "family": cfg["family"],
+        "voice": cfg["voice"],
+        "runtime": cfg["bin"],
+        "model": cfg["model"],
+    }
+
+@app.post("/api/v1/speech", tags=["speech"])
+async def speech_synthesize(body: SpeechRequest):
+    """Render text to a WAV with audio.cpp and return the audio itself.
+
+    Playback happens in the browser rather than on the server: the API process
+    may have no audio device at all, and on Termux the browser is on the same
+    phone anyway. Runs in a thread — synthesis is a blocking subprocess that
+    takes seconds on a phone and would otherwise stall the event loop.
+    """
+    mod = _speech()
+    if mod is None:
+        raise HTTPException(503, "speech runtime unavailable")
+    if not mod.enabled():
+        cfg = mod.resolve()
+        if not cfg["bin"]:
+            raise HTTPException(503, "audiocpp_cli not installed")
+        if not cfg["model"]:
+            raise HTTPException(503, "no voice model configured")
+        raise HTTPException(503, "speech disabled (GATHM_SPEAK=0)")
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    ok, result = await asyncio.to_thread(mod.synthesize_bytes, text)
+    if not ok:
+        raise HTTPException(500, str(result))
+    return Response(content=result, media_type="audio/wav",
+                    headers={"Cache-Control": "no-store"})
+
+# ---------------------------------------------------------------------------
 # Routes: API info
 # ---------------------------------------------------------------------------
 
@@ -1012,6 +1105,8 @@ async def api_info():
             "POST /api/v1/agent/chain": "Execute tool pipeline",
             "POST /api/v1/agent/parallel": "Execute tools in parallel",
             "GET /api/v1/agent/status": "Agent status",
+            "GET /api/v1/speech/status": "Whether replies can be spoken",
+            "POST /api/v1/speech": "Render text to speech (audio/wav)",
             "POST /api/v1/agent/heal": "Self-heal tools",
             "POST /api/v1/jobs": "Submit async job — returns 202 + job_id immediately",
             "GET /api/v1/jobs": "List all jobs (filter: ?status=running)",

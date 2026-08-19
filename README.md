@@ -118,14 +118,56 @@ termux-open hello.wav
 `alba` is the package's built-in voice, so no reference recording is needed.
 For voice cloning, swap `--voice-id alba` for `--voice-ref your.wav`.
 
+#### How Gathm speaks
+
+`lib/speech.py` is the call site: it resolves the runtime and voice, strips
+markdown down to prose, synthesizes, and plays the result. Both interfaces use
+it, and both degrade to text silently when the runtime is missing — speech is
+never on the critical path of an answer.
+
+- **Pilot (TUI)** speaks every reply from `render_response`, in the background,
+  so the prompt comes back immediately instead of waiting on synthesis. Asking
+  the next question cuts off the answer still being read out.
+- **GUI** posts the reply to `POST /api/v1/speech` and plays the returned WAV in
+  the browser, so audio comes out of the device you are looking at rather than
+  the machine running the server. The speaker button appears only when
+  `GET /api/v1/speech/status` reports a working runtime, and the on/off choice
+  is remembered. The browser may need one tap on the page before it allows the
+  first playback.
+
+Synthesis is only half of speaking — Android ships no command-line audio player,
+so `./install` also installs `mpv`. `termux-media-player`, `ffplay`, `play`,
+`paplay` and `aplay` are used if already present, or force one with
+`GATHM_AUDIO_PLAYER`.
+
+In Pilot:
+
+```text
+/speak              runtime, voice, model, player, and whether speech is on
+/speak off          silence replies for this session
+/speak on           turn them back on
+/speak hello there  say a phrase, printing the reason if nothing comes out
+```
+
 Useful checks:
 
 ```bash
+python3 lib/speech.py "hello from gathm"   # speak a phrase end to end
+python3 lib/speech.py --check              # runtime / model / player report
 audiocpp_cli --list-loaders   # should list: pocket_tts: tts (offline)
-./install --check             # reports runtime, loader, and voice model
+./install --check             # reports runtime, loader, voice model, playback
 ```
 
-Options:
+Speech options:
+
+| Variable | Purpose |
+|---|---|
+| `GATHM_SPEAK` | `0` (also `off`/`false`/`no`) keeps Gathm silent |
+| `GATHM_SPEAK_MAX_CHARS` | how much of a long reply to read (default 600) |
+| `GATHM_SPEAK_TIMEOUT` | seconds allowed for one synthesis (default 180) |
+| `GATHM_AUDIO_PLAYER` | force a playback command, e.g. `mpv --no-video` |
+
+Build options:
 
 | Variable | Purpose |
 |---|---|
@@ -234,6 +276,12 @@ curl http://127.0.0.1:8080/api/v1/health
 curl -X POST http://127.0.0.1:8080/api/v1/agent/ask \
   -H "Content-Type: application/json" \
   -d '{"query":"weather in Paris"}'
+
+# Speech (Termux): returns audio/wav for the client to play
+curl http://127.0.0.1:8080/api/v1/speech/status
+curl -X POST http://127.0.0.1:8080/api/v1/speech \
+  -H "Content-Type: application/json" \
+  -d '{"text":"hello from gathm"}' --output reply.wav
 ```
 
 Enable API auth:
@@ -307,6 +355,8 @@ Key environment variables:
 - `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
 - `GATHM_AUDIOCPP_BIN` / `GATHM_AUDIOCPP_MODEL` / `GATHM_AUDIOCPP_FAMILY` / `GATHM_AUDIOCPP_VOICE`
   (audio.cpp speech runtime on Termux; see [Voice on Termux](#voice-on-termux-pilot-speech))
+- `GATHM_SPEAK` / `GATHM_SPEAK_MAX_CHARS` / `GATHM_SPEAK_TIMEOUT` / `GATHM_AUDIO_PLAYER`
+  (spoken replies)
 - `OMDB_API_KEY` (movie tool)
 - `VT_API_KEY` / `VIRUSTOTAL_API_KEY` (tipcheck VirusTotal)
 - `ABUSEIPDB_API_KEY` (tipcheck AbuseIPDB)

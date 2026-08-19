@@ -82,7 +82,7 @@ try:
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
         start_waiting, stop_waiting, print_user_message, get_user_input,
-        console,
+        stop_speaking, console,
     )
 except ImportError:
     try:
@@ -91,7 +91,7 @@ except ImportError:
             print_status_bar, render_help, render_tools_list, render_error,
             render_goodbye, check_connectivity,
             start_waiting, stop_waiting, print_user_message, get_user_input,
-            console,
+            stop_speaking, console,
         )
     except ImportError as exc:
         missing = getattr(exc, "name", None) or str(exc)
@@ -587,6 +587,56 @@ else:
     workflow = None
     app = None
 
+def _handle_speak_command(arg: str) -> None:
+    """/speak — inspect, toggle, or test the audio.cpp voice.
+
+    Speech is opt-out via GATHM_SPEAK, and on a phone it is worth being able to
+    silence a long answer without restarting Pilot.
+    """
+    try:
+        from lib import speech
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"\n  [color(196)][x][/color(196)] speech unavailable: {exc}")
+        return
+
+    arg_lower = arg.lower()
+
+    if arg_lower in ("on", "enable"):
+        os.environ["GATHM_SPEAK"] = "1"
+        cfg = speech.resolve()
+        if not cfg["bin"] or not cfg["model"]:
+            console.print("\n  [color(214)][!][/color(214)] Speech on, but the voice "
+                          "runtime is not installed. Run ./install on Termux.")
+        else:
+            console.print("\n  [color(40)][+][/color(40)] Speech on.")
+        return
+
+    if arg_lower in ("off", "disable", "mute"):
+        os.environ["GATHM_SPEAK"] = "0"
+        speech.stop()
+        console.print("\n  [color(40)][+][/color(40)] Speech off.")
+        return
+
+    if arg:  # anything else is a phrase to try out loud
+        console.print(f"\n  [dim]speaking:[/dim] {arg}")
+        if not speech.speak(arg, quiet=False):
+            console.print("  [color(214)][!][/color(214)] Nothing was played — "
+                          "see /speak for the reason.")
+        return
+
+    cfg = speech.resolve()
+    player = speech.find_player()
+    console.print("")
+    console.print(f"  [color(208)]Runtime:[/color(208)] {cfg['bin'] or 'not installed'}")
+    console.print(f"  [color(208)]Voice:[/color(208)]   {cfg['voice']} ({cfg['family']})")
+    console.print(f"  [color(208)]Model:[/color(208)]   {cfg['model'] or 'not configured'}")
+    console.print(f"  [color(208)]Player:[/color(208)]  "
+                  f"{' '.join(player) if player else 'none — pkg install mpv'}")
+    console.print(f"  [color(208)]Enabled:[/color(208)] {speech.enabled()}")
+    if not speech.enabled() or not player:
+        console.print("  [dim]Fix what is missing above, then: /speak hello[/dim]")
+
+
 def _handle_slash_command(cmd: str) -> bool:
     """Handle slash commands. Returns True if a command was handled."""
     cmd_lower = cmd.strip().lower()
@@ -608,6 +658,10 @@ def _handle_slash_command(cmd: str) -> bool:
     if cmd_lower == "/model":
         console.print(f"\n  [color(208)]Backend:[/color(208)] {LLM_BACKEND.upper()}")
         console.print(f"  [color(208)]Model:[/color(208)]   {OLLAMA_MODEL}")
+        return True
+
+    if cmd_lower == "/speak" or cmd_lower.startswith("/speak "):
+        _handle_speak_command(cmd.strip()[len("/speak"):].strip())
         return True
 
     if cmd_lower in ("/quit", "/exit"):
@@ -644,6 +698,11 @@ def main():
             user_input = get_user_input()
             if not user_input:
                 continue
+
+            # The previous answer may still be being read aloud; synthesis of a
+            # long reply outlives the turn that produced it. Whatever the user
+            # types next takes precedence over hearing the rest of it.
+            stop_speaking()
 
             # ── Exit ──
             if user_input.lower() in ("exit", "quit", "/quit", "/exit"):
