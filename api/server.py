@@ -1264,17 +1264,29 @@ def main():
     # like it changed nothing. Name that cause and how to clear it.
     import socket  # noqa: PLC0415 - only needed on this path
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR because uvicorn sets it too: without it this probe is the
+    # stricter of the two and would refuse to start over a socket still in
+    # TIME_WAIT from a server that has already exited — reporting a conflict
+    # where uvicorn would have bound successfully.
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind((host, port))
     except OSError:
-        kill_hint = (f"lsof -ti:{port} | xargs kill" if sys.platform != "win32"
-                     else f"netstat -ano | findstr :{port}")
+        if sys.platform == "win32":
+            who = f"netstat -ano | findstr :{port}"
+            kill_hint = "taskkill /PID <pid> /F"
+        else:
+            who = f"lsof -nP -iTCP:{port} -sTCP:LISTEN"
+            kill_hint = (f"lsof -ti:{port} | xargs kill      "
+                         f"(add -9 if it survives: lsof -ti:{port} | xargs kill -9)")
         print(
             f"ERROR: something is already listening on {host}:{port}.\n"
             "       If that is an older Gathm API server, the browser is still\n"
             "       talking to it and code changes will not take effect until it\n"
-            f"       is stopped:\n\n           {kill_hint}\n\n"
-            f"       Or start this one elsewhere:  gathm-api --port {port + 1}",
+            f"       is stopped.\n\n"
+            f"       See what holds it:  {who}\n"
+            f"       Stop it:            {kill_hint}\n"
+            f"       Or use another port: gathm-api --port {port + 1}",
             file=sys.stderr,
         )
         sys.exit(1)
