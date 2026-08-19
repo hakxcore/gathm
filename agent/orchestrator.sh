@@ -280,7 +280,7 @@ portscan tcp_scan udp_scan port_range service_discovery nmap|portscan
 maltego graph_investigation entity_graph transforms|maltego
 tipcheck threat_intel virustotal abuseipdb ioc_reputation|tipcheck
 imganalyze image_analysis ocr object_detection image_forensics|imganalyze
-search google find_online look_up_online|googler
+search google find_online look_up_online websearch|websearch
 movie film cinema imdb rating|movie
 define meaning definition dictionary|define
 encrypt decrypt cipher encode decode base64|cipher

@@ -11,7 +11,15 @@ makeqr()
 {
     local input=$(echo "$1" | sed 's/ /%20/g')
     # Using qrenco.de for terminal output
-    httpGet "https://qrenco.de/$input"
+    local output
+    output=$(httpGet "https://qrenco.de/$input")
+    # An unreachable qrenco.de made this print nothing and exit 0, which is
+    # indistinguishable from success for anything calling the tool.
+    if [[ -z "${output// }" ]]; then
+        echo "Error: no QR code returned by qrenco.de (service unreachable?)"
+        return 1
+    fi
+    printf '%s\n' "$output"
 }
 
 makeQRFile()
@@ -94,19 +102,21 @@ check_dependencies curl python3
 getConfiguredClient || exit 1
 checkInternet || { echo "Error: No internet connection"; exit 1; }
 
+# `exit 0` regardless of what the action returned meant a failed QR fetch or a
+# failed decode still reported success to callers.
+rc=0
 if [[ -n "$FILE_DEC" ]]; then
-    decodeQR "$FILE_DEC"
+    decodeQR "$FILE_DEC" || rc=$?
 elif [[ -n "$FILE_OUT" ]]; then
     if [[ $# -eq 0 ]]; then
         echo "Error: Missing data to encode."
         exit 1
     fi
-    makeQRFile "$FILE_OUT" "$*"
+    makeQRFile "$FILE_OUT" "$*" || rc=$?
 elif [[ $# -gt 0 ]]; then
-    makeqr "$*"
+    makeqr "$*" || rc=$?
 else
     usage
-    exit 0
 fi
 
-exit 0
+exit $rc

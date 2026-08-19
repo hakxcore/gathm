@@ -40,7 +40,7 @@ rate_limiting:
   window_seconds: 60
   default_limit: 60
   per_tool_limits:
-    googler: 10      # Google may rate-limit
+    websearch: 30    # DuckDuckGo tolerates more than Google did
     shodan: 5        # Shodan has strict limits
     movie: 30        # OMDb has limits on free tier
   burst_allowance: 10  # Extra requests allowed in bursts

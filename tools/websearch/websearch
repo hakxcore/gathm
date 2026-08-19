@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Web search for Gathm, without an API key and without a vendored browser.
+
+Replaces the bundled `googler`, which stopped returning results: it scraped
+Google, and Google blocks that. Three backends, tried in order, so a blocked or
+rate-limited one is not the end of it:
+
+  1. Brave Search API      when BRAVE_API_KEY is set (a real API, most reliable)
+  2. SearxNG               when GATHM_SEARX_URL is set (your own instance)
+  3. DuckDuckGo HTML       no key, no account — the default
+
+Standard library only, so it works on Termux where pip packages with native code
+cannot be built.
+
+Usage:
+    websearch <query>
+    websearch -n 10 <query>
+    websearch --json <query>
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = "1.0.0"
+UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0 Safari/537.36")
+TIMEOUT = int(os.environ.get("GATHM_WEBSEARCH_TIMEOUT", "20"))
+
+
+def _fetch(url: str, data: bytes | None = None, headers: dict | None = None) -> str:
+    req = urllib.request.Request(url, data=data,
+                                 headers={"User-Agent": UA, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        raw = resp.read()
+    return raw.decode("utf-8", errors="replace")
+
+
+def _clean(text: str) -> str:
+    """HTML fragment to plain text."""
+    text = re.sub(r"<[^>]+>", "", text or "")
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def parse_ddg(page: str) -> list:
+    """Extract (title, url, snippet) triples from DuckDuckGo's HTML.
+
+    Kept as a pure function so it can be checked against a saved page without
+    network access — the markup is not a contract and will drift.
+    """
+    results = []
+    # Each result is a result__a anchor, optionally followed by a snippet.
+    for match in re.finditer(
+            r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+            r'(.*?)(?=<a[^>]*class="[^"]*result__a|\Z)',
+            page, re.S):
+        href, title_html, tail = match.groups()
+        title = _clean(title_html)
+        if not title:
+            continue
+        url = href
+        # DuckDuckGo wraps results in a redirect: /l/?uddg=<encoded target>
+        if "uddg=" in url:
+            query = urllib.parse.urlparse(
+                url if url.startswith("http") else "https:" + url).query
+            target = urllib.parse.parse_qs(query).get("uddg", [""])[0]
+            if target:
+                url = target
+        elif url.startswith("//"):
+            url = "https:" + url
+        snippet = ""
+        snip = re.search(r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', tail, re.S)
+        if snip:
+            snippet = _clean(snip.group(1))
+        results.append((title, url, snippet))
+    return results
+
+
+def search_ddg(query: str, count: int) -> list:
+    page = _fetch("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query))
+    return parse_ddg(page)[:count]
+
+
+def search_brave(query: str, count: int, key: str) -> list:
+    url = ("https://api.search.brave.com/res/v1/web/search?q="
+           + urllib.parse.quote(query) + f"&count={count}")
+    body = _fetch(url, headers={"Accept": "application/json",
+                                "X-Subscription-Token": key})
+    data = json.loads(body)
+    return [(item.get("title", ""), item.get("url", ""),
+             _clean(item.get("description", "")))
+            for item in data.get("web", {}).get("results", [])][:count]
+
+
+def search_searx(query: str, count: int, base: str) -> list:
+    url = (base.rstrip("/") + "/search?q=" + urllib.parse.quote(query)
+           + "&format=json")
+    data = json.loads(_fetch(url))
+    return [(item.get("title", ""), item.get("url", ""),
+             _clean(item.get("content", "")))
+            for item in data.get("results", [])][:count]
+
+
+def search(query: str, count: int) -> tuple[list, str, str]:
+    """Return (results, backend, error). Falls through to the next backend."""
+    attempts = []
+    key = os.environ.get("BRAVE_API_KEY")
+    searx = os.environ.get("GATHM_SEARX_URL")
+    if key:
+        attempts.append(("brave", lambda: search_brave(query, count, key)))
+    if searx:
+        attempts.append(("searxng", lambda: search_searx(query, count, searx)))
+    attempts.append(("duckduckgo", lambda: search_ddg(query, count)))
+
+    problems = []
+    for name, fn in attempts:
+        try:
+            hits = fn()
+        except urllib.error.HTTPError as exc:
+            problems.append(f"{name}: HTTP {exc.code}")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"{name}: {exc}")
+            continue
+        if hits:
+            return hits, name, ""
+        problems.append(f"{name}: no results")
+    return [], "", "; ".join(problems)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    count = 5
+    as_json = False
+    terms = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-v", "--version"):
+            print(f"Version {VERSION}")
+            return 0
+        if args[i] in ("-h", "--help"):
+            print(f"Websearch (v{VERSION})")
+            print(__doc__)
+            return 0
+        if args[i] in ("-n", "--count") and i + 1 < len(args):
+            try:
+                count = max(1, min(int(args[i + 1]), 25))
+            except ValueError:
+                print(f"Error: -n takes a number, got '{args[i + 1]}'")
+                return 1
+            i += 2
+            continue
+        if args[i] == "--json":
+            as_json = True
+            i += 1
+            continue
+        terms.append(args[i])
+        i += 1
+
+    query = " ".join(terms).strip()
+    if not query:
+        print(f"Websearch (v{VERSION})")
+        print(__doc__)
+        return 0
+
+    results, backend, error = search(query, count)
+    if not results:
+        print(f"Error: no results for '{query}' ({error or 'no backend answered'})")
+        return 1
+
+    if as_json:
+        print(json.dumps({"query": query, "backend": backend,
+                          "results": [{"title": t, "url": u, "snippet": s}
+                                      for t, u, s in results]}, indent=2))
+        return 0
+
+    print(f"Results for '{query}' (via {backend}):\n")
+    for n, (title, url, snippet) in enumerate(results, 1):
+        print(f"{n}. {title}")
+        print(f"   {url}")
+        if snippet:
+            print(f"   {snippet[:300]}")
+        print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

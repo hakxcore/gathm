@@ -592,7 +592,7 @@ def _shortlist_tools(query: str, tools: list) -> list:
 
     if not picked:
         # No signal at all: the common cases, so "how hot is it" still finds a way.
-        fallback = ["weather", "dns", "ipinfo", "define", "googler", "news",
+        fallback = ["weather", "dns", "ipinfo", "define", "websearch", "news",
                     "stocks", "cryptocurrency", "currency", "browser"]
         picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
     return picked
@@ -672,6 +672,8 @@ You have access to the following gathm tools:
 {offline_notice}
 CRITICAL RULES:
 0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
+0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
+0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
@@ -680,7 +682,7 @@ Action Input: [tool_name] [arguments]
 2. For MATH (derivatives, integrals, etc.), use the 'newton' tool.
 3. For company STOCKS (Apple, Google), use the 'stocks' tool.
 4. For CRYPTO (Bitcoin, ETH), use the 'cryptocurrency' tool.
-5. If a tool fails (like 'googler' returning no results), explain the failure and reassure the user that the Engineer is on the way.
+5. For anything you need from the INTERNET — who a person is, what something means, current events — use the 'websearch' tool.
 6. For CURRENCY conversion, use exact order: currency [base] [target] [amount], e.g. currency USD EUR 100
 7. For GIF searches, use a single keyword argument, e.g. gif dancing or gif funny_cats
 8. You MUST remember conversation context for follow-ups (for example, if user asks "where is it compromised?" after an email breach check).

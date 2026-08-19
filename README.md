@@ -482,7 +482,13 @@ Tool categories from `tools/*/tool.yaml`:
 
 - `security` (19): certinfo, cipher, crypt, cve, dnssec, headersaudit, katana, naabu, nuclei, pdchain, portscan, pwned, robotsaudit, shodan, siteciphers, tipcheck, uncover, urlscan, wafdetect
 - `networking` (15): asn, dns, dnsx, geo, httpprobe, httpx, ipinfo, rdap, rdns, shareterminal, shorturl, subdomains, subfinder, transfer, whois
-- `data` (8): cheat, covidinfo, cryptocurrency, define, googler, movie, news, weather
+- `data` (8): cheat, covidinfo, cryptocurrency, define, movie, news, weather, websearch
+
+Web search is `websearch`, which replaced the bundled `googler`: that vendored
+the whole googler program to scrape Google, and Google blocks it. `websearch`
+tries Brave Search (when `BRAVE_API_KEY` is set), then a SearxNG instance (when
+`GATHM_SEARX_URL` is set), then DuckDuckGo's HTML endpoint — which needs no key
+at all.
 - `media` (5): gif, jukebox, lyrics, meme, transcribe
 - `utility` (4): imganalyze, maltego, qrify, strix
 - `finance` (2): currency, stocks
@@ -559,6 +565,28 @@ docker compose up --build
 python3 -m pip install pytest pyyaml
 python3 -m pytest tests -v
 ```
+
+### Check that the tools actually work
+
+`gathm health all` checks whether a tool's endpoints answer, and the unit tests
+only prove each tool responds to `-v`. Neither runs a tool the way a user does,
+so this does that pass:
+
+```bash
+python3 tests/tool_smoke.py                 # every tool, one line each
+python3 tests/tool_smoke.py dns weather     # only these
+python3 tests/tool_smoke.py --keep          # keep each tool's full output
+```
+
+Each invocation is derived from the tool's own manifest — a required argument
+gets a sample chosen from its name and description — and the command actually run
+is printed, so a bad sample is visible instead of being reported as a broken
+tool. Tools needing an API key or a separately installed binary are skipped with
+the reason. The exit code is the number of failures.
+
+On a restricted network, "empty response" and "could not fetch" mean the host is
+unreachable rather than the tool being broken, so run it somewhere with open
+internet.
 
 Fallback:
 

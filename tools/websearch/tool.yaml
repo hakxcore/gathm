@@ -1,0 +1,47 @@
+name: websearch
+version: "1.0.0"
+description: "Searches the WEB for information about anything — people, topics, current events. Use this whenever you need facts from the internet."
+category: data
+requires_internet: true
+
+dependencies:
+  system: [python3]
+
+apis:
+  - name: DuckDuckGo HTML
+    base_url: https://html.duckduckgo.com
+    health_endpoint: https://html.duckduckgo.com/html/?q=gathm
+    auth_required: false
+  - name: Brave Search
+    base_url: https://api.search.brave.com
+    health_endpoint: https://api.search.brave.com/res/v1/web/search?q=gathm
+    auth_required: true
+
+input_schema:
+  arguments:
+    - name: query
+      type: string
+      required: true
+      description: "What to search the web for"
+  flags:
+    - flag: "n"
+      description: "How many results to return (default 5, max 25)"
+    - flag: "-json"
+      description: "Output results as JSON"
+    - flag: "-h"
+      description: "Show the help"
+    - flag: "-v"
+      description: "Show version"
+
+output_schema:
+  text: "Numbered search results with title, URL, and snippet"
+  json_fields:
+    - name: query
+      type: string
+    - name: backend
+      type: string
+    - name: results
+      type: array
+
+fallback_tool: null
+tags: [data, search, web, internet, google, duckduckgo, research, osint]

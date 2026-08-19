@@ -25,5 +25,5 @@ output_schema:
     - name: asset
       type: string
 
-fallback_tool: googler
+fallback_tool: websearch
 tags: [projectdiscovery, uncover, osint, discovery, security]
