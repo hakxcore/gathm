@@ -146,6 +146,33 @@ def find_system_voice() -> list | None:
     return None
 
 
+# Not every system voice can write a file, and the API needs bytes to hand the
+# browser. `say` and espeak can; spd-say cannot, so it stays playback-only.
+_SYSTEM_VOICE_FILE_ARGS = {
+    # LEI16 PCM in a WAV container is what the browser and the ASR models read.
+    "say": ["-o", "{f}", "--data-format=LEI16@22050", "{t}"],
+    "espeak-ng": ["-w", "{f}", "{t}"],
+    "espeak": ["-w", "{f}", "{t}"],
+}
+
+
+def system_voice_to_file() -> str:
+    """Name of a system voice that can render to a WAV file, or ""."""
+    voice = find_system_voice()
+    if not voice:
+        return ""
+    name = voice[0]
+    return name if name in _SYSTEM_VOICE_FILE_ARGS else ""
+
+
+def can_synthesize_file() -> bool:
+    """Whether speech can be produced as bytes (what the GUI needs)."""
+    cfg = resolve()
+    if cfg["bin"] and cfg["model"]:
+        return True
+    return bool(system_voice_to_file())
+
+
 def engine() -> str:
     """Which engine would speak: "audio.cpp", "system", or "" for none.
 
@@ -326,10 +353,35 @@ def synthesize(text: str, out_path: str) -> tuple[bool, str]:
     return True, out_path
 
 
+def synthesize_system(text: str, out_path: str) -> tuple[bool, str]:
+    """Render text to a wav with the OS voice. Returns (ok, message)."""
+    name = system_voice_to_file()
+    if not name:
+        return False, ("this system's speech command cannot write a file "
+                       "(set GATHM_SPEAK_COMMAND to `say` or `espeak-ng`)")
+    argv = [name] + [
+        text if a == "{t}" else a.replace("{f}", out_path)
+        for a in _SYSTEM_VOICE_FILE_ARGS[name]
+    ]
+    try:
+        rc, out, err = _run_tracked(argv, 180)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+    if rc != 0:
+        tail = (err or out or "").strip().splitlines()
+        return False, f"{name}: {tail[-1] if tail else rc}"
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        return False, f"{name} produced no audio"
+    return True, out_path
+
+
 def synthesize_bytes(text: str) -> tuple[bool, bytes | str]:
     """Render text and return the wav bytes — used by the API/GUI path.
 
-    The browser does the playing there, so no local player is required.
+    The browser does the playing there, so no local player is required. Uses
+    audio.cpp when installed and the OS voice otherwise, so the GUI speaks on
+    macOS as well — the browser would otherwise be the one interface left silent
+    on a platform where Pilot itself talks.
     """
     body = speakable(text)
     if not body:
@@ -338,7 +390,11 @@ def synthesize_bytes(text: str) -> tuple[bool, bytes | str]:
     try:
         fd, tmp = tempfile.mkstemp(prefix="gathm-tts-", suffix=".wav")
         os.close(fd)
-        ok, msg = synthesize(body, tmp)
+        cfg = resolve()
+        if cfg["bin"] and cfg["model"]:
+            ok, msg = synthesize(body, tmp)
+        else:
+            ok, msg = synthesize_system(body, tmp)
         if not ok:
             return False, msg
         with open(tmp, "rb") as fh:
@@ -820,6 +876,8 @@ def diagnose() -> int:
     print("system voice : %s" % (" ".join(system_voice) if system_voice else "none"))
     print("GATHM_SPEAK  : %s" % os.environ.get("GATHM_SPEAK", "1"))
     print("speaking     : %s" % enabled())
+    print("gui audio    : %s" % ("yes" if can_synthesize_file() else
+                                 "no (no engine can write a wav)"))
     print("")
     print("asr model    : %s" % (asr["model"] or "NOT INSTALLED"))
     print("asr family   : %s" % asr["family"])

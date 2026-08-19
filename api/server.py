@@ -1027,20 +1027,23 @@ async def speech_status():
     if mod is None:
         return {"available": False, "reason": "lib/speech.py not importable"}
     cfg = mod.resolve()
-    available = bool(cfg["bin"] and cfg["model"]) and mod.enabled()
+    # Not "is audio.cpp installed" but "can anything here produce a wav": on
+    # macOS the OS voice can, and gating on audio.cpp alone left the browser
+    # silent on a machine where Pilot speaks.
+    available = mod.enabled() and mod.can_synthesize_file()
     reason = ""
-    if not cfg["bin"]:
-        reason = "audiocpp_cli not installed"
-    elif not cfg["model"]:
-        reason = "no voice model configured"
-    elif not mod.enabled():
+    if mod.speech_disabled():
         reason = "speech disabled (GATHM_SPEAK=0)"
+    elif not available:
+        reason = ("no speech engine that can write a wav — install audio.cpp "
+                  "(Termux) or a system voice such as say/espeak-ng")
     return {
         "available": available,
         "reason": reason,
+        "engine": mod.engine(),
         "family": cfg["family"],
         "voice": cfg["voice"],
-        "runtime": cfg["bin"],
+        "runtime": cfg["bin"] or mod.system_voice_to_file(),
         "model": cfg["model"],
     }
 
@@ -1137,13 +1140,10 @@ async def speech_synthesize(body: SpeechRequest):
     mod = _speech()
     if mod is None:
         raise HTTPException(503, "speech runtime unavailable")
-    if not mod.enabled():
-        cfg = mod.resolve()
-        if not cfg["bin"]:
-            raise HTTPException(503, "audiocpp_cli not installed")
-        if not cfg["model"]:
-            raise HTTPException(503, "no voice model configured")
+    if mod.speech_disabled():
         raise HTTPException(503, "speech disabled (GATHM_SPEAK=0)")
+    if not mod.can_synthesize_file():
+        raise HTTPException(503, "no speech engine that can write a wav")
 
     text = (body.text or "").strip()
     if not text:

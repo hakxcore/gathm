@@ -171,7 +171,10 @@ never on the critical path of an answer.
   the next question cuts off the answer still being read out.
 - **GUI** posts the reply to `POST /api/v1/speech` and plays the returned WAV in
   the browser, so audio comes out of the device you are looking at rather than
-  the machine running the server. The speaker button appears only when
+  the machine running the server. This works with either engine: audio.cpp on
+  Termux, `say` or `espeak-ng` elsewhere. `spd-say` can speak but cannot write a
+  file, so on a machine where it is the only voice the GUI stays text-only while
+  Pilot still talks. The speaker button appears only when
   `GET /api/v1/speech/status` reports a working runtime, and the on/off choice
   is remembered. The browser may need one tap on the page before it allows the
   first playback.
