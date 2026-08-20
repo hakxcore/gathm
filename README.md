@@ -73,29 +73,42 @@ cd gathm
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
 
-### Voice on Termux (Pilot speech)
+### Voice (Pilot speech)
 
-On Termux, `./install` builds [audio.cpp](https://github.com/0xShug0/audio.cpp)
-— a native C++/ggml speech runtime — and installs it to
-`~/.local/bin/audiocpp_cli`. No Python audio packages are involved, which is the
-point: the usual speech wheels cannot load on Android at all.
+On **Termux and macOS**, `./install` builds
+[audio.cpp](https://github.com/0xShug0/audio.cpp) — a native C++/ggml speech
+runtime — and installs it to `~/.local/bin/audiocpp_cli`. No Python audio
+packages are involved, which is the point: the usual speech wheels cannot load
+on Android at all.
 
-This step is **Termux-only**, because Android is the platform with no built-in
-speech at all. Elsewhere Gathm speaks through the OS instead of building
-anything: `say` on macOS, `spd-say` or `espeak-ng` on Linux. audio.cpp wins when
-it is installed; otherwise the system voice is used, so `python3 lib/speech.py
-"hello"` and spoken Pilot replies work on macOS with no setup. Override the
-command with `GATHM_SPEAK_COMMAND`. Voice *input* remains audio.cpp-only, so it
-is Termux-only for now.
+Why those two platforms, and what each uses it for:
+
+| Platform | Speaking | Listening |
+|---|---|---|
+| Termux | audio.cpp (nothing else works on Android) | audio.cpp |
+| macOS | `say` — a resident OS service, far faster than any model | audio.cpp (macOS has no CLI for dictation) |
+| Linux | `spd-say` / `espeak-ng`, or audio.cpp if you build it | audio.cpp if you build it |
+| Windows | — | — |
+
+So a Mac builds audio.cpp for **voice input**, and keeps `say` for output:
+`say` starts talking in milliseconds because there is no model to load, no WAV
+to write and no player to spawn. `GATHM_SPEAK_ENGINE=audio.cpp` forces
+PocketTTS anyway if you prefer its voice, and `GATHM_SPEAK_COMMAND` overrides
+the system command (`GATHM_SPEAK_COMMAND="say -v Ava"` for one of the premium
+voices from System Settings → Accessibility → Spoken Content).
 
 `python3 lib/speech.py --check` reports which engine is in use.
 
 The install does four things:
 
-1. Installs the build toolchain (`clang cmake ninja`, plus `openmp`).
-2. Clones audio.cpp and patches the vendored `sentencepiece` with
-   `-U__ANDROID__`. Without that patch the build compiles for 20-60 minutes and
-   then dies at the final link with
+1. Installs the build toolchain — `clang cmake ninja` plus `openmp` on Termux;
+   on macOS the Xcode command line tools supply the compiler and Homebrew
+   supplies `cmake`/`ninja`. Apple clang has no OpenMP, so the Mac build turns
+   it off rather than failing configure over a threading library these models
+   do not need.
+2. Clones audio.cpp and, **on Termux only**, patches the vendored
+   `sentencepiece` with `-U__ANDROID__`. Without that patch the build compiles
+   for 20-60 minutes and then dies at the final link with
    `ld.lld: error: undefined symbol: __android_log_write`.
 3. Builds the `audiocpp_cli` target, CPU-only, with just the `pocket_tts`
    family compiled in. Compile parallelism is capped by available RAM, since
@@ -103,7 +116,8 @@ The install does four things:
 4. Downloads the `pocket_tts_english_q8_0` voice package with the project's own
    model manager, then synthesizes a throwaway WAV to prove the chain works.
 
-Expect 20-60 minutes for the build on a phone — **once**. After that the
+Expect 20-60 minutes for the build on a phone, or a few minutes on a Mac —
+**once**. After that the
 installer avoids compiling entirely:
 
 1. If `GATHM_AUDIOCPP_BIN_URL` is set, it downloads that binary (verifying
@@ -548,7 +562,7 @@ Key environment variables:
 - `GATHM_API_KEY` (API bearer auth)
 - `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
 - `GATHM_AUDIOCPP_BIN` / `GATHM_AUDIOCPP_MODEL` / `GATHM_AUDIOCPP_FAMILY` / `GATHM_AUDIOCPP_VOICE`
-  (audio.cpp speech runtime on Termux; see [Voice on Termux](#voice-on-termux-pilot-speech))
+  (audio.cpp speech runtime on Termux and macOS; see [Voice](#voice-pilot-speech))
 - `GATHM_SPEAK` / `GATHM_SPEAK_MAX_CHARS` / `GATHM_SPEAK_TIMEOUT` / `GATHM_AUDIO_PLAYER`
   (spoken replies)
 - `GATHM_LISTEN_SECONDS` / `GATHM_ASR_TIMEOUT` / `GATHM_AUDIO_RECORDER`

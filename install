@@ -1754,16 +1754,22 @@ install_playwright_browser() {
 #   Do not "fix" a failure here by pip-installing pydantic-core or a Python
 #   TTS library; that is the exact trap this path exists to avoid.
 #
-#   This is Termux-only on purpose. Every other platform is left exactly as it
-#   was, keeping whatever Python/audio dependencies it already uses — nothing
-#   here runs off Termux.
+# Why macOS builds it too:
+#   `say` covers speaking there, but the OS exposes no command line for
+#   LISTENING — dictation is a GUI feature — so audio.cpp is the only
+#   speech-to-text path a terminal app can use. Darwin is a first-class ggml
+#   target, the sentencepiece patch below is Bionic-specific, and a Mac
+#   compiles in minutes rather than the hour a phone takes.
 #
-# The Termux flow, which is the one verified on-device:
-#   pkg build deps
+#   Linux and Windows are still left exactly as they were, keeping whatever
+#   Python/audio dependencies they already use.
+#
+# The flow (Termux is the one verified on-device):
+#   build deps: pkg on Termux, brew + Xcode CLT on macOS
 #        ↓
 #   clone/update audio.cpp
 #        ↓
-#   patch vendored sentencepiece (-U__ANDROID__, or the build fails)
+#   patch vendored sentencepiece (Termux only: -U__ANDROID__, or it fails)
 #        ↓
 #   CMake CPU-only build of the audiocpp_cli target
 #        ↓
@@ -1860,6 +1866,21 @@ _is_termux() {
     [[ "$p" == "termux" ]]
 }
 
+# True on macOS. audio.cpp builds there too — Darwin is a first-class ggml
+# target and the sentencepiece patch below is Bionic-specific, so the only
+# real differences are the package manager and OpenMP.
+_is_darwin() {
+    local p="${_GATHM_PLATFORM:-}"
+    [[ -z "$p" ]] && p=$(detect_platform)
+    [[ "$p" == "darwin" ]]
+}
+
+# Platforms Gathm builds the speech runtime on. Everywhere else keeps whatever
+# Python/audio dependencies it already had — see the section comment above.
+_audiocpp_supported() {
+    _is_termux || _is_darwin
+}
+
 # Where audio.cpp is checked out and built.
 # Defaults under ~/.gathm so uninstall knows where to look, but an existing
 # ~/audio.cpp checkout (how this was first done by hand) is reused as-is so
@@ -1919,9 +1940,39 @@ _audiocpp_jobs() {
     echo "$jobs"
 }
 
-# Termux toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
+# Toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
 _audiocpp_install_build_deps() {
     info "Installing audio.cpp build dependencies..."
+
+    if _is_darwin; then
+        # The compiler comes from the Xcode command line tools, which cannot be
+        # installed unattended — trigger Apple's own prompt and say so, rather
+        # than failing later inside cmake with a missing-compiler error.
+        if ! xcode-select -p &>/dev/null; then
+            warn "Xcode command line tools are missing (they provide the compiler)."
+            warn "Accept the dialog that opens, then re-run ./install."
+            xcode-select --install &>/dev/null || true
+            note_missing "Xcode command line tools" "xcode-select --install"
+            return 1
+        fi
+        if command -v brew &>/dev/null; then
+            local want=() tool
+            for tool in cmake ninja; do
+                command -v "$tool" &>/dev/null || want+=("$tool")
+            done
+            if (( ${#want[@]} )); then
+                run_bounded 900 brew install "${want[@]}" &>/dev/null || true
+            fi
+        fi
+        if ! command -v cmake &>/dev/null; then
+            warn "cmake not found and Homebrew could not install it"
+            note_missing "cmake for the speech runtime" "brew install cmake ninja"
+            return 1
+        fi
+        ok "Build tools present (cmake$(command -v ninja &>/dev/null && echo ', ninja'))"
+        return 0
+    fi
+
     # coreutils supplies `timeout`, used to prevent a stalled Git HTTPS
     # connection from holding the entire installer forever.
     pkg install -y git cmake ninja clang make pkg-config coreutils 2>/dev/null || true
@@ -1934,7 +1985,7 @@ _audiocpp_install_build_deps() {
 # Synthesis is only half of speaking — something has to play the WAV, and
 # Android ships no CLI audio player at all. Without one, Pilot renders perfect
 # audio to a temp file and stays silent.
-AUDIOCPP_PLAYERS="termux-media-player mpv ffplay play paplay aplay"
+AUDIOCPP_PLAYERS="termux-media-player afplay mpv ffplay play paplay aplay"
 
 # Echo the first usable playback command, or nothing.
 _audiocpp_player() {
@@ -2284,10 +2335,20 @@ _audiocpp_cmake_build() {
                 -DENGINE_ENABLE_OPENMP=ON
                 -DENGINE_ENABLE_LLAMAFILE=ON
             )
+            # Apple clang ships without OpenMP. Asking for it on a Mac without
+            # brew's libomp fails configure for a threading library the models
+            # are small enough not to need, so it is off there by default.
+            if _is_darwin && [[ ! -e "$(brew --prefix 2>/dev/null)/opt/libomp" ]]; then
+                tune=(
+                    -DENGINE_ENABLE_NATIVE_CPU=ON
+                    -DENGINE_ENABLE_OPENMP=OFF
+                    -DENGINE_ENABLE_LLAMAFILE=ON
+                )
+            fi
             if command -v ninja &>/dev/null; then
                 tune+=( -G Ninja )
             fi
-            info "Configuring audio.cpp (CPU, native ISA + OpenMP)..."
+            info "Configuring audio.cpp (CPU, native ISA)..."
         else
             # Portable fallback: the three options that actually break on
             # Android — -march=native is rejected by some clang builds, libomp
@@ -2629,6 +2690,23 @@ _audiocpp_save_asr_path() {
 # Termux:API app), and since it cannot encode WAV, ffmpeg converts to the
 # 16 kHz mono the ASR models want.
 _audiocpp_install_recorder() {
+    if _is_darwin; then
+        # No termux-api here: capture goes through ffmpeg's avfoundation input
+        # (sox's `rec` works too, if the user already has it).
+        if ! command -v ffmpeg &>/dev/null && ! command -v rec &>/dev/null; then
+            info "Installing microphone support (ffmpeg)..."
+            command -v brew &>/dev/null && \
+                run_bounded 900 brew install ffmpeg &>/dev/null || true
+        fi
+        if command -v ffmpeg &>/dev/null || command -v rec &>/dev/null; then
+            ok "Microphone capture ($(command -v ffmpeg &>/dev/null && echo ffmpeg || echo rec))"
+            info "macOS will ask for microphone permission the first time you use it."
+            return 0
+        fi
+        warn "No microphone capture — transcribing existing files still works"
+        note_missing "microphone capture for voice input" "brew install ffmpeg"
+        return 1
+    fi
     _is_termux || return 0
     if ! command -v termux-microphone-record &>/dev/null; then
         info "Installing microphone support..."
@@ -2779,9 +2857,9 @@ _audiocpp_setup_voice() {
     fi
 }
 
-# Termux: build audio.cpp natively. This is the only speech path that works
-# on Android, and it must stay pip-free (see the section comment above).
-install_audio_cpp_termux() {
+# Build audio.cpp from source. Must stay pip-free (see the section comment
+# above): on Android there is no wheel to fall back to.
+_audiocpp_build_and_install() {
     local src; src=$(_audiocpp_src_dir)
 
     # Before anything expensive: can we avoid compiling altogether? A published
@@ -2864,13 +2942,15 @@ install_audio_cpp_termux() {
     _audiocpp_setup_voice "$bin" "$src"
 }
 
-# Entry point. Termux only, by design — every other platform is left exactly
-# as it was, with whatever Python/audio dependencies it already uses.
+# Entry point. Termux and macOS: on Android it is the only speech path that
+# works at all, and on macOS it is the only speech-to-text path there is (`say`
+# covers speaking, but the OS exposes no CLI for listening). Every other
+# platform is left exactly as it was, with whatever it already uses.
 install_audio_cpp() {
     local platform="$1"
 
-    if ! _is_termux; then
-        step_skip "audio.cpp skipped (Termux only)"
+    if ! _audiocpp_supported; then
+        step_skip "audio.cpp skipped (built on Termux and macOS only)"
         return 0
     fi
 
@@ -2899,7 +2979,7 @@ install_audio_cpp() {
         return 0
     fi
 
-    install_audio_cpp_termux
+    _audiocpp_build_and_install
 }
 
 # --- Create command shortcuts ---
@@ -3349,7 +3429,8 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
                 ok "Audio playback ($audio_player)"
             else
                 warn "No audio player — Pilot renders speech but cannot play it"
-                note_missing "audio player for speech playback" "pkg install mpv"
+                note_missing "audio player for speech playback" \
+            "$(_is_darwin && echo 'brew install mpv' || echo 'pkg install mpv')"
             fi
         else
             warn "No voice model downloaded yet (Pilot stays silent until one is)"

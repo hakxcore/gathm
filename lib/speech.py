@@ -25,6 +25,7 @@ Knobs:
     GATHM_SPEAK_CHUNK_MIN    shortest utterance when streaming (default 40)
     GATHM_SPEAK_CHUNK_MAX    forced break for unpunctuated text (default 240)
     GATHM_SPEAK_TIMEOUT      seconds allowed for synthesis (default 180)
+    GATHM_SPEAK_ENGINE       force audio.cpp or system (default: auto)
     GATHM_AUDIO_PLAYER       force a specific playback command
     GATHM_ASR_TIMEOUT        seconds allowed for one transcription (default 300)
     GATHM_LISTEN_SECONDS     default recording length (default 8)
@@ -73,6 +74,10 @@ _speak_lock = threading.Lock()
 _proc_lock = threading.Lock()
 _procs: list = []          # live audiocpp_cli / player processes
 _generation = 0            # bumped by stop(); stale workers notice and bail
+
+
+def _is_darwin() -> bool:
+    return sys.platform == "darwin"
 
 
 def _read_config_file(name: str) -> str:
@@ -179,16 +184,31 @@ def can_synthesize_file() -> bool:
 def engine() -> str:
     """Which engine would speak: "audio.cpp", "system", or "" for none.
 
-    audio.cpp wins when it is installed with weights, because that is the
-    on-device path Gathm builds for Termux. Everywhere else the OS voice is both
-    better and free, so it is used rather than leaving the platform silent.
+    audio.cpp is the on-device path Gathm builds for Termux, where nothing else
+    works. On macOS the OS voice wins even when audio.cpp IS installed: `say`
+    is a resident system service with no model to load, no wav to write and no
+    player to spawn, so it starts talking in milliseconds where PocketTTS takes
+    a second or more. audio.cpp is still installed on a Mac — for listening,
+    which is the direction the OS gives no command line for.
+
+    GATHM_SPEAK_ENGINE=audio.cpp|system overrides the choice, falling back to
+    whatever is actually available.
     """
     cfg = resolve()
-    if cfg["bin"] and cfg["model"]:
-        return "audio.cpp"
-    if find_system_voice():
+    have_cpp = bool(cfg["bin"] and cfg["model"])
+    have_system = bool(find_system_voice())
+
+    forced = os.environ.get("GATHM_SPEAK_ENGINE", "").strip().lower()
+    if forced in ("audio.cpp", "audiocpp"):
+        return "audio.cpp" if have_cpp else ("system" if have_system else "")
+    if forced == "system":
+        return "system" if have_system else ("audio.cpp" if have_cpp else "")
+
+    if _is_darwin() and have_system:
         return "system"
-    return ""
+    if have_cpp:
+        return "audio.cpp"
+    return "system" if have_system else ""
 
 
 def speech_disabled() -> bool:
@@ -868,22 +888,23 @@ def _is_termux() -> bool:
 def asr_unavailable_reason() -> str:
     """Why transcription cannot run, phrased for this platform. "" if it can.
 
-    The rebuild command is Termux-specific, and telling a Mac user to run
-    `GATHM_AUDIOCPP_MODELS=… ./install` is advice that cannot work: audio.cpp is
-    not part of the install there at all. Say what is actually true instead.
+    Advice that cannot work is worse than none: the platforms where ./install
+    builds the runtime get told to run it, and the ones where it does not get
+    told that plainly instead of chasing a rebuild that will skip them.
     """
     if asr_enabled():
         return ""
     cfg = resolve_asr()
+    buildable = _is_termux() or _is_darwin()
     if not cfg["bin"]:
-        if _is_termux():
+        if buildable:
             return "audiocpp_cli is not installed — run ./install"
         return ("voice input needs the audio.cpp speech runtime, which Gathm "
-                "builds on Termux only; transcription is not available on this "
-                "platform yet")
-    if not _is_termux():
-        return ("this audio.cpp build has no speech-to-text model; Gathm only "
-                "installs one on Termux")
+                "builds on Termux and macOS only; transcription is not "
+                "available on this platform yet")
+    if not buildable:
+        return ("this audio.cpp build has no speech-to-text model, and Gathm "
+                "only installs one on Termux and macOS")
     return ("no speech-to-text model installed — rebuild with "
             "GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
             "GATHM_AUDIOCPP_FORCE=1 ./install")
@@ -1134,8 +1155,13 @@ def record(seconds: int, out_path: str) -> tuple[bool, str]:
         argv = [name, "-q", "-r", "16000", "-c", "1", out_path,
                 "trim", "0", str(seconds)]
     else:  # ffmpeg with a platform default input
-        device = os.environ.get("GATHM_AUDIO_INPUT", "default")
-        fmt = "avfoundation" if sys.platform == "darwin" else "alsa"
+        # avfoundation addresses devices by index ("[[video]:[audio]]") and
+        # rejects the name "default" outright, so macOS needs its own default.
+        # ffmpeg -f avfoundation -list_devices true -i "" names the indexes.
+        mac = sys.platform == "darwin"
+        device = os.environ.get("GATHM_AUDIO_INPUT",
+                                ":0" if mac else "default")
+        fmt = "avfoundation" if mac else "alsa"
         argv = [name, "-y", "-f", fmt, "-i", device, "-t", str(seconds),
                 "-ac", "1", "-ar", "16000", out_path]
     try:
