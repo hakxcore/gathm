@@ -187,6 +187,26 @@ def test_installer_gate() -> None:
        "avfoundation" in src or "ffmpeg's avfoundation" in src)
     ok("OpenMP is not demanded of Apple clang",
        "libomp" in src)
+    ok("brew goes through the guarded helper", "_brew_install()" in src)
+    ok("brew cannot upgrade unrelated dependents",
+       "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1" in src)
+    ok("brew does not auto-update the formula index",
+       "HOMEBREW_NO_AUTO_UPDATE=1" in src)
+    # Every brew *invocation* carries the guards; the remaining plain
+    # "brew install ..." strings are advice printed to the user.
+    import re as _re
+    # Join line continuations: the env guards live on the line above the call.
+    joined = _re.sub(r"\\\n\s*", " ", src)
+    calls = [m for m in _re.findall(r"^[^#\n]*\bbrew install\b.*$", joined,
+                                    _re.M)
+             if "note_missing" not in m and "warn " not in m
+             and "fail " not in m and "echo " not in m]
+    unguarded = [c for c in calls
+                 if "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" not in c
+                 and '"$@"' not in c]
+    check("every brew invocation is guarded", unguarded, [])
+    ok("dialog is no longer a mac dependency",
+       "brew install bash curl jq git python3 pv wget" in src)
     ok("the sentencepiece patch is still Termux-gated",
        "if _is_termux; then\n        _audiocpp_patch_termux_sentencepiece" in src)
     ok("the stale 'Termux-only on purpose' claim is gone",

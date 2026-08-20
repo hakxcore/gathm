@@ -240,7 +240,11 @@ check_and_install_python() {
             ;;
         macos)
             if command -v brew &>/dev/null; then
-                brew install python3 2>/dev/null || true
+                # See _brew_install: without these two, asking brew for one
+                # package can trigger an upgrade of everything that depends on
+                # it, and a full formula-index refresh first.
+                HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+                    brew install python3 2>/dev/null || true
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Install Homebrew first: https://brew.sh"
@@ -877,11 +881,12 @@ install_deps() {
         macos)
             if command -v brew &>/dev/null; then
                 # openssl omitted: macOS ships LibreSSL as /usr/bin/openssl
-                brew install bash curl jq git python3 pv dialog wget 2>/dev/null || true
+                HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+                    brew install bash curl jq git python3 pv wget 2>/dev/null || true
                 pip3 install pyyaml 2>/dev/null || true
             else
                 warn "Homebrew not found. Install it from https://brew.sh"
-                warn "Then run: brew install bash curl jq git python3 pv dialog"
+                warn "Then run: brew install bash curl jq git python3 pv wget"
             fi
             ;;
         windows)
@@ -984,7 +989,9 @@ install_ollama() {
         macos)
             if command -v brew &>/dev/null; then
                 run_with_spinner "Installing Ollama via Homebrew" -- \
-                    brew install ollama || install_rc=$?
+                    env HOMEBREW_NO_AUTO_UPDATE=1 \
+                        HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+                        brew install ollama || install_rc=$?
             else
                 # Foreground so user sees curl + install.sh progress directly.
                 curl -fsSL https://ollama.com/install.sh | sh || install_rc=$?
@@ -1875,6 +1882,23 @@ _is_darwin() {
     [[ "$p" == "darwin" ]]
 }
 
+# Homebrew, with its two most destructive habits disabled.
+#
+# NO_INSTALLED_DEPENDENTS_CHECK is the important one: asking for `ffmpeg` on a
+# machine that has openai-whisper installed makes brew decide to upgrade
+# whisper too, which pulls in llvm, pytorch, onnx and gcc — hundreds of
+# megabytes of toolchain that has nothing to do with speaking a sentence, and
+# one flaky bottle download then strands the install behind a lock. Gathm asks
+# for a package; it does not ask to re-tool the user's machine.
+#
+# NO_AUTO_UPDATE keeps a routine dependency install from turning into a full
+# formula-index refresh on a slow connection.
+_brew_install() {
+    HOMEBREW_NO_AUTO_UPDATE=1 \
+    HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+    run_bounded 900 brew install "$@" &>/dev/null
+}
+
 # Platforms Gathm builds the speech runtime on. Everywhere else keeps whatever
 # Python/audio dependencies it already had — see the section comment above.
 _audiocpp_supported() {
@@ -1961,7 +1985,8 @@ _audiocpp_install_build_deps() {
                 command -v "$tool" &>/dev/null || want+=("$tool")
             done
             if (( ${#want[@]} )); then
-                run_bounded 900 brew install "${want[@]}" &>/dev/null || true
+                info "Installing ${want[*]} with Homebrew..."
+                _brew_install "${want[@]}" || true
             fi
         fi
         if ! command -v cmake &>/dev/null; then
@@ -2695,8 +2720,7 @@ _audiocpp_install_recorder() {
         # (sox's `rec` works too, if the user already has it).
         if ! command -v ffmpeg &>/dev/null && ! command -v rec &>/dev/null; then
             info "Installing microphone support (ffmpeg)..."
-            command -v brew &>/dev/null && \
-                run_bounded 900 brew install ffmpeg &>/dev/null || true
+            command -v brew &>/dev/null && _brew_install ffmpeg || true
         fi
         if command -v ffmpeg &>/dev/null || command -v rec &>/dev/null; then
             ok "Microphone capture ($(command -v ffmpeg &>/dev/null && echo ffmpeg || echo rec))"
