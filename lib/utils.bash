@@ -179,13 +179,6 @@ EOF
     echo
 }
 
-pause() {
-    if is_interactive; then
-        read -n 1 -s -r -p "Press any key to continue..."
-        echo
-    fi
-}
-
 print_divider() {
     local cols
     cols=$(tput cols 2>/dev/null || echo 80)

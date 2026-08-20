@@ -248,22 +248,6 @@ def test_budget() -> None:
         os.environ.pop("GATHM_SPEAK_MAX_CHARS", None)
 
 
-def test_speak_stream_passthrough() -> None:
-    print("\nspeak_stream: passes tokens through")
-
-    @with_stub
-    def run(rec):
-        tokens = ["Hello there, ", "this is a streamed reply. ",
-                  "It has two sentences in it."]
-        seen = list(speech.speak_stream(tokens))
-        check("tokens pass through unchanged", seen, tokens)
-        time.sleep(0.3)
-        return rec
-
-    rec = run(0.01, 0.01)
-    ok("streamed tokens were spoken", len(rec.spoken()) >= 1)
-
-
 def test_speakable_unchanged() -> None:
     print("\nspeakable(): behaviour preserved by the refactor")
     check("markdown still stripped",
@@ -287,7 +271,6 @@ def main() -> int:
     test_pipelining()
     test_cancel()
     test_budget()
-    test_speak_stream_passthrough()
     test_speakable_unchanged()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")

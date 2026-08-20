@@ -837,7 +837,7 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
+            pkg install -y $core python rust pv wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
             # pydantic-core is a Rust extension. PyPI only ships manylinux/musl
             # wheels (glibc/musl) which Android's Bionic linker cannot load at
             # all — so we MUST use Termux's own Bionic-native build. Installing
@@ -858,24 +858,24 @@ install_deps() {
             ;;
         debian|wsl)
             sudo apt-get update -y 2>/dev/null || true
-            sudo apt-get install -y $core python3 python3-pip python3-venv pv dialog wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
+            sudo apt-get install -y $core python3 python3-pip python3-venv pv wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || pip install pyyaml 2>/dev/null || true
             ;;
         fedora)
-            sudo dnf install -y $core python3 python3-pip pv dialog wget bind-utils iproute net-tools libxml2 2>/dev/null || true
+            sudo dnf install -y $core python3 python3-pip pv wget bind-utils iproute net-tools libxml2 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         arch)
-            sudo pacman -Sy --noconfirm $core python python-pip pv dialog wget bind-tools iproute2 net-tools libxml2 2>/dev/null || true
+            sudo pacman -Sy --noconfirm $core python python-pip pv wget bind-tools iproute2 net-tools libxml2 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         alpine)
             apk update 2>/dev/null || true
-            apk add $core python3 py3-pip pv dialog wget bind-tools iproute2 net-tools libxml2-utils 2>/dev/null || true
+            apk add $core python3 py3-pip pv wget bind-tools iproute2 net-tools libxml2-utils 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         opensuse)
-            sudo zypper install -y $core python3 python3-pip pv dialog wget bind-utils iproute2 net-tools libxml2-tools 2>/dev/null || true
+            sudo zypper install -y $core python3 python3-pip pv wget bind-utils iproute2 net-tools libxml2-tools 2>/dev/null || true
             pip3 install pyyaml 2>/dev/null || true
             ;;
         macos)

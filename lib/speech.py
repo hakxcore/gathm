@@ -815,25 +815,6 @@ def speak_async(text: str, quiet: bool = True):
     return SpeechStream(quiet=quiet).start().feed(text).close()
 
 
-def speak_stream(pieces, quiet: bool = True):
-    """Speak an iterable of text fragments as they arrive, yielding each on.
-
-    Drop-in for a token stream: iterate this instead of the model's own
-    generator and the reply is spoken while it is still being written.
-    """
-    if not enabled():
-        yield from pieces
-        return
-    stop()
-    stream = SpeechStream(quiet=quiet).start()
-    try:
-        for piece in pieces:
-            stream.feed(piece)
-            yield piece
-    finally:
-        stream.close()
-
-
 # ---------------------------------------------------------------------------
 # Listening: the same binary, --task asr
 # ---------------------------------------------------------------------------
