@@ -192,17 +192,28 @@ print_divider() {
     printf "${ORANGE}%*s\n${RESETBG}" "$cols" | tr ' ' '-'
 }
 
+# Install recipes, so a missing dependency comes with the command that fixes it.
+# shellcheck source=lib/deps.bash
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/deps.bash" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/deps.bash"
+fi
+
 check_dependencies() {
     local missing_deps=0
     for dep in "$@"; do
         if ! command -v "$dep" &>/dev/null; then
             echo "${RED}Error: Required command '$dep' is not installed.${RESETBG}"
+            # "Please install the missing dependencies and try again" told the
+            # user nothing — and for a Go binary or a differently-named package,
+            # guessing `pkg install <command>` does not work either.
+            if declare -f gathm_dep_report >/dev/null 2>&1; then
+                gathm_dep_report "$dep"
+            fi
             missing_deps=1
         fi
     done
 
     if [ "$missing_deps" -eq 1 ]; then
-        echo "Please install the missing dependencies and try again."
         exit 1
     fi
 }

@@ -57,15 +57,19 @@ render_results() {
   local query_label="$2"
   local limit="$3"
 
-  echo "$response" | python3 - "$query_label" "$limit" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$query_label" "$limit" <<'PY'
 import json
+import os
 import sys
 
 query_label = sys.argv[1]
 limit = int(sys.argv[2])
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: Could not parse NVD response ({exc}).")
     sys.exit(1)

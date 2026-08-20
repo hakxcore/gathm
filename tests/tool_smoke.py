@@ -159,6 +159,24 @@ def missing_prereqs(tool: str) -> str:
     return ""
 
 
+def install_hint(tool: str) -> str:
+    """The command that would make this tool usable, from lib/deps.bash."""
+    binary = EXTERNAL.get(tool)
+    if binary:
+        try:
+            out = subprocess.run(
+                ["bash", "-c",
+                 f'source "{ROOT}/lib/deps.bash" && gathm_dep_hint "{binary}"'],
+                capture_output=True, text=True, timeout=15)
+            return (out.stdout or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+    needed = KEYS.get(tool)
+    if needed:
+        return f"export {needed[0]}=... (see the tool's tool.yaml for where to get one)"
+    return ""
+
+
 def run_tool(tool: str, argv: list, timeout: int) -> tuple[str, str, str]:
     """Return (verdict, headline, full output)."""
     path = TOOLS / tool / tool
@@ -233,6 +251,10 @@ def main() -> int:
         if skip:
             verdicts[tool] = ("SKIP", skip)
             print(f"  {YELLOW}SKIP{RESET}  {tool:<16s} {DIM}{skip}{RESET}")
+            # A skip is only useful if it says how to stop skipping.
+            hint = install_hint(tool)
+            if hint:
+                print(f"        {DIM}→ {hint}{RESET}")
             continue
         argv, _how = manifest_args(tool)
         verdict, headline, full = run_tool(tool, argv, timeout)

@@ -588,6 +588,28 @@ On a restricted network, "empty response" and "could not fetch" mean the host is
 unreachable rather than the tool being broken, so run it somewhere with open
 internet.
 
+### Missing dependencies
+
+A tool that needs something you do not have now says what to install:
+
+```
+Error: Required command 'subfinder' is not installed.
+       Install it with:  ./install-projectdiscovery-tools.sh   (installs subfinder into $HOME/go/bin)
+```
+
+The recipes live in `lib/deps.bash`, per platform, and are curated rather than
+searched for at runtime — an install command is code, and code taken from a web
+page is not something to run on someone's machine unseen. `tests/tool_smoke.py`
+prints the same hint next to every skipped tool.
+
+Gathm will also install a missing dependency by itself before running a tool,
+but only where that is safe to do unattended: a plain `pkg`/`brew`/`apk`/`scoop`
+install. Anything that compiles Go modules, downloads an installer, or needs
+`sudo` is reported with the command instead. `allow_auto_install_deps: false` in
+`config/agent.yaml` turns it off — that flag existed for a while but nothing read
+it, so auto-install was unconditional — and `GATHM_AUTO_INSTALL=1` allows even
+the `sudo` cases.
+
 Two portability notes the harness surfaced, both handled in `lib/utils.bash`:
 
 - macOS has no GNU `timeout`, so tools that called it directly either failed on

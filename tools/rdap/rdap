@@ -60,15 +60,19 @@ query_rdap() {
     return 1
   fi
 
-  echo "$response" | python3 - "$object_type" "$endpoint_target" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$object_type" "$endpoint_target" <<'PY'
 import json
+import os
 import sys
 
 object_type = sys.argv[1]
 target = sys.argv[2]
 
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: Unable to parse RDAP response ({exc}).")
     sys.exit(1)

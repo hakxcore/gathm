@@ -41,6 +41,11 @@ checkCiphers()
   # LibreSSL and OpenSSL both list well over a hundred ciphers, and each one is
   # a full TCP+TLS round trip: unbounded, this ran for minutes and looked hung.
   local max="${GATHM_SITECIPHERS_MAX:-40}"
+  # A total budget, because a per-cipher bound is not enough: a server that
+  # simply ignores an unsupported cipher makes each probe wait the full timeout,
+  # and 40 of those still overran the harness. This guarantees a report.
+  local budget="${GATHM_SITECIPHERS_BUDGET:-25}"
+  local started=$SECONDS
   local total=0
   for _c in $ciphers; do total=$((total + 1)); done
   if (( max > 0 && total > max )); then
@@ -56,7 +61,11 @@ checkCiphers()
   for cipher in $ciphers; do
     # Try connecting with each cipher. run_bounded, not `timeout`: macOS has no
     # GNU timeout, so this call used to fail on every cipher there.
-    local result=$(echo -n | run_bounded 5 openssl s_client -cipher "$cipher" -connect "$server" 2>&1)
+    if (( budget > 0 && SECONDS - started >= budget )); then
+      echo "(stopping after ${budget}s — raise with GATHM_SITECIPHERS_BUDGET, 0 for no limit)"
+      break
+    fi
+    local result=$(echo -n | run_bounded 2 openssl s_client -cipher "$cipher" -connect "$server" 2>&1)
     checked=$((checked + 1))
     
     if [[ "$result" == *"Cipher is $cipher"* ]] || [[ "$result" == *"Cipher    :"* ]]; then
