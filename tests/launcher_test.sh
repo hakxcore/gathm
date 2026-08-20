@@ -35,7 +35,11 @@ echo dummy
 STUB
 # Stub API server: serves / so the launcher's probe succeeds.
 cat > "$FIX/api/server.py" <<'STUB'
-import sys, http.server, socketserver
+import sys, signal, http.server, socketserver
+# uvicorn installs its own SIGINT handler, which is why a Ctrl+C that reached
+# the real server shut it down even though bash had set SIGINT to ignored for
+# the background job. Mirror that here or the Ctrl+C test proves nothing.
+signal.signal(signal.SIGINT, lambda *a: sys.exit(0))
 port = 8080; host = "127.0.0.1"
 a = sys.argv[1:]
 for i, v in enumerate(a):
@@ -88,6 +92,38 @@ out=$(run stop);                   check "stop kills it" "$out" "GUI server stop
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PORT/" || echo 000)
 check "port is free after stop"    "$code" "000"
 [[ -f "$FIX/home/.gathm/gui.pid" ]] && bad "pid file removed" "still there" || ok "pid file removed"
+
+echo "== the GUI survives Ctrl+C =="
+# Regression: the server used to inherit the launcher's process group. Because
+# launch_pilot execs, Pilot became that group's leader — the terminal's
+# foreground group — so Ctrl+C at the Pilot prompt was delivered to the GUI
+# server too and killed it along with Pilot. nohup does not cover SIGINT.
+CTRLC_PORT=$(( PORT + 20 ))
+cat > "$FIX/ctrlc.sh" <<CTRLC
+#!/usr/bin/env bash
+export HOME="$FIX/home"
+mypgid=\$(ps -o pgid= -p \$\$ | tr -d ' ')
+GATHM_GUI_PORT=$CTRLC_PORT bash "$FIX/gathm" gui --no-browser >/dev/null 2>&1
+srvpid=\$(cat "$FIX/home/.gathm/gui.pid" 2>/dev/null)
+srvpgid=\$(ps -o pgid= -p "\$srvpid" | tr -d ' ')
+echo "launcher_pgid=\$mypgid server_pgid=\$srvpgid"
+kill -INT -"\$mypgid" 2>/dev/null
+sleep 3
+CTRLC
+# The wrapper signals its own process group, so it needs one of its own or it
+# would take this test down with it. `set -m` gives the background job one.
+( set -m; bash "$FIX/ctrlc.sh" >"$FIX/ctrlc.out" 2>&1 & wait $! ) 2>/dev/null
+cout=$(cat "$FIX/ctrlc.out" 2>/dev/null)
+lpg=${cout#*launcher_pgid=}; lpg=${lpg%% *}
+spg=${cout#*server_pgid=}; spg=${spg%%[!0-9]*}
+if [[ -n "$spg" && "$lpg" != "$spg" ]]; then
+    ok "server runs in its own process group"
+else
+    bad "server runs in its own process group" "launcher=$lpg server=$spg"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$CTRLC_PORT/" || echo 000)
+check "server still serving after Ctrl+C" "$code" "200"
+HOME="$FIX/home" GATHM_GUI_PORT="$CTRLC_PORT" timeout 30 bash "$FIX/gathm" stop >/dev/null 2>&1
 
 echo "== port/host flags =="
 ALT=$(( PORT + 1 ))

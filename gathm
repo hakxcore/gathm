@@ -122,10 +122,33 @@ start_gui() {
 
     mkdir -p "$GATHM_STATE_DIR" 2>/dev/null || true
     echo -e "${GREEN}[*]${RESETBG} Starting GUI server on port ${GUI_PORT}..."
-    nohup "$py" "$server_script" --host "$GUI_HOST" --port "$GUI_PORT" >>"$GUI_LOG" 2>&1 &
-    local gui_pid=$!
-    echo "$gui_pid" >"$GUI_PID_FILE" 2>/dev/null || true
-    disown "$gui_pid" 2>/dev/null || true
+    rm -f "$GUI_PID_FILE" 2>/dev/null || true
+
+    # The server has to end up in its OWN process group, not ours.
+    #
+    # A background job in a non-interactive script inherits the script's
+    # process group, and because launch_pilot `exec`s, Pilot becomes the leader
+    # of that same group — the terminal's foreground group. So Ctrl+C at the
+    # Pilot prompt was delivered to the GUI server too and took it down with
+    # Pilot (uvicorn logging "Shutting down"). `nohup` does not help: it blocks
+    # SIGHUP, not SIGINT.
+    #
+    # `set -m` in a subshell turns on job control there, which makes the
+    # background job a process-group leader. That is enough — terminal signals
+    # only reach the foreground group — and unlike `setsid` it exists
+    # everywhere bash does, including macOS. stdin comes from /dev/null so a
+    # background read can never raise SIGTTIN.
+    (
+        set -m
+        nohup "$py" "$server_script" --host "$GUI_HOST" --port "$GUI_PORT" \
+            </dev/null >>"$GUI_LOG" 2>&1 &
+        echo $! >"$GUI_PID_FILE" 2>/dev/null || true
+    )
+    local gui_pid; gui_pid="$(cat "$GUI_PID_FILE" 2>/dev/null || true)"
+    if [[ -z "$gui_pid" ]]; then
+        echo -e "${ORANGE}[!]${RESETBG} Could not start the GUI server." >&2
+        return 1
+    fi
 
     # Termux phones are slow to import FastAPI; give them longer.
     local max_wait=8
