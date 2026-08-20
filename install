@@ -3054,7 +3054,12 @@ start_gui_server() {
     info "Starting GUI server on port $GUI_PORT..."
     local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
     nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
-    disown $! 2>/dev/null || true
+    local _gui_pid=$!
+    # Record the pid where the launcher looks for it, so `gathm stop` can shut
+    # down the server the installer started instead of telling the user to pkill.
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$_gui_pid" >"$HOME/.gathm/gui.pid" 2>/dev/null || true
+    disown "$_gui_pid" 2>/dev/null || true
 
     # Wait up to 15 s for the server to respond (Termux can be slow)
     local _max_wait=15

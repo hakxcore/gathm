@@ -30,7 +30,7 @@ Gathm is built for practical operations work:
 
 ```text
 gathm/
-├── gathm                      # Interactive launcher (dialog menu)
+├── gathm                      # Launcher: web GUI in the browser + Pilot TUI
 ├── agent/
 │   ├── orchestrator.sh        # Main control plane (run/ask/plan/chain/parallel/health)
 │   └── planner.sh             # Task decomposition planner
@@ -390,13 +390,29 @@ Core commands:
 - `status`
 - `monitor [interval]`
 
-### 2) Classic Launcher
+### 2) Launcher
 
 ```bash
 gathm
 ```
 
-Interactive menu launcher for tools (uses `dialog`).
+Starts the GUI server, opens `http://127.0.0.1:8080` in your browser, and drops
+you into the Pilot TUI in the same terminal. The GUI keeps running after Pilot
+exits.
+
+| Command | What it does |
+|---|---|
+| `gathm` | GUI in the browser + Pilot here |
+| `gathm --no-browser` | Start the GUI server, don't open a browser |
+| `gathm --no-gui` (`--tui-only`) | Pilot only |
+| `gathm tui` | Pilot only (same as `--no-gui`) |
+| `gathm gui` | GUI server + browser, no Pilot |
+| `gathm gui --port 9090` | Pick the port (also `GATHM_GUI_PORT`) |
+| `gathm stop` | Stop the GUI server Gathm started |
+
+The server writes to `~/.gathm/gui.log` and records its pid in
+`~/.gathm/gui.pid`. `--host` (or `GATHM_GUI_HOST`) changes the bind address —
+use `--host 0.0.0.0` to reach the GUI from another device on your network.
 
 ### 3) Pilot TUI (local AI assistant)
 

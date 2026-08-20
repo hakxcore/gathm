@@ -84,10 +84,12 @@ find definition of resilience
 /model
 ```
 
-## Classic Launcher Example
+## Launcher Example
 
 ```bash
 gathm
 ```
 
-Then select a tool from menu and provide args in the prompt dialog.
+Opens the GUI at `http://127.0.0.1:8080` in your browser and starts Pilot in the
+terminal. Pilot only: `gathm tui`. GUI only: `gathm gui`. Shut the GUI down with
+`gathm stop`.

@@ -8,9 +8,9 @@ dependencies:
   system: [curl, python3]
 
 apis:
-  - name: bgpview
-    base_url: https://api.bgpview.io
-    health_endpoint: https://api.bgpview.io/asn/15169
+  - name: ripestat
+    base_url: https://stat.ripe.net/data
+    health_endpoint: https://stat.ripe.net/data/as-overview/data.json?resource=AS15169
     auth_required: false
 
 input_schema:
