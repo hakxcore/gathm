@@ -65,6 +65,23 @@ def speak_reply(text: str) -> None:
         pass
 
 
+def start_reply_stream():
+    """A speech stream to feed the reply into as it is generated, or None.
+
+    Returns None whenever speech is unavailable or switched off, which is the
+    signal to the caller that it should speak the finished reply the old way.
+    """
+    if _speech is None:
+        return None
+    try:
+        if not _speech.enabled():
+            return None
+        _speech.stop()                      # cut off the previous answer
+        return _speech.SpeechStream().start()
+    except Exception:  # noqa: BLE001 - speech never breaks a reply
+        return None
+
+
 def stop_speaking() -> None:
     """Cut off whatever is being said — called when the user speaks up next."""
     if _speech is None:
@@ -353,7 +370,7 @@ def print_tool_exec(tool_command: str) -> None:
 # AI response   (openclaw AssistantMessageComponent + markdownTheme)
 # ══════════════════════════════════════════════════════════════════
 
-def render_response(text: str) -> None:
+def render_response(text: str, speak: bool = True) -> None:
     """
     Render the assistant reply with full markdown support inside a panel.
 
@@ -384,7 +401,11 @@ def render_response(text: str) -> None:
     # Say it out loud too. This is the single choke point for assistant replies
     # in the TUI, so hooking it here covers both the normal answer and the
     # safety refusal without duplicating the call at each site.
-    speak_reply(text)
+    #
+    # speak=False means the reply was already spoken while it was being
+    # generated (see start_reply_stream); saying it again would be a rerun.
+    if speak:
+        speak_reply(text)
 
 
 # ══════════════════════════════════════════════════════════════════

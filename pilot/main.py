@@ -82,7 +82,7 @@ try:
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
         start_waiting, stop_waiting, print_user_message, get_user_input,
-        stop_speaking, console,
+        stop_speaking, start_reply_stream, console,
     )
 except ImportError:
     try:
@@ -91,7 +91,7 @@ except ImportError:
             print_status_bar, render_help, render_tools_list, render_error,
             render_goodbye, check_connectivity,
             start_waiting, stop_waiting, print_user_message, get_user_input,
-            stop_speaking, console,
+            stop_speaking, start_reply_stream, console,
         )
     except ImportError as exc:
         missing = getattr(exc, "name", None) or str(exc)
@@ -420,6 +420,125 @@ def extract_tool_input(content: str, available_tools: Optional[set] = None) -> O
 
     return None
 
+# --- Speaking the reply while it is still being written -------------------
+#
+# The model is the slow part of a spoken answer: several seconds on a phone
+# before invoke() returns anything at all. Streaming the tokens into the
+# speech stream means the first sentence is being said while the rest is
+# still being generated, which is what makes a voice conversation feel live
+# rather than walkie-talkie.
+#
+# The catch is that a ReAct tool call looks like a reply until you read it.
+# "Thought: I should use the weather tool" must never be spoken, and it is
+# only recognisable once the first line exists — so the head of the response
+# is held back until it is clear this is a plain answer.
+
+_REACT_MARKER_RE = re.compile(r"(?im)^\s*(thought|action|action input|observation)\s*:")
+_REACT_HEAD_CHARS = 80
+
+# Set for the duration of one query by the main loop; None the rest of the
+# time, which is also what makes this a no-op for the API and chat_once paths.
+_TOKEN_SINK = None
+
+
+class _ReplySpeech:
+    """Feeds assistant tokens to a speech stream as they are generated."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.fed = False
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        try:
+            self.stream.feed(text)
+            self.fed = True
+        except Exception:  # noqa: BLE001 - speech never breaks a reply
+            pass
+
+    def close(self) -> None:
+        try:
+            self.stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _set_token_sink(sink) -> None:
+    global _TOKEN_SINK
+    _TOKEN_SINK = sink
+
+
+def _token_text(content) -> str:
+    """The text of one streamed chunk.
+
+    Chat models mostly yield a plain string, but some yield a list of content
+    blocks (`[{"type": "text", "text": "..."}]`). Joining the wrong shape would
+    put Python repr into the spoken reply, so both are handled here.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for block in content:
+            if isinstance(block, str):
+                out.append(block)
+            elif isinstance(block, dict):
+                out.append(str(block.get("text") or ""))
+        return "".join(out)
+    return "" if content is None else str(content)
+
+
+def _invoke_spoken(llm, messages):
+    """llm.invoke(), but speaking the answer as the tokens arrive.
+
+    Falls back to a plain invoke when nothing is listening or the model has no
+    streaming interface, so behaviour is unchanged wherever speech is off.
+    """
+    sink = _TOKEN_SINK
+    if sink is None or not hasattr(llm, "stream"):
+        return llm.invoke(messages)
+
+    try:
+        from langchain_core.messages import AIMessage as _AIMsg
+    except ImportError:
+        # Degraded mode (no LangChain installed) still has a caller that only
+        # reads .content, so a bare carrier is enough.
+        class _AIMsg:  # type: ignore[no-redef]
+            def __init__(self, content: str):
+                self.content = content
+
+    parts: List[str] = []
+    head = ""
+    speaking: Optional[bool] = None      # None = still deciding
+    try:
+        for piece in llm.stream(messages):
+            token = _token_text(getattr(piece, "content", ""))
+            if not token:
+                continue
+            parts.append(token)
+            if speaking is None:
+                head += token
+                if _REACT_MARKER_RE.search(head):
+                    speaking = False     # a tool call — say nothing
+                elif len(head) >= _REACT_HEAD_CHARS:
+                    speaking = True
+                    sink.feed(head)
+            elif speaking:
+                sink.feed(token)
+    except Exception:
+        # Partial output is still worth returning; a failure with nothing to
+        # show is a real error and belongs with the caller's handler.
+        if not parts:
+            raise
+
+    text = "".join(parts)
+    # A short answer that never reached the head limit: decide now.
+    if speaking is None and text and not _REACT_MARKER_RE.search(text):
+        sink.feed(text)
+    return _AIMsg(content=text)
+
+
 def _clean_agent_response(content: str) -> str:
     """Strip ReAct scaffolding lines (Thought/Action/Observation) from the
     model's reply so the user sees only the actual answer.
@@ -627,8 +746,8 @@ def call_model(state: AgentState):
     if _is_small_talk(_last):
         from langchain_core.messages import AIMessage as _AIMsg
         _llm = _build_llm()
-        _resp = _llm.invoke([HumanMessage(content=_SMALL_TALK_PROMPT),
-                             HumanMessage(content=_last)])
+        _resp = _invoke_spoken(_llm, [HumanMessage(content=_SMALL_TALK_PROMPT),
+                                      HumanMessage(content=_last)])
         _text = _clean_agent_response(_resp.content)
         return {"messages": [_AIMsg(content=_text)], "next_step": "end"}
 
@@ -695,7 +814,7 @@ When you have a final answer, provide it directly without the Action format.
 """
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
-    response = llm.invoke(messages)
+    response = _invoke_spoken(llm, messages)
 
     # Check for tool call in the text
     content = response.content
@@ -1007,6 +1126,10 @@ def main():
             state = {"messages": conversation_history + [HumanMessage(content=user_input)]}
             final_agent_reply: Optional[str] = None
             _stream_error = False
+            # Speak the answer while the model is still writing it, so a voice
+            # conversation does not wait out the whole generation in silence.
+            _reply_speech = start_reply_stream()
+            _set_token_sink(_ReplySpeech(_reply_speech) if _reply_speech else None)
             start_waiting()
             try:
                 for output in app.stream(state, config={"recursion_limit": 25}):
@@ -1030,12 +1153,20 @@ def main():
                 final_agent_reply = described
             finally:
                 stop_waiting()
+                _sink = _TOKEN_SINK
+                _set_token_sink(None)
+                if _sink is not None:
+                    _sink.close()
 
             if final_agent_reply:
                 # Only render the response panel for successful AI replies
                 # (error case already displayed render_error above)
                 if not _stream_error:
-                    render_response(final_agent_reply)
+                    # Already spoken token by token? Then don't say it twice.
+                    render_response(
+                        final_agent_reply,
+                        speak=not (_sink is not None and _sink.fed),
+                    )
                 conversation_history.extend([
                     HumanMessage(content=user_input),
                     AIMessage(content=final_agent_reply),
