@@ -62,4 +62,4 @@ output_schema:
       type: object
 
 fallback_tool: ipinfo
-tags: [networking, ip, geolocation, dns, mac, lan, wan]
+tags: [networking, geo, ip, location, located, where, isp, geolocation, city, country]
