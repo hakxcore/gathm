@@ -22,6 +22,8 @@ and for transcription:
 Knobs:
     GATHM_SPEAK=0            disable speech entirely
     GATHM_SPEAK_MAX_CHARS    how much of a long reply to read (default 600)
+    GATHM_SPEAK_CHUNK_MIN    shortest utterance when streaming (default 40)
+    GATHM_SPEAK_CHUNK_MAX    forced break for unpunctuated text (default 240)
     GATHM_SPEAK_TIMEOUT      seconds allowed for synthesis (default 180)
     GATHM_AUDIO_PLAYER       force a specific playback command
     GATHM_ASR_TIMEOUT        seconds allowed for one transcription (default 300)
@@ -37,6 +39,7 @@ Usable directly, which is the quickest way to check a device end to end:
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import signal
@@ -213,13 +216,8 @@ def find_player() -> list | None:
     return None
 
 
-def speakable(text: str) -> str:
-    """Reduce a markdown reply to prose worth reading aloud.
-
-    Code blocks, URLs and table pipes are noise in speech, and a long answer
-    would take minutes on a phone, so the text is trimmed at a sentence
-    boundary near the limit.
-    """
+def _clean_for_speech(text: str) -> str:
+    """Strip markdown down to prose. No length limit — see speakable()."""
     t = text or ""
     t = re.sub(r"```.*?```", " code block omitted. ", t, flags=re.S)
     t = re.sub(r"`([^`]*)`", r"\1", t)
@@ -227,7 +225,17 @@ def speakable(text: str) -> str:
     t = re.sub(r"https?://\S+", " a link ", t)
     t = re.sub(r"^\s*[#>*\-+|]+\s*", "", t, flags=re.M)   # md markers
     t = re.sub(r"[*_~|]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def speakable(text: str) -> str:
+    """Reduce a markdown reply to prose worth reading aloud.
+
+    Code blocks, URLs and table pipes are noise in speech, and a long answer
+    would take minutes on a phone, so the text is trimmed at a sentence
+    boundary near the limit.
+    """
+    t = _clean_for_speech(text)
 
     try:
         limit = int(os.environ.get("GATHM_SPEAK_MAX_CHARS", "600"))
@@ -503,20 +511,307 @@ def speak(text: str, quiet: bool = True) -> bool:
                     pass
 
 
+# ---------------------------------------------------------------------------
+# Streaming speech
+#
+# speak() renders the whole reply before a single word is heard. With audio.cpp
+# that is the slow part — a model load plus synthesis of every sentence — so a
+# four-sentence answer stays silent for seconds and then plays all at once.
+#
+# SpeechStream cuts the text into utterances and pipelines them: sentence two
+# is being synthesised while sentence one is playing, so the reply starts
+# talking as soon as its first sentence exists. It takes text incrementally,
+# which is what a token-streaming model will feed it.
+# ---------------------------------------------------------------------------
+
+# A sentence ends at .!?… possibly followed by a closing quote or bracket, and
+# then whitespace or the end of the buffer. Requiring the trailing space is what
+# keeps "3.14" and "gathm.sh" from being split down the middle.
+_SENTENCE_END_RE = re.compile(r"[.!?…]['\")\]]*(?=\s|$)")
+
+
+def _speak_env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+def split_speech_chunks(buf: str, final: bool = False, min_chars: int = 40,
+                        max_chars: int = 240,
+                        first_min: int | None = None) -> tuple[list, str]:
+    """Cut a growing reply into utterances. Returns (chunks, remainder).
+
+    `buf` is raw model output; the chunks come back cleaned for speech. The
+    remainder is the raw tail that is not ready to speak yet — feed it back in
+    with more text appended.
+
+    Only complete sentences are emitted, and only once they reach `min_chars`,
+    so a reply does not come out as a stutter of two-word utterances. The very
+    first chunk may be shorter (`first_min`), because getting *some* audio out
+    quickly is the whole point. `max_chars` forces a break in text that never
+    punctuates, and `final` flushes whatever is left.
+    """
+    if first_min is None:
+        first_min = min_chars
+
+    # An unclosed code fence is held back: speakable() turns a whole fence into
+    # "code block omitted", and it can only see that once the fence closes.
+    limit = len(buf)
+    if not final and buf.count("```") % 2 == 1:
+        limit = buf.rindex("```")
+
+    chunks: list = []
+    pos = 0
+    while pos < limit:
+        need = first_min if not chunks else min_chars
+        cut = -1
+        for m in _SENTENCE_END_RE.finditer(buf, pos, limit):
+            if m.end() - pos >= need:
+                cut = m.end()
+                break
+        if cut < 0:
+            break
+        piece = _clean_for_speech(buf[pos:cut])
+        if piece:
+            chunks.append(piece)
+        pos = cut
+
+    # Nothing punctuates — a list, a wall of prose — so break on a word boundary
+    # rather than let the buffer grow without bound.
+    while max_chars and not final and (limit - pos) > max_chars:
+        window = buf[pos:pos + max_chars]
+        space = window.rfind(" ")
+        cut = pos + (space + 1 if space > max_chars // 3 else max_chars)
+        piece = _clean_for_speech(buf[pos:cut])
+        if piece:
+            chunks.append(piece)
+        pos = cut
+
+    if final and pos < len(buf):
+        piece = _clean_for_speech(buf[pos:])
+        if piece:
+            chunks.append(piece)
+        pos = len(buf)
+
+    return chunks, buf[pos:]
+
+
+class SpeechStream:
+    """Speak text as it arrives, one utterance at a time.
+
+    Feed it text (all at once, or token by token), then close() it. Playback
+    happens on background threads, so no method here blocks the caller except
+    wait(). stop() cancels it like any other speech.
+    """
+
+    def __init__(self, quiet: bool = True):
+        self.quiet = quiet
+        self._buf = ""
+        self._spoken = 0                 # characters handed to the engine
+        self._emitted = 0                # utterances handed to the engine
+        self._closed = False
+        self._lock = threading.Lock()
+        self._budget = _speak_env_int("GATHM_SPEAK_MAX_CHARS", 600)
+        self._min = _speak_env_int("GATHM_SPEAK_CHUNK_MIN", 40)
+        self._max = _speak_env_int("GATHM_SPEAK_CHUNK_MAX", 240)
+        self._text_q: queue.Queue = queue.Queue()
+        # Bounded: synthesise a little ahead, not the entire reply. Otherwise a
+        # cancelled answer has already spent the phone's battery on audio
+        # nobody will hear.
+        self._wav_q: queue.Queue = queue.Queue(maxsize=2)
+        self._threads: list = []
+        with _proc_lock:
+            self._generation = _generation
+
+    # -- lifecycle ----------------------------------------------------------
+    def _cancelled(self) -> bool:
+        with _proc_lock:
+            return self._generation != _generation
+
+    def start(self) -> "SpeechStream":
+        if self._threads:
+            return self
+        if engine() == "system":
+            # The OS voice speaks straight to the sound card: one worker, no
+            # intermediate wav and no player to arrange.
+            targets = [("gathm-speech-say", self._system_worker)]
+        else:
+            targets = [("gathm-speech-synth", self._synth_worker),
+                       ("gathm-speech-play", self._play_worker)]
+        for name, target in targets:
+            th = threading.Thread(target=target, name=name, daemon=True)
+            th.start()
+            self._threads.append(th)
+        return self
+
+    def feed(self, text: str) -> "SpeechStream":
+        """Add text. Complete sentences in it start speaking immediately."""
+        if not text or self._closed:
+            return self
+        with self._lock:
+            self._buf += text
+            self._drain(final=False)
+        return self
+
+    def close(self) -> "SpeechStream":
+        """No more text is coming: flush the tail and let the workers finish."""
+        with self._lock:
+            if self._closed:
+                return self
+            self._closed = True
+            self._drain(final=True)
+        self._text_q.put(None)
+        return self
+
+    def cancel(self) -> None:
+        """Stop talking now and discard anything queued."""
+        self._closed = True
+        stop()                      # bumps the generation the workers watch
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until everything queued has been spoken (or cancelled)."""
+        for th in self._threads:
+            th.join(timeout)
+        return not any(th.is_alive() for th in self._threads)
+
+    join = wait                     # speak_async() used to hand back a Thread
+
+    # -- internals ----------------------------------------------------------
+    def _drain(self, final: bool) -> None:
+        """Move whatever is speakable from the buffer onto the queue."""
+        if self._budget and self._spoken >= self._budget:
+            self._buf = ""
+            return
+        chunks, self._buf = split_speech_chunks(
+            self._buf, final=final, min_chars=self._min, max_chars=self._max,
+            # Nothing said yet: take the first sentence however short it is.
+            first_min=1 if not self._emitted else self._min,
+        )
+        for chunk in chunks:
+            if self._budget and self._spoken >= self._budget:
+                break
+            self._spoken += len(chunk)
+            self._emitted += 1
+            self._text_q.put(chunk)
+
+    def _next_text(self):
+        """Next utterance, or None when the stream is finished/cancelled."""
+        while True:
+            try:
+                item = self._text_q.get(timeout=0.2)
+            except queue.Empty:
+                if self._cancelled():
+                    return None
+                continue
+            if item is None or self._cancelled():
+                return None
+            return item
+
+    def _system_worker(self) -> None:
+        while True:
+            text = self._next_text()
+            if text is None:
+                return
+            with _speak_lock:
+                if self._cancelled():
+                    return
+                _speak_system(text, self.quiet)
+
+    def _synth_worker(self) -> None:
+        while True:
+            text = self._next_text()
+            if text is None:
+                break
+            tmp = None
+            try:
+                fd, tmp = tempfile.mkstemp(prefix="gathm-speak-", suffix=".wav")
+                os.close(fd)
+                ok, msg = synthesize(text, tmp)
+                if not ok:
+                    if not self.quiet and not self._cancelled():
+                        print(f"[speech] {msg}", file=sys.stderr)
+                    _unlink(tmp)
+                    continue
+            except Exception as exc:  # noqa: BLE001 - speech never breaks a reply
+                if not self.quiet:
+                    print(f"[speech] {exc}", file=sys.stderr)
+                _unlink(tmp)
+                continue
+            # put() blocks while the player is behind, which is the throttle.
+            while True:
+                if self._cancelled():
+                    _unlink(tmp)
+                    break
+                try:
+                    self._wav_q.put(tmp, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
+        self._wav_q.put(None)
+
+    def _play_worker(self) -> None:
+        while True:
+            try:
+                path = self._wav_q.get(timeout=0.2)
+            except queue.Empty:
+                if self._cancelled():
+                    return
+                continue
+            if path is None:
+                return
+            try:
+                if self._cancelled():
+                    return
+                with _speak_lock:
+                    if self._cancelled():
+                        return
+                    ok, msg = play(path)
+                if not ok and not self.quiet and not self._cancelled():
+                    print(f"[speech] {msg}", file=sys.stderr)
+            finally:
+                _unlink(path)
+
+
+def _unlink(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def speak_async(text: str, quiet: bool = True):
     """Start speaking without blocking the caller; cancels anything talking.
 
-    Synthesis of a couple of sentences takes seconds on a phone, and the reply
-    is already on screen by then — waiting for the audio before handing back
-    the prompt would make Pilot feel frozen.
+    Sentence-by-sentence, so the first words are heard while the rest is still
+    being synthesised — on a phone that is the difference between a reply that
+    starts talking and one that sits silent for several seconds.
     """
     if not enabled():
         return None
     stop()
-    thread = threading.Thread(target=speak, args=(text, quiet),
-                              name="gathm-speech", daemon=True)
-    thread.start()
-    return thread
+    return SpeechStream(quiet=quiet).start().feed(text).close()
+
+
+def speak_stream(pieces, quiet: bool = True):
+    """Speak an iterable of text fragments as they arrive, yielding each on.
+
+    Drop-in for a token stream: iterate this instead of the model's own
+    generator and the reply is spoken while it is still being written.
+    """
+    if not enabled():
+        yield from pieces
+        return
+    stop()
+    stream = SpeechStream(quiet=quiet).start()
+    try:
+        for piece in pieces:
+            stream.feed(piece)
+            yield piece
+    finally:
+        stream.close()
 
 
 # ---------------------------------------------------------------------------
