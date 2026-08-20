@@ -19,10 +19,10 @@ else
     exit 1
 fi
 
-# Preflight: Pilot's hard dependency is `rich`. If it can't be imported the
-# venv was never built (or the install failed), so guide the user rather
-# than letting main.py crash with a ModuleNotFoundError traceback.
-if ! "$PYTHON" -c "import rich" 2>/dev/null; then
+# Preflight: Pilot needs `rich` for the TUI and `langchain_core` for the agent
+# loop. If either is missing the venv was never built (or the install failed),
+# so guide the user rather than letting main.py crash with a traceback.
+if ! "$PYTHON" -c "import rich, langchain_core" 2>/dev/null; then
     echo "Pilot dependencies are not installed for: $PYTHON" >&2
     echo "" >&2
     echo "Install them with:" >&2

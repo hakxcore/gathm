@@ -289,153 +289,33 @@ _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
 
-# Rename .so files from manylinux/musllinux SOABI to the actual Termux SOABI.
-# Usage: _soabi_patch_dir <python_cmd> <directory>
-# e.g.  _soabi_patch_dir "$venv/bin/python3" "/path/to/site-packages/pydantic_core"
-_soabi_patch_dir() {
-    local python_cmd="$1" dir="$2"
-    # Get Termux Python's actual SOABI (e.g. "cpython-313" without arch triplet)
-    local _target_soabi
-    _target_soabi=$("$python_cmd" -c "import sysconfig; print(sysconfig.get_config_var('SOABI') or '')" 2>/dev/null)
-    [[ -z "$_target_soabi" ]] && return 1
-
-    while IFS= read -r f; do
-        local base; base=$(basename "$f")
-        # Match *.cpython-3XX-<arch-triplet>.so and rename to *.<target_soabi>.so
-        if [[ "$base" =~ \.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so$ ]]; then
-            local nf
-            nf=$(echo "$f" | sed -E "s/\.cpython-[0-9]+-[a-z0-9_]+-linux-[a-z0-9_]+\.so/.$_target_soabi.so/")
-            [[ "$f" != "$nf" ]] && mv "$f" "$nf"
-        fi
-    done < <(find "$dir" -name "*.so" 2>/dev/null)
-}
-
-# Stage shared libs that a manylinux wheel bundled in a <pkg>.libs/ directory
-# onto the Termux linker's default search path ($PREFIX/lib), so Bionic can
-# resolve them even though it ignores the wheel's DT_RUNPATH. Also creates the
-# plain libgcc_s.so.1 soname (Termux dropped the standalone `libgcc` package,
-# so nothing else provides it). No-op off Termux or when nothing was bundled.
-#
-# $1 is a root dir to search recursively (a site-packages dir, or the whole
-# venv). Searching by path (not a fixed depth) makes this robust to whichever
-# site-packages the wheel actually landed in.
-_termux_stage_bundled_libs() {
-    local root="$1"
-    [[ -n "${PREFIX:-}" && -d "$PREFIX/lib" && -n "$root" ]] || return 0
-
-    local staged=0 _so
-    # Copy every shared object bundled inside any *.libs/ directory.
-    while IFS= read -r _so; do
-        [[ -f "$_so" ]] || continue
-        cp -f "$_so" "$PREFIX/lib/" 2>/dev/null && staged=$((staged + 1))
-    done < <(find "$root" -path "*.libs/*" -name "*.so*" -type f 2>/dev/null)
-
-    # Ensure the plain libgcc_s.so.1 soname exists (wheels ship it hashed as
-    # libgcc_s-<hash>.so.1; something may DT_NEEDED the unversioned name).
-    if [[ ! -e "$PREFIX/lib/libgcc_s.so.1" ]]; then
-        local _gcc
-        _gcc=$(find "$root" -name "libgcc_s*.so*" -type f 2>/dev/null | head -1)
-        [[ -n "$_gcc" ]] && cp -f "$_gcc" "$PREFIX/lib/libgcc_s.so.1" 2>/dev/null && staged=$((staged + 1))
-    fi
-
-    (( staged > 0 )) && ok "Staged $staged bundled native lib(s) into \$PREFIX/lib (Termux linker path)"
-    return 0
-}
-
-# Rewrite a manylinux extension's library search path to ABSOLUTE dirs Bionic
-# will actually search. Android's linker does NOT expand $ORIGIN in the wheel's
-# DT_RUNPATH, and it does not search $PREFIX/lib for a dlopen'd .so's deps — so
-# staging libgcc alone isn't enough; the .so has to point at an absolute path.
-# We use --force-rpath (DT_RPATH) for the widest Android-linker compatibility.
-# $1 = the .so to patch. Searches for patchelf; no-op if unavailable.
-_termux_patch_rpath() {
-    local so="$1"
-    [[ -f "$so" ]] || return 1
-    if ! command -v patchelf >/dev/null 2>&1; then
-        pkg install -y patchelf >/dev/null 2>&1 || true
-    fi
-    command -v patchelf >/dev/null 2>&1 || return 1
-
-    # Point at $PREFIX/lib (where _termux_stage_bundled_libs copied libgcc) and
-    # the wheel's own .libs dir, both absolute.
-    local rpath="$PREFIX/lib"
-    local libsdir; libsdir=$(dirname "$so")/../$(basename "$(dirname "$so")").libs
-    [[ -d "$libsdir" ]] && rpath="$PREFIX/lib:$(cd "$libsdir" && pwd)"
-    patchelf --force-rpath --set-rpath "$rpath" "$so" 2>/dev/null
-}
-
-# Download, extract, and SOABI-patch pydantic-core for Termux.
-# Called from _create_termux_native_stubs and _repair_pydantic_core_soabi.
-_install_pydantic_core_termux() {
-    local venv="$1" python_cmd="$2" site_packages="$3"
-    local _pc_tmp; _pc_tmp=$(mktemp -d)
-
-    # Detect Python version for pip download flags
-    local _py_majmin _py_ver_nodot
+# Install a Bionic-native Pydantic pair when the Termux package is unavailable.
+# PyPI's manylinux and musllinux wheels target glibc and musl respectively; a
+# renamed extension or copied libgcc cannot turn either into an Android binary.
+# The Termux User Repository publishes Android wheels.  Pin this compatible
+# pair so pip cannot resolve a newer PyPI pydantic-core wheel over it.
+_termux_install_android_pydantic() {
+    local venv="$1" python_cmd="$2"
+    local _py_majmin
     _py_majmin=$("$python_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null)
-    _py_ver_nodot="${_py_majmin:-313}"
+    case "$_py_majmin" in
+        313|314) ;;
+        *)
+            warn "No Android pydantic-core wheel is configured for Python ${_py_majmin:-unknown}"
+            return 1
+            ;;
+    esac
 
-    # Step 1: install pydantic shell (pure Python, no deps) to learn
-    #         the required pydantic-core version from its metadata.
-    "$venv/bin/pip" install "pydantic<3.0.0,>=2.7.4" --no-deps -q 2>/dev/null || true
-    local _pc_ver
-    _pc_ver=$("$python_cmd" -c "
-from importlib.metadata import requires
-for r in (requires('pydantic') or []):
-    if 'pydantic-core' in r:
-        import re; m = re.search(r'pydantic-core==([\d.]+)', r)
-        if m: print(m.group(1)); break
-" 2>/dev/null)
-
-    if [[ -n "$_pc_ver" ]]; then
-        # Step 2: download an aarch64 wheel.
-        # Prefer musllinux: Rust compiles that target with a fully static
-        # runtime (no external libgcc_s.so.1 needed), making it work on
-        # Termux/Android's Bionic libc without additional packages.
-        # Fall back to manylinux if musl isn't available (libgcc pkg covers it).
-        local _whl=""
-        for _plat in musllinux_1_1_aarch64 manylinux_2_17_aarch64; do
-            if "$venv/bin/pip" download "pydantic-core==$_pc_ver" \
-                    --platform "$_plat" \
-                    --python-version "$_py_ver_nodot" --implementation cp --abi "cp${_py_ver_nodot}" \
-                    --only-binary :all: --no-deps -q \
-                    -d "$_pc_tmp" 2>/dev/null; then
-                _whl=$(find "$_pc_tmp" -name "pydantic_core-*.whl" | head -1)
-                [[ -n "$_whl" ]] && break
-            fi
-        done
-        if [[ -n "$_whl" ]]; then
-            # Step 3: extract and rename SOABI suffix using actual Termux SOABI
-            local _ext="$_pc_tmp/ext"; mkdir -p "$_ext"
-            "$python_cmd" -c "
-import zipfile, sys
-with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
-" "$_whl" "$_ext" 2>/dev/null
-            _soabi_patch_dir "$python_cmd" "$_ext"
-            cp -r "$_ext/"* "$site_packages/"
-            # manylinux wheels bundle their shared-lib deps (notably
-            # libgcc_s.so.1) into a pydantic_core.libs/ dir and rely on the
-            # ELF DT_RUNPATH ($ORIGIN/../pydantic_core.libs) to find them at
-            # load time. Android's Bionic linker does not reliably honour that
-            # RUNPATH, so `import pydantic_core` fails with:
-            #   dlopen failed: library "libgcc_s-<hash>.so.1" not found
-            # Copy the bundled libs onto $PREFIX/lib (always searched by the
-            # Termux linker) and expose the plain libgcc_s.so.1 soname. For a
-            # musllinux wheel there is no .libs dir, so this is a no-op.
-            _termux_stage_bundled_libs "$site_packages"
-            # And point the extension's RPATH at those absolute dirs, because
-            # Bionic won't find libgcc via the wheel's $ORIGIN-relative RUNPATH.
-            local _pcso
-            _pcso=$(find "$site_packages/pydantic_core" -name "_pydantic_core*.so" 2>/dev/null | head -1)
-            [[ -n "$_pcso" ]] && _termux_patch_rpath "$_pcso"
-            ok "pydantic-core==$_pc_ver installed (aarch64 wheel, SOABI patched for Termux Python $_py_ver_nodot)"
-        else
-            warn "pydantic-core wheel download failed — pip install will likely fail"
-        fi
-    else
-        warn "Could not determine pydantic-core version from pydantic metadata"
-    fi
-    rm -rf "$_pc_tmp"
+    local _tur_index="https://termux-user-repository.github.io/pypi/"
+    info "Installing Android-native pydantic-core from the Termux User Repository..."
+    # pydantic 2.12.5 and pydantic-core 2.41.5 are version-locked.  The latter
+    # has CPython 3.13/3.14 Android wheels, unlike the current PyPI release.
+    "$venv/bin/pip" install -q --no-deps --upgrade "pydantic==2.12.5" || return 1
+    "$venv/bin/pip" install -q --no-deps --upgrade \
+        --index-url "$_tur_index" --only-binary=:all: "pydantic-core==2.41.5" || return 1
+    # The rest of Pydantic's pure-Python dependencies are resolved with the
+    # Pilot requirements immediately after this pre-install step.
+    "$python_cmd" -c "import pydantic_core" 2>/dev/null
 }
 
 # Switch the venv over to Termux's Bionic-native pydantic / pydantic-core.
@@ -472,8 +352,14 @@ _termux_use_native_pydantic_core() {
 # and provides the stdlib fallback that the actual package would use anyway.
 #
 # Currently stubbed:
-#   uuid-utils   — langchain-core uses it for faster UUID generation but wraps
-#                  the import in try/except and falls back to stdlib uuid.uuid4.
+#   uuid-utils   — langchain-core uses it for faster UUID generation. NOTE: it
+#                  does NOT fall back gracefully. langchain_core.runnables
+#                  resolves names through a lazy module __getattr__, so a
+#                  missing piece surfaces as a bare ImportError at first use:
+#                  "module 'langchain_core.runnables'.'base' not found
+#                  (No module named 'uuid_utils.compat')". The stub therefore
+#                  has to cover every submodule that is imported, not just the
+#                  top-level package.
 _create_termux_native_stubs() {
     local venv="$1"
     local python_cmd="$venv/bin/python3"
@@ -499,57 +385,172 @@ _create_termux_native_stubs() {
     }
 
     # uuid-utils stub --------------------------------------------------------
-    # langchain-core uses it for faster UUID generation; falls back to stdlib
-    # uuid on ImportError, so a pure-Python stub is fully compatible.
-    if [[ ! -d "$site_packages/uuid_utils" ]]; then
+    # Backed by stdlib `uuid`. Must provide the uuid_utils.compat submodule as
+    # well: langchain-core imports `uuid_utils.compat`, and a stub with only
+    # __init__.py made langchain_core.runnables fail to import entirely.
+    #
+    # `compat` is the real package's stdlib-compatible surface — it returns
+    # uuid.UUID instances rather than the Rust type — so a stdlib-backed stub
+    # matches its semantics exactly.
+    #
+    # Rewritten unconditionally when compat.py is absent, so a phone carrying
+    # the older incomplete stub is repaired instead of skipped by the
+    # directory-exists check.
+    if [[ ! -f "$site_packages/uuid_utils/compat.py" ]]; then
         mkdir -p "$site_packages/uuid_utils"
+        cat > "$site_packages/uuid_utils/_stub_impl.py" << 'PYEOF'
+"""Termux stub for uuid-utils (Rust extension, no Android/aarch64 wheel).
+
+Backed by the standard library. uuid1/3/4/5 and the NAMESPACE_* constants come
+straight from `uuid`; uuid6/7/8 do not exist in stdlib before 3.14, so they are
+provided here.
+"""
+import os as _os
+import time as _time
+from uuid import (  # noqa: F401
+    UUID,
+    NAMESPACE_DNS,
+    NAMESPACE_OID,
+    NAMESPACE_URL,
+    NAMESPACE_X500,
+    getnode,
+    uuid1,
+    uuid3,
+    uuid4,
+    uuid5,
+)
+
+try:  # Python 3.14+ ships these.
+    from uuid import uuid6, uuid7, uuid8  # noqa: F401
+except ImportError:
+    def uuid7() -> UUID:
+        """Time-ordered UUIDv7: 48-bit big-endian millisecond timestamp, then
+        random bits, with the version and variant fields set per RFC 9562."""
+        ms = int(_time.time() * 1000) & ((1 << 48) - 1)
+        rand = int.from_bytes(_os.urandom(10), "big")
+        value = (ms << 80) | (rand & ((1 << 80) - 1))
+        value &= ~(0xF << 76)          # clear version nibble
+        value |= 0x7 << 76             # version 7
+        value &= ~(0x3 << 62)          # clear variant bits
+        value |= 0x2 << 62             # RFC 4122 variant
+        return UUID(int=value)
+
+    def uuid6() -> UUID:
+        # Also time-ordered; uuid7 is a valid stand-in for a stub's purposes.
+        return uuid7()
+
+    def uuid8() -> UUID:
+        # v8 is "custom layout" by definition; random is a legitimate choice.
+        return uuid4()
+PYEOF
         cat > "$site_packages/uuid_utils/__init__.py" << 'PYEOF'
-# Termux stub: uuid-utils Rust extension cannot compile on Android/aarch64.
-from uuid import UUID, uuid1, uuid3, uuid4, uuid5
+from uuid_utils._stub_impl import *  # noqa: F401,F403
+from uuid_utils._stub_impl import (  # noqa: F401
+    UUID, getnode, uuid1, uuid3, uuid4, uuid5, uuid6, uuid7, uuid8,
+    NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500,
+)
+PYEOF
+        cat > "$site_packages/uuid_utils/compat.py" << 'PYEOF'
+# uuid_utils.compat — the real package's stdlib-compatible API, which returns
+# uuid.UUID instances. This stub is stdlib-backed, so it already matches.
+from uuid_utils._stub_impl import *  # noqa: F401,F403
+from uuid_utils._stub_impl import (  # noqa: F401
+    UUID, getnode, uuid1, uuid3, uuid4, uuid5, uuid6, uuid7, uuid8,
+    NAMESPACE_DNS, NAMESPACE_OID, NAMESPACE_URL, NAMESPACE_X500,
+)
 PYEOF
         _write_stub_distinfo "$site_packages" "uuid-utils" "0.14.1" "uuid_utils"
-        ok "uuid-utils stub created (pure Python, Termux-compatible)"
+        ok "uuid-utils stub created (stdlib-backed, includes uuid_utils.compat)"
     fi
 
     # ormsgpack stub ---------------------------------------------------------
-    # langgraph-checkpoint uses ormsgpack for checkpoint serialization.
-    # pickle provides consistent serialization within a session.
-    if [[ ! -d "$site_packages/ormsgpack" ]]; then
+    # langgraph-checkpoint uses ormsgpack for checkpoint serialization; pickle
+    # gives consistent serialization within a session.
+    #
+    # The OPT_* constants are the fragile part. An earlier version of this stub
+    # listed the ones that seemed to be in use, and langgraph then reached for
+    # one that was not there:
+    #
+    #   AttributeError: module 'ormsgpack' has no attribute
+    #                   'OPT_PASSTHROUGH_DATACLASS'
+    #
+    # Enumerating them is a losing game — any langgraph release can reference a
+    # new flag. A module-level __getattr__ now mints any unknown OPT_* on
+    # demand. That is safe precisely because packb ignores `option` entirely
+    # (it pickles), so the values only need to exist and be OR-able ints.
+    #
+    # Guarded on the marker file rather than on the directory: a phone carrying
+    # the older constant-listing stub has to be repaired, not skipped.
+    if [[ ! -f "$site_packages/ormsgpack/_gathm_stub_marker" ]]; then
         mkdir -p "$site_packages/ormsgpack"
         cat > "$site_packages/ormsgpack/__init__.py" << 'PYEOF'
 # Termux stub: ormsgpack Rust extension cannot compile on Android/aarch64.
 # Uses pickle for in-session checkpoint serialization.
+import itertools as _itertools
 import pickle as _pickle
 
-OPT_NON_STR_KEYS      = 1
-OPT_SERIALIZE_UUID     = 2
-OPT_OMIT_MICROSECONDS  = 4
-OPT_NAIVE_DATETIME     = 8
-OPT_UTC_Z              = 16
+# Known flags keep their documented bit positions, for anything that inspects
+# them. Values are otherwise irrelevant here: packb ignores `option`.
+OPT_NON_STR_KEYS           = 1
+OPT_SERIALIZE_UUID         = 2
+OPT_OMIT_MICROSECONDS      = 4
+OPT_NAIVE_DATETIME         = 8
+OPT_UTC_Z                  = 16
 OPT_PASSTHROUGH_DATETIME   = 32
 OPT_PASSTHROUGH_SUBCLASS   = 64
-OPT_INDENT_2           = 128
-OPT_SORT_KEYS          = 256
+OPT_INDENT_2               = 128
+OPT_SORT_KEYS              = 256
+OPT_PASSTHROUGH_BIG_INT    = 512
+OPT_PASSTHROUGH_DATACLASS  = 1024
+OPT_PASSTHROUGH_TUPLE      = 2048
+OPT_SERIALIZE_NUMPY        = 4096
+OPT_SERIALIZE_PYDANTIC     = 8192
+
+# Any OPT_* this stub has not heard of gets a fresh distinct bit on first
+# access, so a newer langgraph cannot break the import with an AttributeError.
+_next_bit = _itertools.count(14)   # first free bit above the constants above
+
+
+def __getattr__(name):
+    if name.startswith("OPT_"):
+        value = 1 << next(_next_bit)
+        globals()[name] = value
+        return value
+    raise AttributeError("module 'ormsgpack' has no attribute %r" % name)
+
 
 def packb(obj, *, option=None, default=None):
     return _pickle.dumps(obj, protocol=_pickle.HIGHEST_PROTOCOL)
 
+
 def unpackb(data, *, option=None):
     return _pickle.loads(data)
+
+
+class MsgpackEncodeError(TypeError):
+    pass
+
+
+class MsgpackDecodeError(ValueError):
+    pass
 PYEOF
+        : > "$site_packages/ormsgpack/_gathm_stub_marker"
         _write_stub_distinfo "$site_packages" "ormsgpack" "1.12.2" "ormsgpack"
-        ok "ormsgpack stub created (pure Python, Termux-compatible)"
+        ok "ormsgpack stub created (pickle-backed, tolerates unknown OPT_* flags)"
     fi
 
     # orjson stub ------------------------------------------------------------
     # langgraph-sdk requires orjson for JSON serialization.
     # stdlib json provides the same interface; orjson.dumps returns bytes so
     # we encode accordingly.
-    if [[ ! -d "$site_packages/orjson" ]]; then
+    # Same OPT_* fragility and the same marker-file guard as the ormsgpack stub
+    # above, for the same reason: an unknown flag must not raise AttributeError.
+    if [[ ! -f "$site_packages/orjson/_gathm_stub_marker" ]]; then
         mkdir -p "$site_packages/orjson"
         cat > "$site_packages/orjson/__init__.py" << 'PYEOF'
 # Termux stub: orjson Rust extension cannot compile on Android/aarch64.
 # Wraps stdlib json with the same bytes-oriented API.
+import itertools as _itertools
 import json as _json
 
 OPT_NON_STR_KEYS    = 1
@@ -564,8 +565,28 @@ OPT_PASSTHROUGH_DATETIME   = 256
 OPT_PASSTHROUGH_SUBCLASS   = 512
 OPT_OMIT_MICROSECONDS      = 1024
 OPT_SERIALIZE_DATACLASS    = 2048
+OPT_APPEND_NEWLINE         = 4096
+OPT_PASSTHROUGH_BIG_INT    = 8192
+
+# Mint any unknown OPT_* on demand rather than raising AttributeError. Only
+# OPT_INDENT_2 and OPT_SORT_KEYS change behaviour below, so an unrecognised
+# flag is harmless as long as it exists.
+_next_bit = _itertools.count(14)
+
+
+def __getattr__(name):
+    if name.startswith("OPT_"):
+        value = 1 << next(_next_bit)
+        globals()[name] = value
+        return value
+    raise AttributeError("module 'orjson' has no attribute %r" % name)
+
 
 class JSONDecodeError(ValueError):
+    pass
+
+
+class JSONEncodeError(TypeError):
     pass
 
 def dumps(obj, default=None, option=None) -> bytes:
@@ -582,8 +603,9 @@ def loads(data) -> object:
     except _json.JSONDecodeError as exc:
         raise JSONDecodeError(str(exc)) from exc
 PYEOF
+        : > "$site_packages/orjson/_gathm_stub_marker"
         _write_stub_distinfo "$site_packages" "orjson" "3.11.7" "orjson"
-        ok "orjson stub created (pure Python, Termux-compatible)"
+        ok "orjson stub created (json-backed, tolerates unknown OPT_* flags)"
     fi
 
     # zstandard stub ---------------------------------------------------------
@@ -661,19 +683,14 @@ PYEOF
         ok "zstandard stub created (Termux-compatible; trace compression disabled)"
     fi
 
-    # pydantic-core: force manylinux_2_17_aarch64 wheel -------------------
-    # pydantic v2 cannot function without pydantic-core (pure Rust, no Python
-    # fallback).  Termux Python's SOABI is "cpython-312" (no arch suffix), so
-    # pip never selects the pre-built aarch64 wheels and falls through to a
-    # maturin source build which always fails.
-    #
-    # Fix: (1) install pydantic (pure Python) with --no-deps to read its
-    # exact pydantic-core version requirement; (2) download the manylinux
-    # aarch64 wheel for that exact version; (3) extract the wheel and rename
-    # *.cpython-3XX-aarch64-linux-gnu.so → *.cpython-3XX.so so that Termux
-    # Python can dlopen it.
+    # pydantic-core: use an Android/Bionic wheel --------------------------
+    # pydantic v2 has no pure-Python fallback, and PyPI only publishes Linux
+    # (glibc/musl) wheels.  Install a matching Android-native pair before
+    # resolving Pilot's requirements so pip does not replace it with a Linux
+    # build or attempt a Rust source build.
     if ! "$python_cmd" -c "import pydantic_core" 2>/dev/null; then
-        _install_pydantic_core_termux "$venv" "$python_cmd" "$site_packages"
+        _termux_install_android_pydantic "$venv" "$python_cmd" || \
+            warn "Android-native pydantic-core install failed; Pilot dependencies may be unavailable"
     fi
 }
 
@@ -816,8 +833,7 @@ install_deps() {
     case "$platform" in
         termux)
             pkg update -y 2>/dev/null || true
-            # patchelf: used to adjust RPATHs of prebuilt .so files when needed.
-            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 patchelf 2>/dev/null || true
+            pkg install -y $core python rust pv dialog wget dnsutils iproute2 net-tools libxml2 2>/dev/null || true
             # pydantic-core is a Rust extension. PyPI only ships manylinux/musl
             # wheels (glibc/musl) which Android's Bionic linker cannot load at
             # all — so we MUST use Termux's own Bionic-native build. Installing
@@ -834,10 +850,6 @@ install_deps() {
             # Termux ships a prebuilt binding we use it; otherwise the venv gets
             # a pure-Python stub in _create_termux_native_stubs. (zstd = C lib.)
             pkg install -y zstd python-zstandard 2>/dev/null || true
-            # libgcc provides libgcc_s.so.1 which is required by manylinux aarch64 wheels
-            # compiled with GCC (e.g. pydantic-core). musllinux wheels are preferred but
-            # this ensures manylinux fallback wheels also load correctly.
-            pkg install -y libgcc 2>/dev/null || true
             pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
@@ -1162,13 +1174,57 @@ _detect_total_ram_mb() {
     return 1
 }
 
+# The Ollama models Gathm will use on Termux.
+#
+# Android inference is pure CPU, thermal throttling starts within a minute, and
+# the low-memory killer reaps the Ollama server mid-response — so the desktop
+# RAM tiers below are far too generous here. Termux gets its own two-step
+# ladder: gemma3:1b everywhere, and gemma3:4b only on a genuinely large phone.
+GATHM_TERMUX_MODEL_SMALL="gemma3:1b"
+GATHM_TERMUX_MODEL_LARGE="gemma3:4b"
+
+# RAM floor for the 4b model, in MB. Deliberately 11000 and not 12288: MemTotal
+# reports what the kernel can allocate, not the marketed capacity, so a phone
+# sold as 12 GB reads back around 11.0-11.7 GB once firmware and kernel
+# reservations are taken out. Comparing against a strict 12288 would never match
+# a 12 GB device. 11000 still sits well clear of an 8 GB phone (~7.2-7.6 GB) and
+# a 10 GB one (~9.3 GB).
+GATHM_TERMUX_LARGE_MIN_RAM_MB="${GATHM_TERMUX_LARGE_MIN_RAM_MB:-11000}"
+
+# Echo the Termux model appropriate to this phone's RAM.
+# Unknown RAM deliberately falls to the small model — on a phone the cost of
+# guessing high is an unusable install, and guessing low is a smaller download.
+_termux_model_for_ram() {
+    local ram_mb
+    ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] \
+            && (( ram_mb >= GATHM_TERMUX_LARGE_MIN_RAM_MB )); then
+        echo "$GATHM_TERMUX_MODEL_LARGE"
+    else
+        echo "$GATHM_TERMUX_MODEL_SMALL"
+    fi
+}
+
+# True when this phone qualifies for the larger Termux model.
+_termux_wants_large_model() {
+    [[ "$(_termux_model_for_ram)" == "$GATHM_TERMUX_MODEL_LARGE" ]]
+}
+
 # Pick an Ollama model tag based on system RAM.
 # Conservative tiers — assumes pure CPU inference and leaves headroom
 # for the OS.  Override at any time by writing $HOME/.gathm/model or
 # setting GATHM_OLLAMA_MODEL in the env before running ./install.
 _recommend_model_for_hardware() {
+    # Termux uses its own ladder, not these tiers — see above.
+    if _is_termux; then
+        _termux_model_for_ram
+        return 0
+    fi
+
     local ram_mb
-    ram_mb=$(_detect_total_ram_mb)
+    # `|| true`: the detector returns non-zero when it cannot tell, and under
+    # `set -e` a bare assignment from it would abort the installer.
+    ram_mb=$(_detect_total_ram_mb) || true
     if   (( ram_mb < 1 ));     then echo "gemma3:4b"      # detection failed
     elif (( ram_mb < 4096 ));  then echo "gemma3:1b"      # phone / small VM
     elif (( ram_mb < 8192 ));  then echo "gemma3:4b"      # ≤8 GB
@@ -1230,6 +1286,38 @@ _largest_model_that_fits() {
     echo ""; return 1
 }
 
+# Run `ollama pull` with its download progress visible.
+#
+# ollama writes its progress bar to STDERR, so the previous `2>/dev/null` threw
+# away the only feedback a multi-hundred-MB download produces. The install just
+# sat there for minutes looking hung — which is exactly what it looked like.
+#
+# Deliberately NOT wrapped in run_with_spinner: that captures output to a file
+# and shows only the last line, which mangles a \r-driven progress bar. Run it
+# in the foreground and unredirected instead, the same way install_ollama keeps
+# the official installer in the foreground. ollama draws a real bar (percent,
+# size, rate, ETA) when stderr is a TTY and falls back to periodic plain lines
+# when it is not, so piped installs stay readable too.
+_ollama_pull_with_progress() {
+    local model="$1"
+    local est_mb; est_mb=$(_model_size_mb "$model")
+
+    info "Pulling ${BOLD}${model}${RESET} — roughly ${est_mb} MB."
+    info "Live progress from ollama follows. This is a download, not a hang."
+    echo ""
+
+    local t0=$SECONDS rc=0
+    ollama pull "$model" || rc=$?
+    echo ""
+
+    if (( rc == 0 )); then
+        ok "Pulled $model in $(_format_elapsed $(( SECONDS - t0 )))"
+        return 0
+    fi
+    warn "ollama pull $model failed after $(_format_elapsed $(( SECONDS - t0 ))) (exit $rc)"
+    return "$rc"
+}
+
 # Pull the best ollama model.
 #   $1 (optional) — preferred model tag (e.g. "llama3.1:8b")
 #
@@ -1238,7 +1326,8 @@ _largest_model_that_fits() {
 #   2. If $1 is set but not yet pulled → attempt download.
 #   3. On download failure (or no $1 given) → scan `ollama list` for anything
 #      already present and pick the best match from a priority list.
-#   4. If nothing is pulled at all → pull gemma3:4b as the minimal default.
+#   4. If nothing is pulled at all → pull the minimal default (gemma3:4b,
+#      or GATHM_TERMUX_MODEL on Termux).
 _pull_ollama_model() {
     local requested_model="${1:-}"
 
@@ -1258,8 +1347,7 @@ _pull_ollama_model() {
             _save_model_config "$requested_model"
             return 0
         fi
-        info "Pulling model: $requested_model (this may take a few minutes)..."
-        if ollama pull "$requested_model" 2>/dev/null; then
+        if _ollama_pull_with_progress "$requested_model"; then
             _save_model_config "$requested_model"
             return 0
         fi
@@ -1267,6 +1355,29 @@ _pull_ollama_model() {
     fi
 
     # ── 3. Pick the best model from what is already on disk ───────────
+    # The priority list below leads with llama3.x, so without this filter a
+    # phone that still has an 8b model from an older install would "fall back"
+    # to the very thing that gets OOM-killed mid-response. What counts as
+    # acceptable tracks the same RAM rule as a fresh pull: 4b only on a large
+    # phone, 1b-class otherwise.
+    if [[ -n "$pulled_models" ]] && _is_termux; then
+        local ok_sizes=':(0\.5b|1b|1\.5b|2b)$'
+        if _termux_wants_large_model; then
+            ok_sizes=':(0\.5b|1b|1\.5b|2b|3b|4b)$'
+        fi
+        local small_models
+        small_models=$(echo "$pulled_models" | grep -iE "$ok_sizes" || true)
+        if [[ -n "$small_models" ]]; then
+            local small_match
+            small_match=$(echo "$small_models" | head -1)
+            ok "Using already-pulled model: $small_match"
+            _save_model_config "$small_match"
+            return 0
+        fi
+        warn "Already-pulled models are all too large for this phone — ignoring them"
+        pulled_models=""
+    fi
+
     if [[ -n "$pulled_models" ]]; then
         local preferred=(
             "llama3.3" "llama3.2" "llama3.1" "llama3"
@@ -1295,22 +1406,27 @@ _pull_ollama_model() {
         fi
     fi
 
-    # ── 4. Nothing available — pull gemma3:4b as the minimal default ──
-    info "No local models found. Pulling gemma3:4b as default (this may take a few minutes)..."
-    if ollama pull "gemma3:4b" 2>/dev/null; then
-        ok "Default model gemma3:4b ready"
-        _save_model_config "gemma3:4b"
+    # ── 4. Nothing available — pull the minimal default ──
+    # Termux picks by RAM; gemma3:4b is the desktop default.
+    local default_model="gemma3:4b"
+    if _is_termux; then
+        default_model=$(_termux_model_for_ram)
+    fi
+    info "No local models found — falling back to the default model."
+    if _ollama_pull_with_progress "$default_model"; then
+        _save_model_config "$default_model"
     else
-        warn "Could not pull gemma3:4b — run manually: ollama pull gemma3:4b"
-        _save_model_config "gemma3:4b"
+        warn "Could not pull $default_model — run manually: ollama pull $default_model"
+        _save_model_config "$default_model"
     fi
 }
 
 # --- Pick a local model and pull it ---
 # Selection priority (highest wins):
 #   1. GATHM_OLLAMA_MODEL env var (explicit override)
-#   2. $HOME/.gathm/model        (sticky choice from a previous run)
-#   3. _recommend_model_for_hardware (RAM-tier heuristic)
+#   2. Termux RAM ladder         (1b, or 4b only on an 11 GB+ phone)
+#   3. $HOME/.gathm/model        (sticky choice from a previous run)
+#   4. _recommend_model_for_hardware (RAM-tier heuristic)
 select_and_pull_llm_model() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
         warn "Offline — checking for already-pulled local models"
@@ -1327,8 +1443,24 @@ select_and_pull_llm_model() {
     local recommended=""
 
     if [[ -n "${GATHM_OLLAMA_MODEL:-}" ]]; then
+        # An explicit env override is a deliberate choice; honour it everywhere.
         recommended="$GATHM_OLLAMA_MODEL"
         info "Using model from GATHM_OLLAMA_MODEL: $recommended"
+    elif _is_termux; then
+        # Chosen here, deliberately ahead of the saved-model check: an install
+        # from before this rule existed may have left a 4b/8b tag in
+        # ~/.gathm/model, and reusing that is the thing we are preventing.
+        recommended=$(_termux_model_for_ram)
+        local _ram_mb; _ram_mb=$(_detect_total_ram_mb) || true
+        # State the decision and its inputs out loud: when this picks the
+        # "wrong" model, the RAM reading is the first thing worth seeing.
+        info "Termux: ${_ram_mb:-?} MB RAM (4b needs ${GATHM_TERMUX_LARGE_MIN_RAM_MB}+) → $recommended"
+        local _prev=""
+        [[ -s "$HOME/.gathm/model" ]] && \
+            _prev=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
+        if [[ -n "$_prev" && "$_prev" != "$recommended" ]]; then
+            warn "Replacing previously-selected '$_prev' with $recommended"
+        fi
     elif [[ -s "$HOME/.gathm/model" ]]; then
         recommended=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
         [[ -n "$recommended" ]] && info "Using previously-selected model: $recommended"
@@ -1473,6 +1605,9 @@ install_pilot_deps() {
         local tmp_req
         tmp_req=$(mktemp)
         grep -vE "^playwright" "$req_file" > "$tmp_req"
+        # Keep pip from upgrading the Android-native pair selected above to a
+        # newer PyPI Pydantic release whose core wheel is Linux-only.
+        printf '\npydantic==2.12.5\n' >> "$tmp_req"
         if _venv_pip -r "$tmp_req"; then
             ok "Pilot dependencies installed (playwright skipped on Termux)"
         else
@@ -1480,37 +1615,28 @@ install_pilot_deps() {
         fi
         rm -f "$tmp_req"
 
-        # pip may have overwritten SOABI-patched pydantic-core .so files
-        # during dependency resolution, replacing our SOABI-patched copy with a
-        # manylinux/musllinux wheel. Those are glibc/musl binaries that Android's
-        # Bionic linker CANNOT load (it reports the bundled glibc libgcc_s as
-        # "not found"), so the only reliable fix on Termux is the native build.
+        # pydantic-core must be a Bionic-native build.  PyPI's manylinux and
+        # musllinux wheels cannot be repaired by copying their libgcc payload:
+        # they target different C libraries from Android's linker.
         if ! "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
             warn "pydantic-core not loading — switching to Termux-native build..."
             if _termux_use_native_pydantic_core; then
                 ok "pydantic-core now loads (Termux-native build)"
             else
-                # Fallback for environments without the Termux package: try to
-                # make the manylinux wheel's bundled libgcc loadable. This only
-                # works if the wheel can load on Bionic at all.
-                warn "Termux-native pydantic unavailable — trying wheel + libgcc staging..."
-                local _pc_sp
-                _pc_sp=$("$GATHM_VENV/bin/python3" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-                [[ -n "$_pc_sp" ]] && _install_pydantic_core_termux "$GATHM_VENV" "$GATHM_VENV/bin/python3" "$_pc_sp"
-                _termux_stage_bundled_libs "$GATHM_VENV"
-                local _pcso2
-                _pcso2=$(find "$GATHM_VENV" -name "_pydantic_core*.so" -type f 2>/dev/null | head -1)
-                [[ -n "$_pcso2" ]] && _termux_patch_rpath "$_pcso2"
-                if "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>/dev/null; then
-                    ok "pydantic-core now loads"
+                warn "Termux-native pydantic unavailable — installing Android wheel..."
+                _termux_install_android_pydantic "$GATHM_VENV" "$GATHM_VENV/bin/python3" || true
+                if "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null; then
+                    ok "pydantic-core now loads (Android-native wheel)"
                 else
-                    warn "pydantic-core STILL failing to load its native library:"
+                    warn "pydantic-core still cannot load:"
                     "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
-                    warn "Fix manually: pkg install python-pydantic python-pydantic-core"
+                    warn "Fix manually: pip install --index-url https://termux-user-repository.github.io/pypi/ --only-binary=:all: --no-deps pydantic-core==2.41.5"
                 fi
             fi
-        else
+        elif "$GATHM_VENV/bin/python3" -c "import pydantic, pydantic_core" 2>/dev/null; then
             ok "pydantic-core loads"
+        else
+            warn "pydantic is incomplete after dependency installation"
         fi
 
         # selenium drives the system Chromium on Termux (pure Python, works on aarch64)
@@ -1613,6 +1739,1169 @@ install_playwright_browser() {
     fi
 }
 
+# ── audio.cpp — native speech runtime (lets Pilot talk) ──────────────────
+#
+# audio.cpp is a C++/ggml audio runtime (TTS + ASR):
+#   https://github.com/0xShug0/audio.cpp
+#
+# Why a native build instead of a Python TTS stack:
+#   On Termux there is no working Python option. The usual speech wheels are
+#   either glibc-only native builds that Android's Bionic linker refuses to
+#   load — the same class of breakage we already fight with pydantic-core,
+#   see _termux_use_native_pydantic_core — or Rust extensions with no
+#   aarch64 wheel at all. audio.cpp compiles on-device with clang and needs
+#   no Python at runtime, so the Termux voice path adds ZERO pip packages.
+#   Do not "fix" a failure here by pip-installing pydantic-core or a Python
+#   TTS library; that is the exact trap this path exists to avoid.
+#
+#   This is Termux-only on purpose. Every other platform is left exactly as it
+#   was, keeping whatever Python/audio dependencies it already uses — nothing
+#   here runs off Termux.
+#
+# The Termux flow, which is the one verified on-device:
+#   pkg build deps
+#        ↓
+#   clone/update audio.cpp
+#        ↓
+#   patch vendored sentencepiece (-U__ANDROID__, or the build fails)
+#        ↓
+#   CMake CPU-only build of the audiocpp_cli target
+#        ↓
+#   ~/.local/bin/audiocpp_cli   (+ ~/.gathm/audiocpp_path for Pilot)
+#        ↓
+#   voice model weights — a separate download, reported not forced
+#
+# Environment knobs (all optional):
+#   GATHM_INSTALL_AUDIO_CPP=0      skip the build (fast install, no voice)
+#   GATHM_AUDIOCPP_SRC=DIR         clone/build location
+#   GATHM_AUDIOCPP_MODEL_SET=SET   full | core | custom   (default: custom)
+#   GATHM_AUDIOCPP_MODELS=a,b,c    families to compile when MODEL_SET=custom
+#   GATHM_AUDIOCPP_JOBS=N          compile parallelism
+#   GATHM_AUDIOCPP_FORCE=1         rebuild even if audiocpp_cli already exists
+AUDIOCPP_REPO="https://github.com/0xShug0/audio.cpp.git"
+
+# Speech-only default. Upstream defaults to AUDIOCPP_MODEL_SET=full, which
+# compiles every model family it ships (music generation, voice conversion,
+# separation, …). Pilot only needs to speak, and on a phone that difference is
+# the difference between a build that finishes and one that does not.
+#
+# pocket_tts specifically: this is the configuration that has actually been
+# built and verified on Termux. Add families here via GATHM_AUDIOCPP_MODELS —
+# each one costs build time.
+#
+# sense_asr is the listening half: SenseVoice-Small, ~250 MB at q8_0, 23
+# languages, offline. The Qwen3 ASR models are the obvious alternative and are
+# 3-7x larger (0.6B ≈ 700 MB, 1.7B ≈ 1.8 GB) for nothing Gathm needs, which is
+# a bad trade on a phone that is already hosting the LLM.
+AUDIOCPP_DEFAULT_MODELS="pocket_tts,sense_asr"
+
+# The voice weights, and how the CLI is invoked to use them. These are the
+# values verified end-to-end on-device:
+#
+#   audiocpp_cli --task tts --family pocket_tts \
+#       --model models/PocketTTS-GGUF/english --backend cpu \
+#       --voice-id alba --text "..." --out hello.wav
+#
+# All four values come from upstream's model_specs/pocket_tts.json:
+# pocket_tts_english_q8_0 is the family's default package, its target
+# directory is PocketTTS-GGUF/english, and `alba` is the declared default
+# voice. That package ships the .gguf *plus* embeddings/alba.safetensors —
+# which is exactly why the weights must come from the model manager and not a
+# hand-picked .gguf: without the embedding the model loads and has no voice.
+#
+# Voice cloning uses --voice-ref <wav> in place of --voice-id.
+#
+# Overriding the package: the spec also offers bf16, and german/italian/
+# portuguese/spanish variants — but those language packages ship a model file
+# only, with no voice embedding, so --voice-id alba will not resolve against
+# them. pocket_tts_english_safetensors carries 26 voices (alba..vera) if you
+# want a choice of voice later.
+AUDIOCPP_TTS_PACKAGE="${GATHM_AUDIOCPP_TTS_PACKAGE:-pocket_tts_english_q8_0}"
+AUDIOCPP_TTS_FAMILY="pocket_tts"
+AUDIOCPP_TTS_VOICE="${GATHM_AUDIOCPP_TTS_VOICE:-alba}"
+# Where model_manager_v2.py lands the default package, relative to the source
+# tree. Only a hint — _audiocpp_model_dir falls back to locating the .gguf, so
+# an overridden package in a different target directory still resolves.
+AUDIOCPP_TTS_MODEL_REL="models/PocketTTS-GGUF/english"
+
+# The transcription weights. sensevoice_small_q8 is the sense_asr family's
+# default package in upstream's model_specs/sense_asr.json; it lands in
+# SenseVoice-Small-GGUF and covers 23 languages with auto-detection, offline
+# and streaming. Invoked as:
+#
+#   audiocpp_cli --task asr --family sense_asr \
+#       --model models/SenseVoice-Small-GGUF --backend cpu --audio clip.wav
+AUDIOCPP_ASR_PACKAGE="${GATHM_AUDIOCPP_ASR_PACKAGE:-sensevoice_small_q8}"
+AUDIOCPP_ASR_FAMILY="${GATHM_AUDIOCPP_ASR_FAMILY:-sense_asr}"
+AUDIOCPP_ASR_MODEL_REL="models/SenseVoice-Small-GGUF"
+
+# Set by the TTS smoke test so the ASR smoke test can transcribe it back —
+# turning two separate "it ran" checks into one real round trip.
+_AUDIOCPP_SMOKE_WAV=""
+
+# Compiling audio.cpp costs 20-60 minutes on a phone, so a binary that already
+# works is worth keeping. The cache lives outside ~/.gathm on purpose: uninstall
+# removes that directory, and a reinstall should not mean another hour of clang.
+# Delete it by hand (or with --purge-audio-cache) to force a rebuild.
+AUDIOCPP_CACHE_DIR="${GATHM_AUDIOCPP_CACHE:-$HOME/.cache/gathm/audiocpp}"
+
+# A prebuilt binary can also come from elsewhere entirely: build once, publish
+# it (e.g. as a GitHub release asset), then point every other device at it.
+#   GATHM_AUDIOCPP_BIN_URL=https://…/audiocpp_cli-aarch64
+#   GATHM_AUDIOCPP_BIN_SHA256=<sha256>   (optional but recommended)
+AUDIOCPP_BIN_URL="${GATHM_AUDIOCPP_BIN_URL:-}"
+AUDIOCPP_BIN_SHA256="${GATHM_AUDIOCPP_BIN_SHA256:-}"
+
+# True on Termux/Android. Prefers the platform detected by main(), falling
+# back to detection so this is also correct when called from `--check`.
+_is_termux() {
+    local p="${_GATHM_PLATFORM:-}"
+    [[ -z "$p" ]] && p=$(detect_platform)
+    [[ "$p" == "termux" ]]
+}
+
+# Where audio.cpp is checked out and built.
+# Defaults under ~/.gathm so uninstall knows where to look, but an existing
+# ~/audio.cpp checkout (how this was first done by hand) is reused as-is so
+# nobody re-clones a tree they already have.
+_audiocpp_src_dir() {
+    if [[ -n "${GATHM_AUDIOCPP_SRC:-}" ]]; then
+        echo "$GATHM_AUDIOCPP_SRC"
+    elif [[ -d "$HOME/audio.cpp/.git" ]]; then
+        echo "$HOME/audio.cpp"
+    else
+        echo "$HOME/.gathm/audio.cpp"
+    fi
+}
+
+# Echo a usable audiocpp_cli path, preferring the copy Gathm controls.
+# Returns 1 (and echoes nothing) when there is no binary anywhere.
+_audiocpp_bin() {
+    if [[ -x "$LOCAL_BIN/audiocpp_cli" ]]; then
+        echo "$LOCAL_BIN/audiocpp_cli"; return 0
+    fi
+    if command -v audiocpp_cli &>/dev/null; then
+        command -v audiocpp_cli; return 0
+    fi
+    local built; built="$(_audiocpp_src_dir)/build/bin/audiocpp_cli"
+    if [[ -x "$built" ]]; then
+        echo "$built"; return 0
+    fi
+    echo ""
+    return 1
+}
+
+# Compile parallelism. `nproc` alone is the wrong answer on a phone: ggml's
+# translation units are large, and 8 concurrent clang processes on a 4 GB
+# device get OOM-killed partway through — which surfaces as a random,
+# confusing build failure. Budget ~1.5 GB per job and never exceed the core
+# count.
+_audiocpp_jobs() {
+    if [[ -n "${GATHM_AUDIOCPP_JOBS:-}" ]]; then
+        echo "$GATHM_AUDIOCPP_JOBS"; return 0
+    fi
+
+    local cores jobs ram_mb by_ram
+    cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+    [[ "$cores" =~ ^[0-9]+$ ]] || cores=2
+    jobs="$cores"
+
+    # `|| true`: the detector returns non-zero when it cannot tell, and under
+    # `set -e` a bare assignment from it would abort the whole installer.
+    ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] && (( ram_mb > 0 )); then
+        by_ram=$(( ram_mb / 1500 ))
+        if (( by_ram < 1 )); then by_ram=1; fi
+        if (( by_ram < jobs )); then jobs="$by_ram"; fi
+    fi
+
+    if (( jobs < 1 )); then jobs=1; fi
+    echo "$jobs"
+}
+
+# Termux toolchain needed to compile audio.cpp (C11/C++17, CMake 3.20+).
+_audiocpp_install_build_deps() {
+    info "Installing audio.cpp build dependencies..."
+    # coreutils supplies `timeout`, used to prevent a stalled Git HTTPS
+    # connection from holding the entire installer forever.
+    pkg install -y git cmake ninja clang make pkg-config coreutils 2>/dev/null || true
+    # Upstream builds with OpenMP ON by default. Termux ships libomp in its own
+    # `openmp` package rather than inside clang, so without this the configure
+    # step fails on an otherwise fine toolchain.
+    pkg install -y openmp 2>/dev/null || true
+}
+
+# Synthesis is only half of speaking — something has to play the WAV, and
+# Android ships no CLI audio player at all. Without one, Pilot renders perfect
+# audio to a temp file and stays silent.
+AUDIOCPP_PLAYERS="termux-media-player mpv ffplay play paplay aplay"
+
+# Echo the first usable playback command, or nothing.
+_audiocpp_player() {
+    local p
+    for p in $AUDIOCPP_PLAYERS; do
+        if command -v "$p" &>/dev/null; then echo "$p"; return 0; fi
+    done
+    return 1
+}
+
+# Make sure a player exists. mpv is the one that reliably outputs audio on
+# Termux (termux-media-player also works but needs the separate Termux:API app
+# from F-Droid, which an installer cannot do on the user's behalf).
+_audiocpp_install_player() {
+    local existing; existing=$(_audiocpp_player) || true
+    if [[ -n "$existing" ]]; then
+        ok "Audio player present ($existing)"
+        return 0
+    fi
+    info "Installing an audio player so replies can be heard..."
+    pkg install -y mpv 2>/dev/null || true
+    existing=$(_audiocpp_player) || true
+    if [[ -n "$existing" ]]; then
+        ok "Audio player installed ($existing)"
+        return 0
+    fi
+    warn "No audio player found — speech will be synthesized but not played"
+    note_missing "audio player for speech playback" "pkg install mpv"
+    return 1
+}
+
+# Run an audio.cpp Git operation with a finite wall-clock deadline.  Android
+# can keep an HTTPS socket half-open indefinitely after a network hand-off;
+# Git then prints only "Cloning into ..." while the spinner runs forever.
+# GIT_TERMINAL_PROMPT=0 also turns an unexpected credential prompt into a
+# normal failure instead of an invisible hang behind the spinner.
+_audiocpp_git() {
+    local limit="${GATHM_AUDIOCPP_GIT_TIMEOUT:-900}"
+    [[ "$limit" =~ ^[0-9]+$ ]] && (( limit > 0 )) || limit=900
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$limit" env GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
+    else
+        env GIT_TERMINAL_PROMPT=0 \
+            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
+    fi
+}
+
+# Clone audio.cpp, or update an existing checkout.
+_audiocpp_clone_or_update() {
+    local src="$1"
+
+    if [[ -d "$src/.git" ]]; then
+        info "Updating audio.cpp checkout ($src)..."
+        # --ff-only, never a hard reset: a local checkout may carry the user's
+        # own patches. A failed update is not fatal — whatever is already
+        # checked out still builds.
+        run_with_spinner "git pull (audio.cpp)" -- \
+            _audiocpp_git -C "$src" pull --ff-only --recurse-submodules \
+            || warn "Could not update audio.cpp — building the existing checkout"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$src")" 2>/dev/null || true
+    info "Cloning audio.cpp into $src ..."
+    # Shallow, including submodules: ggml is a submodule and the full history
+    # of both is a large download for a build we only ever do once.
+    if run_with_spinner "git clone audio.cpp" -- \
+            _audiocpp_git clone --depth 1 --recurse-submodules --shallow-submodules \
+                "$AUDIOCPP_REPO" "$src"; then
+        return 0
+    fi
+
+    warn "git clone failed or timed out (audio.cpp; default limit: 15 min)"
+    warn "Set GATHM_AUDIOCPP_GIT_TIMEOUT=1800 to allow a 30-minute download"
+    return 1
+}
+
+# Termux-only source patch: make sentencepiece link on Android.
+#
+# audio.cpp vendors sentencepiece, which switches to an Android code path when
+# __ANDROID__ is defined and logs through Android's liblog. Termux is Android
+# by that definition but is a full POSIX userland, not the NDK, and nothing
+# here links liblog — so everything compiles fine and then the final link of
+# audiocpp_cli dies with:
+#
+#   ld.lld: error: undefined symbol: __android_log_write
+#
+# Undefining __ANDROID__ for that one target sends it down the ordinary POSIX
+# path, which is the correct one on Termux, and the symbol never appears.
+#
+# Idempotent: a second run finds the line already present and does nothing.
+# Sets _AUDIOCPP_FRESH_CONFIGURE=1 when it actually changes the file, because
+# CMake's cache has to be discarded after the compile options change.
+_AUDIOCPP_FRESH_CONFIGURE=0
+_audiocpp_patch_termux_sentencepiece() {
+    local src="$1"
+    local spm="$src/external/sentencepiece/src/CMakeLists.txt"
+    local line="target_compile_options(sentencepiece-static PRIVATE -U__ANDROID__)"
+
+    if [[ ! -f "$spm" ]]; then
+        # Upstream moved or vendored it differently — not fatal, the build
+        # either doesn't need the patch anymore or will say so plainly.
+        warn "sentencepiece CMakeLists not found (looked in $spm) — skipping Android patch"
+        return 0
+    fi
+
+    if grep -qF -- "$line" "$spm" 2>/dev/null; then
+        ok "sentencepiece already patched for Termux (-U__ANDROID__)"
+        return 0
+    fi
+
+    local tmp
+    tmp=$(mktemp 2>/dev/null) || tmp="$spm.gathm.tmp"
+    # Insert immediately after the target is declared. Matching only up to
+    # "STATIC" keeps this free of brace/dollar escaping for ${SPM_SRCS}.
+    if awk -v ins="$line" '
+            { print }
+            /add_library\(sentencepiece-static STATIC/ { print ins }
+        ' "$spm" > "$tmp" 2>/dev/null \
+            && grep -qF -- "$line" "$tmp" 2>/dev/null \
+            && mv "$tmp" "$spm" 2>/dev/null; then
+        ok "Patched sentencepiece for Termux (-U__ANDROID__ on sentencepiece-static)"
+        _AUDIOCPP_FRESH_CONFIGURE=1
+        return 0
+    fi
+
+    rm -f "$tmp" 2>/dev/null || true
+    warn "Could not patch sentencepiece — the build may fail in sentencepiece-static."
+    warn "Apply manually, then re-run:"
+    warn "  echo '$line' >> $spm"
+    return 0
+}
+
+# Cache key: the machine type plus the families compiled in. A binary built for
+# pocket_tts alone cannot serve a config that also expects sense_asr, and an
+# aarch64 build is useless on anything else, so both belong in the name.
+_audiocpp_cache_file() {
+    local arch models
+    arch=$(uname -m 2>/dev/null || echo unknown)
+    models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+    models="${models//,/-}"
+    echo "$AUDIOCPP_CACHE_DIR/audiocpp_cli-${arch}-${models}"
+}
+
+# Ask the binary what loaders it has — from inside the checkout when there is
+# one. audiocpp_cli resolves model_specs/<family>.json relative to the working
+# directory, so run from anywhere else it reports
+# "model contract spec not found for family 'sense_asr'" and --list-loaders
+# fails outright, which is how a perfectly good ASR build looked missing.
+_audiocpp_list_loaders() {
+    local bin="$1" src
+    [[ -n "$bin" ]] || return 1
+    src=$(_audiocpp_src_dir)
+    if [[ -d "$src/model_specs" ]]; then
+        ( cd "$src" 2>/dev/null && "$bin" --list-loaders 2>/dev/null )
+    else
+        "$bin" --list-loaders 2>/dev/null
+    fi
+}
+
+# Does this binary have every family the current config asks for? The cache key
+# records the requested families, so caching a binary that lacks one would
+# mislabel it — and a later restore would hand back something that cannot do
+# what the key promises. Checking the binary itself is the only honest test.
+_audiocpp_binary_has_families() {
+    local bin="$1" models loaders fam
+    models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+    loaders=$(_audiocpp_list_loaders "$bin") || return 1
+    [[ -n "$loaders" ]] || return 1
+    local -a fams=()
+    IFS=',' read -ra fams <<< "$models"
+    for fam in "${fams[@]+"${fams[@]}"}"; do
+        fam="${fam// /}"
+        [[ -n "$fam" ]] || continue
+        grep -qi -- "$fam" <<< "$loaders" || return 1
+    done
+    return 0
+}
+
+# Does this binary run, and does it have the loaders we expect?
+_audiocpp_binary_usable() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 1
+    _audiocpp_list_loaders "$bin" >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1 || return 1
+    _audiocpp_list_loaders "$bin" | grep -qi "$AUDIOCPP_TTS_FAMILY" || return 1
+    _audiocpp_binary_has_families "$bin"
+}
+
+# Keep a copy of a good build for next time.
+_audiocpp_cache_save() {
+    local bin="$1" target
+    # Never cache a binary that does not match the key we would file it under.
+    # An install predating sense_asr has a pocket_tts-only binary, and the
+    # default family list now names both — caching it would poison the cache.
+    if ! _audiocpp_binary_has_families "$bin"; then
+        return 0
+    fi
+    target=$(_audiocpp_cache_file)
+    mkdir -p "$AUDIOCPP_CACHE_DIR" 2>/dev/null || return 0
+    if cp "$bin" "$target.tmp" 2>/dev/null && mv "$target.tmp" "$target" 2>/dev/null; then
+        chmod +x "$target" 2>/dev/null || true
+        ok "Cached this build for future installs ($target)"
+    else
+        rm -f "$target.tmp" 2>/dev/null || true
+    fi
+}
+
+# Reuse a cached build instead of compiling, when one matches and still runs.
+_audiocpp_cache_restore() {
+    local cached; cached=$(_audiocpp_cache_file)
+    [[ -f "$cached" ]] || return 1
+    chmod +x "$cached" 2>/dev/null || true
+    if ! _audiocpp_binary_usable "$cached"; then
+        warn "Cached binary at $cached will not run — rebuilding"
+        return 1
+    fi
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+    if cp "$cached" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
+        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+        ok "Reused the cached audio.cpp build — no compile needed"
+        return 0
+    fi
+    return 1
+}
+
+# Fetch a prebuilt binary. This is the way to skip compiling on every device:
+# build once, publish, then set GATHM_AUDIOCPP_BIN_URL everywhere else.
+_audiocpp_fetch_prebuilt() {
+    [[ -n "$AUDIOCPP_BIN_URL" ]] || return 1
+    local tmp="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; tmp="${tmp:-/tmp}"
+    local out="$tmp/audiocpp_cli.download.$$"
+    rm -f "$out" 2>/dev/null || true
+
+    info "Downloading prebuilt audiocpp_cli from $AUDIOCPP_BIN_URL"
+    if ! run_with_spinner "downloading audiocpp_cli" -- \
+            curl -fL --connect-timeout 20 --retry 2 -o "$out" "$AUDIOCPP_BIN_URL"; then
+        warn "Download failed — falling back to building from source"
+        rm -f "$out" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ -n "$AUDIOCPP_BIN_SHA256" ]]; then
+        local got=""
+        if command -v sha256sum &>/dev/null; then
+            got=$(sha256sum "$out" 2>/dev/null | awk '{print $1}')
+        elif command -v shasum &>/dev/null; then
+            got=$(shasum -a 256 "$out" 2>/dev/null | awk '{print $1}')
+        fi
+        if [[ -z "$got" ]]; then
+            warn "No sha256 tool available — cannot verify the download"
+        elif [[ "$got" != "$AUDIOCPP_BIN_SHA256" ]]; then
+            # warn, not step_fail: the step has not failed, it falls back to
+            # building from source. step_fail would also mark the step failed
+            # and then be contradicted by a successful build.
+            warn "Checksum mismatch on the downloaded binary — refusing to install it"
+            warn "  expected $AUDIOCPP_BIN_SHA256"
+            warn "  got      $got"
+            note_missing "prebuilt audiocpp_cli (checksum mismatch)" \
+                "check GATHM_AUDIOCPP_BIN_URL and GATHM_AUDIOCPP_BIN_SHA256"
+            rm -f "$out" 2>/dev/null || true
+            return 1
+        else
+            ok "Checksum verified"
+        fi
+    fi
+
+    chmod +x "$out" 2>/dev/null || true
+    if ! _audiocpp_binary_usable "$out"; then
+        warn "The downloaded binary does not run here (wrong architecture or"
+        warn "built without the $AUDIOCPP_TTS_FAMILY loader) — building instead"
+        rm -f "$out" 2>/dev/null || true
+        return 1
+    fi
+
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+    if cp "$out" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
+        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+        _audiocpp_cache_save "$LOCAL_BIN/audiocpp_cli"
+        rm -f "$out" 2>/dev/null || true
+        ok "Installed the prebuilt audiocpp_cli — no compile needed"
+        return 0
+    fi
+    rm -f "$out" 2>/dev/null || true
+    return 1
+}
+
+# Configure + compile the audiocpp_cli target. CPU only, twice if needed.
+_audiocpp_cmake_build() {
+    local src="$1"
+    local build_dir="$src/build"
+    local jobs; jobs=$(_audiocpp_jobs)
+
+    local model_set="${GATHM_AUDIOCPP_MODEL_SET:-custom}"
+    local models="${GATHM_AUDIOCPP_MODELS:-$AUDIOCPP_DEFAULT_MODELS}"
+
+    # CPU-only, every accelerator off. Gathm never asks audio.cpp for GPU
+    # inference: phones have no usable CUDA/Vulkan path, and a desktop GPU
+    # build would demand a whole toolchain just to speak a sentence.
+    local -a cm_args=(
+        -DCMAKE_BUILD_TYPE=Release
+        -DENGINE_ENABLE_CUDA=OFF
+        -DENGINE_ENABLE_HIP=OFF
+        -DENGINE_ENABLE_VULKAN=OFF
+        -DENGINE_ENABLE_METAL=OFF
+        -DENGINE_BUILD_EXAMPLES=OFF
+        -DENGINE_BUILD_TESTS=OFF
+        -DENGINE_BUILD_WARMBENCH=OFF
+        # Compiles the package specs into the binary. Upstream's own answer to
+        # "model contract spec not found": without it the CLI must be run from
+        # the source tree for any family whose spec is not embedded in its GGUF.
+        -DAUDIOCPP_DEPLOYMENT_BUILD=ON
+    )
+    if [[ "$model_set" == "custom" ]]; then
+        cm_args+=( -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS="$models" )
+        info "Model families: $models"
+    else
+        cm_args+=( -DAUDIOCPP_MODEL_SET="$model_set" )
+        info "Model set: $model_set"
+    fi
+    # Android needs the vendored sentencepiece patched before anything is
+    # configured, or the build dies in sentencepiece-static.
+    if _is_termux; then
+        _audiocpp_patch_termux_sentencepiece "$src"
+    fi
+
+    # A patch that just landed invalidates CMake's cache: it captured the old
+    # compile options. Discard the build dir so configure genuinely re-runs.
+    if (( _AUDIOCPP_FRESH_CONFIGURE == 1 )) && [[ -d "$build_dir" ]]; then
+        info "Source patched — discarding the stale CMake cache in $build_dir"
+        rm -rf "$build_dir" 2>/dev/null || true
+    fi
+
+    local attempt=1 rc=0
+    while (( attempt <= 2 )); do
+        # Each attempt is strictly more conservative than the last, because a
+        # failed attempt on a phone costs 20-60 minutes — two tries, not a
+        # matrix.
+        local -a tune
+        if (( attempt == 1 )); then
+            # The configuration verified on-device: native-ISA kernels, OpenMP
+            # threading, llamafile SGEMM. Ninja if we have it — the target
+            # graph is large and it schedules better than Make.
+            tune=(
+                -DENGINE_ENABLE_NATIVE_CPU=ON
+                -DENGINE_ENABLE_OPENMP=ON
+                -DENGINE_ENABLE_LLAMAFILE=ON
+            )
+            if command -v ninja &>/dev/null; then
+                tune+=( -G Ninja )
+            fi
+            info "Configuring audio.cpp (CPU, native ISA + OpenMP)..."
+        else
+            # Portable fallback: the three options that actually break on
+            # Android — -march=native is rejected by some clang builds, libomp
+            # may be absent, and llamafile's SGEMM kernels lean on the ISA
+            # detection native-CPU was providing — plus the default generator,
+            # in case Ninja was the problem.
+            warn "Retrying with portable flags (no native ISA, no OpenMP, no llamafile, default generator)..."
+            tune=(
+                -DENGINE_ENABLE_NATIVE_CPU=OFF
+                -DENGINE_ENABLE_OPENMP=OFF
+                -DENGINE_ENABLE_LLAMAFILE=OFF
+            )
+            # Stale cache entries would otherwise pin the failed configuration
+            # (and a generator change requires a clean build dir regardless).
+            rm -rf "$build_dir" 2>/dev/null || true
+        fi
+
+        rc=0
+        run_with_spinner "cmake configure (audio.cpp)" -- \
+            cmake -S "$src" -B "$build_dir" "${cm_args[@]}" "${tune[@]}" || rc=$?
+
+        if (( rc == 0 )); then
+            info "Compiling audiocpp_cli with $jobs parallel job(s) — this is the long part."
+            if _is_termux; then
+                info "On a phone this can take 20-60 min. Keep Termux in the foreground"
+                info "(Android kills background builds) and stay on a charger."
+            fi
+            run_with_spinner "cmake --build (audiocpp_cli)" -- \
+                cmake --build "$build_dir" --parallel "$jobs" --target audiocpp_cli || rc=$?
+        fi
+
+        if (( rc == 0 )) && [[ -x "$build_dir/bin/audiocpp_cli" ]]; then
+            return 0
+        fi
+
+        attempt=$(( attempt + 1 ))
+    done
+
+    return 1
+}
+
+# Put the built binary on PATH at $LOCAL_BIN/audiocpp_cli and confirm it runs.
+_audiocpp_install_bin() {
+    local src="$1"
+    local built="$src/build/bin/audiocpp_cli"
+    local target="$LOCAL_BIN/audiocpp_cli"
+
+    [[ -x "$built" ]] || return 1
+    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
+
+    if ! cp "$built" "$target" 2>/dev/null; then
+        warn "Could not copy audiocpp_cli into $LOCAL_BIN"
+        return 1
+    fi
+    chmod +x "$target" 2>/dev/null || true
+
+    # A copied binary can lose sibling shared objects that live in the build
+    # tree (ggml links statically by default, but a shared build would not).
+    # Verify the copy actually runs; if it doesn't, replace it with a wrapper
+    # that execs the binary in place rather than leave a broken command
+    # on PATH that fails later, mid-conversation.
+    if "$target" --help >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "Copied audiocpp_cli won't run standalone — installing a wrapper instead"
+    cat > "$target" <<EOF
+#!/usr/bin/env bash
+# Gathm wrapper: run audiocpp_cli from its build tree so it can find the
+# shared libraries built alongside it.
+exec "$built" "\$@"
+EOF
+    chmod +x "$target" 2>/dev/null || true
+
+    if "$target" --help >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "audiocpp_cli still won't run — see $src/build for build output"
+    return 1
+}
+
+# Record where the runtime lives so Pilot (and --check) can find it without
+# re-deriving any of this. Mirrors _save_model_config's ~/.gathm + .env split.
+_audiocpp_save_config() {
+    local bin="$1" src="$2"
+    local config_dir="$HOME/.gathm"
+    mkdir -p "$config_dir" 2>/dev/null || true
+    echo "$bin"      > "$config_dir/audiocpp_path"  2>/dev/null || true
+    echo "$src"      > "$config_dir/audiocpp_src"   2>/dev/null || true
+    echo "audio.cpp" > "$config_dir/audio_backend"  2>/dev/null || true
+
+    # Everything Pilot needs to build a TTS command line, so it never has to
+    # hardcode a family name or guess where the weights went.
+    local model_dir; model_dir=$(_audiocpp_model_dir "$src") || true
+    echo "$AUDIOCPP_TTS_FAMILY" > "$config_dir/audiocpp_family" 2>/dev/null || true
+    echo "$AUDIOCPP_TTS_VOICE"  > "$config_dir/audiocpp_voice"  2>/dev/null || true
+    [[ -n "$model_dir" ]] && { echo "$model_dir" > "$config_dir/audiocpp_model" 2>/dev/null || true; }
+
+    _audiocpp_write_env GATHM_AUDIOCPP_BIN    "$bin"
+    _audiocpp_write_env GATHM_AUDIOCPP_FAMILY "$AUDIOCPP_TTS_FAMILY"
+    _audiocpp_write_env GATHM_AUDIOCPP_VOICE  "$AUDIOCPP_TTS_VOICE"
+    [[ -n "$model_dir" ]] && _audiocpp_write_env GATHM_AUDIOCPP_MODEL "$model_dir"
+
+    ok "Speech runtime registered: $bin"
+}
+
+# Upsert KEY=VALUE in the repo .env (GNU sed first, then BSD's -i '' form).
+_audiocpp_write_env() {
+    local key="$1" value="$2"
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]] && grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || \
+            sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || true
+    else
+        echo "${key}=${value}" >> "$env_file" 2>/dev/null || true
+    fi
+}
+
+# Echo the directory holding the PocketTTS weights, or nothing.
+# model_manager_v2.py installs to models/PocketTTS-GGUF/english, but resolve it
+# by locating the .gguf instead of trusting that layout across versions.
+_audiocpp_model_dir() {
+    local src="$1" hit f
+    # Expected layout first. A for-loop over the glob, not `[[ -f dir/*.gguf ]]`
+    # — inside [[ ]] the pattern is never expanded, so that test can only fail.
+    for f in "$src/$AUDIOCPP_TTS_MODEL_REL"/*.gguf; do
+        if [[ -f "$f" ]]; then
+            echo "$src/$AUDIOCPP_TTS_MODEL_REL"; return 0
+        fi
+    done
+    # `|| true` guards `set -o pipefail`: head closing the pipe kills find with
+    # SIGPIPE, which would otherwise fail this precisely when there is a lot to
+    # find.
+    # Prefer a TTS-looking path before anything else: with an ASR family also
+    # installed, models/ holds weights this function must not return.
+    hit=$(find "$src/models" -maxdepth 4 -iname '*.gguf' -type f -ipath '*tts*' \
+            2>/dev/null | head -1) || true
+    if [[ -z "$hit" ]]; then
+        hit=$(find "$src/models" -maxdepth 4 -name '*.gguf' -type f \
+                -not -ipath "*$(basename "$AUDIOCPP_ASR_MODEL_REL")*" \
+                -not -ipath '*asr*' 2>/dev/null | head -1) || true
+    fi
+    if [[ -n "$hit" ]]; then
+        dirname "$hit"; return 0
+    fi
+    echo ""
+    return 1
+}
+
+# Where the transcription weights live, same two-step logic as the voice model.
+_audiocpp_asr_model_dir() {
+    local src="$1" hit f
+    for f in "$src/$AUDIOCPP_ASR_MODEL_REL"/*.gguf; do
+        if [[ -f "$f" ]]; then
+            echo "$src/$AUDIOCPP_ASR_MODEL_REL"; return 0
+        fi
+    done
+    hit=$(find "$src/models" -maxdepth 4 -iname '*.gguf' -type f \
+            \( -ipath '*asr*' -o -ipath '*sensevoice*' \) 2>/dev/null | head -1) || true
+    if [[ -n "$hit" ]]; then
+        dirname "$hit"; return 0
+    fi
+    echo ""
+    return 1
+}
+
+_audiocpp_has_asr_model() {
+    local src="$1" dir
+    dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$dir" ]]
+}
+
+# Was the ASR family actually compiled into this binary? An install built
+# before sense_asr became a default has TTS only, and downloading 250 MB of
+# weights it cannot load would be worse than saying so.
+_audiocpp_asr_loader_present() {
+    local bin="$1"
+    [[ -n "$bin" ]] || return 1
+    _audiocpp_list_loaders "$bin" | grep -qi "$AUDIOCPP_ASR_FAMILY"
+}
+
+# Are the voice weights on disk?
+_audiocpp_has_model() {
+    local src="$1" dir
+    dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$dir" ]]
+}
+
+# Download the PocketTTS weights with the project's own model manager.
+#
+# Deliberately not pip or a hand-rolled curl of the .gguf: the model spec knows
+# which files belong to the package (weights *and* embeddings/alba.safetensors)
+# and puts them in the layout audiocpp_cli expects. Fetching just the .gguf
+# yields a model that loads and then has no voice.
+#
+# model_manager_v2.py is standard-library only — urllib, not requests or
+# huggingface_hub — so this stays consistent with the no-pip rule on Termux. It
+# needs the `python` package and nothing else.
+_audiocpp_install_tts_model() {
+    local src="$1"
+    local mgr="$src/tools/model_manager_v2.py"
+
+    if _audiocpp_has_model "$src"; then
+        ok "Voice model already installed ($(_audiocpp_model_dir "$src"))"
+        return 0
+    fi
+
+    if [[ "${GATHM_AUDIOCPP_SKIP_MODEL:-0}" == "1" ]]; then
+        warn "Skipping voice model download (GATHM_AUDIOCPP_SKIP_MODEL=1)"
+        note_missing "audio.cpp voice model" \
+            "python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    if [[ ! -f "$mgr" ]]; then
+        warn "model_manager_v2.py not found at $mgr — cannot fetch the voice model"
+        note_missing "audio.cpp voice model" \
+            "grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf"
+        return 1
+    fi
+
+    local py; py=$(_python_cmd)
+    if [[ -z "$py" ]]; then
+        pkg install -y python 2>/dev/null || true
+        py=$(_python_cmd)
+    fi
+    if [[ -z "$py" ]]; then
+        warn "Python not available — cannot run the model manager"
+        note_missing "audio.cpp voice model" "pkg install python && python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    # Roughly 1 GB of weights; refuse rather than fill the phone.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 1536 )); then
+        warn "Only ${free_mb} MB free — skipping the voice model download (needs ~1.5 GB)"
+        note_missing "audio.cpp voice model (${free_mb} MB free)" \
+            "free up ~1.5 GB, then: python $mgr install $AUDIOCPP_TTS_PACKAGE"
+        return 1
+    fi
+
+    info "Downloading voice model $AUDIOCPP_TTS_PACKAGE (a few hundred MB)..."
+    # Run from inside the source tree so the manager finds model_specs/, and pin
+    # the output with --models-root rather than relying on cwd for both.
+    # --progress gives the spinner real download progress to display instead of
+    # a silent multi-hundred-MB wait.
+    run_with_spinner "model_manager install $AUDIOCPP_TTS_PACKAGE" -- \
+        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_TTS_PACKAGE' \
+                    --models-root '$src/models' --progress" || true
+
+    if _audiocpp_has_model "$src"; then
+        ok "Voice model installed ($(_audiocpp_model_dir "$src"))"
+        return 0
+    fi
+
+    warn "Voice model download did not complete."
+    echo -e "     Retry with: ${BOLD}cd $src && $py tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE${RESET}"
+    note_missing "audio.cpp voice model" \
+        "cd $src && python tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE"
+    return 1
+}
+
+# Download the transcription weights. Same shape as the voice model, with a
+# smaller free-space floor because SenseVoice-Small is ~250 MB, not ~1 GB.
+_audiocpp_install_asr_model() {
+    local src="$1"
+    local mgr="$src/tools/model_manager_v2.py"
+
+    if _audiocpp_has_asr_model "$src"; then
+        ok "Speech-to-text model already installed ($(_audiocpp_asr_model_dir "$src"))"
+        return 0
+    fi
+
+    if [[ "${GATHM_AUDIOCPP_SKIP_ASR_MODEL:-${GATHM_AUDIOCPP_SKIP_MODEL:-0}}" == "1" ]]; then
+        warn "Skipping speech-to-text model download"
+        note_missing "audio.cpp speech-to-text model" \
+            "python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    if [[ ! -f "$mgr" ]]; then
+        warn "model_manager_v2.py not found at $mgr — cannot fetch the ASR model"
+        note_missing "audio.cpp speech-to-text model" \
+            "grab a GGUF from huggingface.co/audio-cpp/audio.cpp-gguf"
+        return 1
+    fi
+
+    local py; py=$(_python_cmd)
+    if [[ -z "$py" ]]; then
+        pkg install -y python 2>/dev/null || true
+        py=$(_python_cmd)
+    fi
+    if [[ -z "$py" ]]; then
+        warn "Python not available — cannot run the model manager"
+        note_missing "audio.cpp speech-to-text model" \
+            "pkg install python && python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 768 )); then
+        warn "Only ${free_mb} MB free — skipping the speech-to-text model (needs ~350 MB)"
+        note_missing "audio.cpp speech-to-text model (${free_mb} MB free)" \
+            "free up ~350 MB, then: python $mgr install $AUDIOCPP_ASR_PACKAGE"
+        return 1
+    fi
+
+    info "Downloading speech-to-text model $AUDIOCPP_ASR_PACKAGE (~250 MB)..."
+    run_with_spinner "model_manager install $AUDIOCPP_ASR_PACKAGE" -- \
+        bash -c "cd '$src' && '$py' '$mgr' install '$AUDIOCPP_ASR_PACKAGE' \
+                    --models-root '$src/models' --progress" || true
+
+    if _audiocpp_has_asr_model "$src"; then
+        ok "Speech-to-text model installed ($(_audiocpp_asr_model_dir "$src"))"
+        return 0
+    fi
+
+    warn "Speech-to-text model download did not complete."
+    echo -e "     Retry with: ${BOLD}cd $src && $py tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE${RESET}"
+    note_missing "audio.cpp speech-to-text model" \
+        "cd $src && python tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE"
+    return 1
+}
+
+# Record the ASR weights and family for lib/speech.py to find.
+_audiocpp_save_asr_path() {
+    local src="$1" model_dir
+    model_dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 0
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$model_dir"          > "$HOME/.gathm/audiocpp_asr_model"  2>/dev/null || true
+    echo "$AUDIOCPP_ASR_FAMILY" > "$HOME/.gathm/audiocpp_asr_family" 2>/dev/null || true
+    _audiocpp_write_env GATHM_AUDIOCPP_ASR_MODEL  "$model_dir"
+    _audiocpp_write_env GATHM_AUDIOCPP_ASR_FAMILY "$AUDIOCPP_ASR_FAMILY"
+}
+
+# Microphone capture. audio.cpp takes a file, so something has to produce one:
+# on Android that is termux-microphone-record (termux-api package *and* the
+# Termux:API app), and since it cannot encode WAV, ffmpeg converts to the
+# 16 kHz mono the ASR models want.
+_audiocpp_install_recorder() {
+    _is_termux || return 0
+    if ! command -v termux-microphone-record &>/dev/null; then
+        info "Installing microphone support..."
+        pkg install -y termux-api 2>/dev/null || true
+    fi
+    command -v ffmpeg &>/dev/null || pkg install -y ffmpeg 2>/dev/null || true
+
+    local rc=0
+    if command -v termux-microphone-record &>/dev/null; then
+        ok "Microphone capture (termux-microphone-record)"
+        info "Voice input also needs the Termux:API app from F-Droid, and mic permission."
+    else
+        warn "No microphone capture — transcribing existing files still works"
+        note_missing "microphone capture for voice input" \
+            "pkg install termux-api, plus the Termux:API app from F-Droid"
+        rc=1
+    fi
+    if command -v ffmpeg &>/dev/null; then
+        ok "Audio conversion (ffmpeg)"
+    else
+        warn "ffmpeg missing — recordings cannot be converted to 16 kHz WAV"
+        note_missing "ffmpeg for voice input" "pkg install ffmpeg"
+        rc=1
+    fi
+    return $rc
+}
+
+# Transcribe the WAV the TTS smoke test just produced. One check, both
+# directions: if this prints words, the whole speech loop works on this device.
+_audiocpp_asr_smoke_test() {
+    local bin="$1" src="$2"
+    local model_dir; model_dir=$(_audiocpp_asr_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 1
+    [[ -n "$_AUDIOCPP_SMOKE_WAV" && -s "$_AUDIOCPP_SMOKE_WAV" ]] || return 1
+
+    local seg="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; seg="${seg:-/tmp}"
+    seg="$seg/gathm-asr-smoketest.$$.json"
+    rm -f "$seg" 2>/dev/null || true
+
+    info "Testing transcription..."
+    if run_with_spinner "transcribing the test phrase" -- \
+            bash -c "cd '$src' 2>/dev/null || true; '$bin' --task asr \
+                   --family '$AUDIOCPP_ASR_FAMILY' \
+                   --model '$model_dir' \
+                   --backend cpu \
+                   --audio '$_AUDIOCPP_SMOKE_WAV' \
+                   --segments-out '$seg'"; then
+        ok "Transcription works (family '$AUDIOCPP_ASR_FAMILY')"
+        rm -f "$seg" 2>/dev/null || true
+        return 0
+    fi
+
+    rm -f "$seg" 2>/dev/null || true
+    warn "Transcription model is installed but the test run failed."
+    echo -e "     Try manually: ${BOLD}$bin --task asr --family $AUDIOCPP_ASR_FAMILY \\"
+    echo -e "       --model $model_dir --backend cpu --audio some.wav --metrics${RESET}"
+    note_missing "audio.cpp transcription" "see the manual command above"
+    return 1
+}
+
+# Set up the listening half: weights, config, a round-trip test, and the tools
+# needed to capture audio in the first place.
+_audiocpp_setup_listening() {
+    local bin="$1" src="$2"
+
+    if ! _audiocpp_asr_loader_present "$bin"; then
+        warn "This build has no '$AUDIOCPP_ASR_FAMILY' loader — voice input unavailable"
+        echo -e "     Add it with: ${BOLD}GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS \\"
+        echo -e "       GATHM_AUDIOCPP_FORCE=1 ./install${RESET}"
+        info "The rebuild reuses the existing build directory, so it compiles the"
+        info "new family only rather than starting over."
+        note_missing "speech-to-text (loader not compiled in)" \
+            "GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS GATHM_AUDIOCPP_FORCE=1 ./install"
+        return 1
+    fi
+
+    if _audiocpp_install_asr_model "$src"; then
+        _audiocpp_save_asr_path "$src"
+        _audiocpp_asr_smoke_test "$bin" "$src" || true
+        _audiocpp_install_recorder || true
+    fi
+}
+
+# Synthesize a throwaway WAV to prove the whole chain works: binary links,
+# loaders are compiled in, weights load, the voice resolves, audio comes out.
+# Cheaper to find out here than the first time Pilot tries to talk.
+_audiocpp_smoke_test() {
+    local bin="$1" src="$2"
+    local model_dir; model_dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 1
+
+    local tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; tmp_dir="${tmp_dir:-/tmp}"
+    local out="$tmp_dir/gathm-tts-smoketest.$$.wav"
+    rm -f "$out" 2>/dev/null || true
+
+    info "Testing speech synthesis..."
+    if run_with_spinner "synthesizing a test phrase" -- \
+            bash -c "cd '$src' 2>/dev/null || true; '$bin' --task tts \
+                   --family '$AUDIOCPP_TTS_FAMILY' \
+                   --model '$model_dir' \
+                   --backend cpu \
+                   --voice-id '$AUDIOCPP_TTS_VOICE' \
+                   --text 'Gathm speech is online.' \
+                   --out '$out'" \
+        && [[ -s "$out" ]]; then
+        local kb=$(( $(wc -c < "$out" 2>/dev/null || echo 0) / 1024 ))
+        ok "Speech synthesis works (${kb} KB WAV, voice '$AUDIOCPP_TTS_VOICE')"
+        # Kept, not deleted: the ASR smoke test transcribes this exact file, and
+        # _audiocpp_setup_voice removes it once both directions have run.
+        _AUDIOCPP_SMOKE_WAV="$out"
+        return 0
+    fi
+
+    rm -f "$out" 2>/dev/null || true
+    warn "audiocpp_cli built and weights are present, but synthesis failed."
+    echo -e "     Try manually: ${BOLD}$bin --task tts --family $AUDIOCPP_TTS_FAMILY \\"
+    echo -e "       --model $model_dir --backend cpu --voice-id $AUDIOCPP_TTS_VOICE \\"
+    echo -e "       --text \"hello\" --out hello.wav --metrics${RESET}"
+    note_missing "audio.cpp speech synthesis" "see the manual command above"
+    return 1
+}
+
+# Record the resolved weights directory. Separate from _audiocpp_save_config
+# because that runs right after the build, before the model exists.
+_audiocpp_save_model_path() {
+    local src="$1" model_dir
+    model_dir=$(_audiocpp_model_dir "$src") || true
+    [[ -n "$model_dir" ]] || return 0
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$model_dir" > "$HOME/.gathm/audiocpp_model" 2>/dev/null || true
+    _audiocpp_write_env GATHM_AUDIOCPP_MODEL "$model_dir"
+}
+
+# Fetch the weights, record where they landed, then prove the chain end-to-end.
+_audiocpp_setup_voice() {
+    local bin="$1" src="$2"
+    if _audiocpp_install_tts_model "$src"; then
+        _audiocpp_save_model_path "$src"
+        _audiocpp_smoke_test "$bin" "$src" || true
+        _audiocpp_install_player || true
+    fi
+    # Listening is independent of speaking: a build with the ASR loader can
+    # transcribe even if the voice model never downloaded.
+    _audiocpp_setup_listening "$bin" "$src" || true
+    if [[ -n "$_AUDIOCPP_SMOKE_WAV" ]]; then
+        rm -f "$_AUDIOCPP_SMOKE_WAV" 2>/dev/null || true
+        _AUDIOCPP_SMOKE_WAV=""
+    fi
+}
+
+# Termux: build audio.cpp natively. This is the only speech path that works
+# on Android, and it must stay pip-free (see the section comment above).
+install_audio_cpp_termux() {
+    local src; src=$(_audiocpp_src_dir)
+
+    # Before anything expensive: can we avoid compiling altogether? A published
+    # binary wins, then a cached build from a previous install on this device.
+    # Both are verified by actually running --list-loaders, so a stale or
+    # wrong-architecture file falls through to the source build rather than
+    # installing something broken.
+    if [[ "${GATHM_AUDIOCPP_FORCE_BUILD:-0}" != "1" ]]; then
+        if _audiocpp_fetch_prebuilt; then
+            local pre; pre=$(_audiocpp_bin) || true
+            _audiocpp_save_config "$pre" "$src"
+            step_done "audio.cpp installed from a prebuilt binary"
+            _audiocpp_setup_voice "$pre" "$src"
+            return 0
+        fi
+        if _audiocpp_cache_restore; then
+            local cachedbin; cachedbin=$(_audiocpp_bin) || true
+            _audiocpp_save_config "$cachedbin" "$src"
+            step_done "audio.cpp restored from cache (no compile)"
+            # The weights live in the source tree, so it still has to exist for
+            # the voice/ASR models — clone it, but skip the build entirely.
+            if [[ ! -d "$src/.git" ]]; then
+                _audiocpp_install_build_deps
+                _audiocpp_clone_or_update "$src" || true
+            fi
+            _audiocpp_setup_voice "$cachedbin" "$src"
+            return 0
+        fi
+    fi
+
+    # Source tree plus a full ggml build needs real space, and a phone that
+    # runs out mid-compile fails in a way that is tedious to diagnose.
+    # `|| true`: the detector returns non-zero when free space is unknown.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$src") || true
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && (( free_mb > 0 && free_mb < 3072 )); then
+        step_skip "Skipping audio.cpp: needs ~3 GB, only ${free_mb} MB free"
+        note_missing "audio.cpp speech runtime (${free_mb} MB free)" \
+            "free up ~3 GB, then re-run ./install"
+        return 0
+    fi
+
+    _audiocpp_install_build_deps
+
+    if ! _audiocpp_clone_or_update "$src"; then
+        step_fail "audio.cpp clone failed — Pilot will run without voice"
+        note_missing "audio.cpp speech runtime" \
+            "git clone $AUDIOCPP_REPO $src && ./install"
+        return 0
+    fi
+
+    local t0=$SECONDS
+    if ! _audiocpp_cmake_build "$src"; then
+        step_fail "audio.cpp build failed after $(_format_elapsed $(( SECONDS - t0 )))"
+        warn "Build log tail is above. The known-good Termux sequence is:"
+        warn "  cd $src"
+        warn "  echo 'target_compile_options(sentencepiece-static PRIVATE -U__ANDROID__)' \\"
+        warn "    >> external/sentencepiece/src/CMakeLists.txt"
+        warn "  rm -rf build"
+        warn "  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\"
+        warn "    -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_HIP=OFF \\"
+        warn "    -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_METAL=OFF \\"
+        warn "    -DENGINE_ENABLE_NATIVE_CPU=ON -DENGINE_ENABLE_OPENMP=ON \\"
+        warn "    -DENGINE_ENABLE_LLAMAFILE=ON -DAUDIOCPP_MODEL_SET=custom \\"
+        warn "    -DAUDIOCPP_MODELS=pocket_tts"
+        warn "  cmake --build build --target audiocpp_cli -j$(_audiocpp_jobs)"
+        note_missing "audio.cpp speech runtime" "see build output in $src/build"
+        return 0
+    fi
+
+    if ! _audiocpp_install_bin "$src"; then
+        step_fail "audiocpp_cli built but could not be installed to $LOCAL_BIN"
+        note_missing "audiocpp_cli on PATH" "cp $src/build/bin/audiocpp_cli $LOCAL_BIN/"
+        return 0
+    fi
+
+    local bin; bin=$(_audiocpp_bin) || true
+    _audiocpp_save_config "$bin" "$src"
+    _audiocpp_cache_save "$bin"
+    step_done "audio.cpp built and installed in $(_format_elapsed $(( SECONDS - t0 )))"
+    _audiocpp_setup_voice "$bin" "$src"
+}
+
+# Entry point. Termux only, by design — every other platform is left exactly
+# as it was, with whatever Python/audio dependencies it already uses.
+install_audio_cpp() {
+    local platform="$1"
+
+    if ! _is_termux; then
+        step_skip "audio.cpp skipped (Termux only)"
+        return 0
+    fi
+
+    # Already have it? Register and move on — this is the fast path that keeps
+    # re-running ./install cheap instead of recompiling for an hour.
+    local existing; existing=$(_audiocpp_bin) || true
+    if [[ -n "$existing" && "${GATHM_AUDIOCPP_FORCE:-0}" != "1" ]]; then
+        _audiocpp_save_config "$existing" "$(_audiocpp_src_dir)"
+        # Seed the cache from a binary that already works, so the next install
+        # (or a reinstall after uninstall) needs no compile.
+        [[ -f "$(_audiocpp_cache_file)" ]] || _audiocpp_cache_save "$existing"
+        step_done "audio.cpp already installed ($existing)"
+        _audiocpp_setup_voice "$existing" "$(_audiocpp_src_dir)"
+        return 0
+    fi
+
+    # Escape hatch for anyone who wants a fast install and no voice.
+    if [[ "${GATHM_INSTALL_AUDIO_CPP:-}" == "0" ]]; then
+        step_skip "audio.cpp skipped (GATHM_INSTALL_AUDIO_CPP=0)"
+        return 0
+    fi
+
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        step_skip "audio.cpp skipped (offline — the source has to be cloned)"
+        note_missing "audio.cpp speech runtime" "re-run ./install while online"
+        return 0
+    fi
+
+    install_audio_cpp_termux
+}
+
 # --- Create command shortcuts ---
 # gathm and gathm-agent: symlinked directly — simpler, always in sync with
 #   the source, and uninstall just removes the links.
@@ -1704,20 +2993,78 @@ start_gui_server() {
         return 1
     fi
 
-    # Check if something is already on the port
+    # Something already listening? Do not just return — the installer has only
+    # just (re)staged the code, so a server left over from an earlier run is
+    # still serving the OLD api/server.py. That is precisely how a newly added
+    # endpoint keeps returning the old error: the GUI POSTs to a route that
+    # exists on disk but not in the running process, falls through to the
+    # StaticFiles mount, and comes back 405.
+    #
+    # Restart our own server only. Anything else holding the port belongs to
+    # someone else and is left alone.
     if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
-        ok "GUI server already running at $GUI_URL"
-        return 0
+        if ! command -v pgrep >/dev/null 2>&1; then
+            warn "GUI server already running at $GUI_URL, and pgrep is unavailable"
+            warn "so it cannot be identified. If the GUI behaves like older code,"
+            warn "restart it manually:  pkill -f api/server.py  then re-run ./install"
+            return 0
+        fi
+
+        # Match on the "api/server.py" suffix rather than $server_script's
+        # absolute path: the server may have been launched relative to another
+        # cwd or through the gathm-api shortcut, and an absolute-path match then
+        # silently misses it, leaving the stale process serving.
+        #
+        # Then filter hard. `pgrep -f` matches any process whose *command line*
+        # contains the pattern, which includes wrapper shells — and, in the
+        # wrong circumstances, this installer itself. Skip our own pid and our
+        # parent, and require the command line to actually be a Python process,
+        # which is what rules out a shell that merely mentions the path.
+        local _old_pids="" _p _cmd
+        for _p in $(pgrep -f 'api/server\.py' 2>/dev/null || true); do
+            [[ "$_p" == "$$" || "$_p" == "${PPID:-0}" ]] && continue
+            if [[ -r "/proc/$_p/cmdline" ]]; then
+                _cmd=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null) || _cmd=""
+                [[ "$_cmd" == *python* ]] || continue
+            fi
+            _old_pids+="$_p "
+        done
+        _old_pids="${_old_pids%% }"
+
+        if [[ -z "${_old_pids// /}" ]]; then
+            ok "GUI server already running at $GUI_URL (not ours — leaving it alone)"
+            return 0
+        fi
+
+        info "Restarting GUI server so it serves the current code (pid: ${_old_pids})..."
+        # shellcheck disable=SC2086  # word splitting is intended for the pid list
+        kill $_old_pids 2>/dev/null || true
+        local _w=0
+        while (( _w < 5 )) && curl -s --max-time 1 "$GUI_URL/" &>/dev/null; do
+            sleep 1
+            _w=$((_w + 1))
+        done
+        if curl -s --max-time 1 "$GUI_URL/" &>/dev/null; then
+            # shellcheck disable=SC2086
+            kill -9 $_old_pids 2>/dev/null || true
+            sleep 1
+        fi
     fi
 
     info "Starting GUI server on port $GUI_PORT..."
     local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
     nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
-    disown $! 2>/dev/null || true
+    local _gui_pid=$!
+    # Record the pid where the launcher looks for it, so `gathm stop` can shut
+    # down the server the installer started instead of telling the user to pkill.
+    mkdir -p "$HOME/.gathm" 2>/dev/null || true
+    echo "$_gui_pid" >"$HOME/.gathm/gui.pid" 2>/dev/null || true
+    disown "$_gui_pid" 2>/dev/null || true
 
     # Wait up to 15 s for the server to respond (Termux can be slow)
     local _max_wait=15
-    [[ "$_GATHM_PLATFORM" != "termux" ]] && _max_wait=8
+    # `:-` so the function stays callable (and testable) before main() sets it.
+    [[ "${_GATHM_PLATFORM:-}" != "termux" ]] && _max_wait=8
     local i=0
     while (( i < _max_wait )); do
         sleep 1
@@ -1878,39 +3225,83 @@ verify() {
 
     # ── Pilot runtime: venv + the Python packages Pilot imports at startup ──
     # We actually IMPORT each module (not just find_spec) so a native library
-    # that fails to load — e.g. pydantic_core missing libgcc_s.so.1 on Termux —
-    # is caught here instead of only blowing up when Pilot starts.
+    # failure is caught here instead of only blowing up when Pilot starts.
     _init_venv
     local pilot_py="$GATHM_VENV/bin/python3"
     if [[ -x "$pilot_py" ]]; then
         local missing_mods
         missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
-# import name -> pip package name
-mods = {
-    "pydantic_core": "pydantic", "langchain_core": "langchain-core",
-    "langgraph": "langgraph", "rich": "rich", "dotenv": "python-dotenv",
-    "prompt_toolkit": "prompt_toolkit", "bs4": "beautifulsoup4",
-    "requests": "requests",
-}
+# Import what Pilot actually imports, not just the top-level packages.
+#
+# Importing `langchain_core` and `langgraph` alone is not a useful check: both
+# top-level packages import cleanly even when the submodules Pilot needs are
+# broken. langchain_core resolves public names lazily via module __getattr__,
+# so a version mismatch only surfaces on the real `from ... import ...`. That
+# gap let verify() report "All checks passed!" on a phone where Pilot then
+# died at startup on langchain_core.runnables.base.
+#
+# Each entry is (statement to execute, pip package to blame).
+checks = [
+    ("import pydantic_core", "pydantic"),
+    ("from langchain_core.messages import AIMessage, BaseMessage, HumanMessage",
+     "langchain-core"),
+    ("from langchain_core.runnables import Runnable", "langchain-core"),
+    ("from langgraph.graph import StateGraph, END", "langgraph"),
+    ("import rich", "rich"),
+    ("import dotenv", "python-dotenv"),
+    ("import prompt_toolkit", "prompt_toolkit"),
+    ("import bs4", "beautifulsoup4"),
+    ("import requests", "requests"),
+]
 missing = []
-for m, pkg in mods.items():
+details = []
+for stmt, pkg in checks:
     try:
-        __import__(m)
-    except Exception:
-        missing.append(pkg)
+        exec(stmt, {})
+    except Exception as exc:
+        if pkg not in missing:
+            missing.append(pkg)
+        # Keep the real exception: "langchain-core is missing" is misleading
+        # when the package is installed and something it imports is not. The
+        # underlying message names the actual culprit.
+        details.append("%s: %s: %s" % (stmt.split(" import ")[0], type(exc).__name__, exc))
+# Line 1: packages to blame. Remaining lines: what actually went wrong.
 print(" ".join(missing))
+for d in details:
+    print(d)
 PY
 )
-        if [[ -z "$missing_mods" ]]; then
+        # First line is the package list; any following lines are the real
+        # exceptions, which is what actually identifies the problem.
+        local _dep_pkgs _dep_details
+        _dep_pkgs=$(printf '%s\n' "$missing_mods" | head -1)
+        _dep_details=$(printf '%s\n' "$missing_mods" | tail -n +2)
+        if [[ -z "$_dep_pkgs" ]]; then
             ok "Pilot runtime (venv + dependencies)"
         else
-            warn "Pilot runtime missing/broken: $missing_mods"
-            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $missing_mods)"
+            warn "Pilot runtime missing/broken: $_dep_pkgs"
+            if [[ -n "$_dep_details" ]]; then
+                printf '%s\n' "$_dep_details" | sed 's/^/       /'
+            fi
+            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $_dep_pkgs)"
         fi
 
         # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
         if "$pilot_py" -c "import fastapi, uvicorn" 2>/dev/null; then
             ok "GUI server dependencies (fastapi, uvicorn)"
+            # uvicorn loads the app as "api.server:app", so that module path has
+            # to resolve from the repo root. find_spec checks it without
+            # executing the module, so this needs no running server.
+            if "$pilot_py" -c "
+import importlib.util, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+sys.exit(0 if importlib.util.find_spec('api.server') else 1)
+" 2>/dev/null; then
+                ok "GUI app importable (api.server)"
+            else
+                warn "GUI app not importable as api.server (GUI won't start)"
+                note_missing "GUI app (api.server)" "check $SCRIPT_DIR/api/server.py is present and importable"
+            fi
         else
             warn "GUI server dependencies missing (GUI won't start; Pilot CLI still works)"
             note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"
@@ -1936,6 +3327,74 @@ PY
             note_missing "Playwright Chromium" "playwright install chromium"
         fi
     fi
+
+    # ── Speech runtime (what lets Pilot talk) ──
+    local audio_bin audio_src
+    audio_bin=$(_audiocpp_bin) || true
+    audio_src=$(_audiocpp_src_dir)
+    # --list-loaders is the better probe than --help: it only reports
+    # "pocket_tts: tts (offline)" if the TTS family was actually compiled in.
+    if [[ -n "$audio_bin" ]] \
+            && { _audiocpp_list_loaders "$audio_bin" >/dev/null 2>&1 || "$audio_bin" --help >/dev/null 2>&1; }; then
+        ok "Speech runtime (audio.cpp: $audio_bin)"
+        if _audiocpp_list_loaders "$audio_bin" | grep -qi "$AUDIOCPP_TTS_FAMILY"; then
+            ok "TTS loader compiled in ($AUDIOCPP_TTS_FAMILY)"
+        fi
+        # The binary alone cannot speak — it needs weights.
+        if _audiocpp_has_model "$audio_src"; then
+            ok "Voice model ($(_audiocpp_model_dir "$audio_src"), voice '$AUDIOCPP_TTS_VOICE')"
+            # Synthesis without playback is silence, so this is part of "works".
+            local audio_player; audio_player=$(_audiocpp_player) || true
+            if [[ -n "$audio_player" ]]; then
+                ok "Audio playback ($audio_player)"
+            else
+                warn "No audio player — Pilot renders speech but cannot play it"
+                note_missing "audio player for speech playback" "pkg install mpv"
+            fi
+        else
+            warn "No voice model downloaded yet (Pilot stays silent until one is)"
+            note_missing "audio.cpp voice model" \
+                "cd $audio_src && python tools/model_manager_v2.py install $AUDIOCPP_TTS_PACKAGE"
+        fi
+        # ── Listening (what lets Pilot hear) ──
+        if _audiocpp_asr_loader_present "$audio_bin"; then
+            ok "Transcription loader compiled in ($AUDIOCPP_ASR_FAMILY)"
+            if _audiocpp_has_asr_model "$audio_src"; then
+                ok "Speech-to-text model ($(_audiocpp_asr_model_dir "$audio_src"))"
+                if command -v termux-microphone-record &>/dev/null; then
+                    ok "Microphone capture (termux-microphone-record)"
+                elif [[ "$plat" == "termux" ]]; then
+                    warn "No microphone capture — file transcription still works"
+                    note_missing "microphone capture for voice input" \
+                        "pkg install termux-api, plus the Termux:API app from F-Droid"
+                fi
+                # Recordings arrive as AAC/Opus; the ASR models want 16 kHz WAV.
+                if command -v ffmpeg &>/dev/null; then
+                    ok "Audio conversion (ffmpeg)"
+                elif [[ "$plat" == "termux" ]]; then
+                    warn "ffmpeg missing — recordings cannot be converted for the model"
+                    note_missing "ffmpeg for voice input" "pkg install ffmpeg"
+                fi
+            else
+                warn "No speech-to-text model downloaded yet (voice input unavailable)"
+                note_missing "audio.cpp speech-to-text model" \
+                    "cd $audio_src && python tools/model_manager_v2.py install $AUDIOCPP_ASR_PACKAGE"
+            fi
+        elif [[ "$plat" == "termux" ]]; then
+            warn "Built without the '$AUDIOCPP_ASR_FAMILY' loader (no voice input)"
+            note_missing "speech-to-text (loader not compiled in)" \
+                "GATHM_AUDIOCPP_MODELS=$AUDIOCPP_DEFAULT_MODELS GATHM_AUDIOCPP_FORCE=1 ./install"
+        fi
+    elif [[ -n "$audio_bin" ]]; then
+        warn "audiocpp_cli found but won't run ($audio_bin)"
+        note_missing "audio.cpp speech runtime" \
+            "GATHM_AUDIOCPP_FORCE=1 ./install"
+    elif [[ "$plat" == "termux" ]]; then
+        warn "Speech runtime not installed (Pilot runs, just without voice)"
+        note_missing "audio.cpp speech runtime" "re-run ./install"
+    fi
+    # Off Termux there is nothing to report: audio.cpp is not part of that
+    # install, so a missing binary is the expected state, not a finding.
 
     # Agent smoke test
     if bash "$SCRIPT_DIR/agent/orchestrator.sh" list --json &>/dev/null; then
@@ -1971,8 +3430,23 @@ PY
 uninstall() {
     info "Removing Gathm shortcuts..."
     rm -f "$HOME/.local/bin/gathm" "$HOME/.local/bin/gathm-agent" "$HOME/.local/bin/gathm-api"
+    rm -f "$HOME/.local/bin/audiocpp_cli"
+
+    # The audio.cpp checkout is only deleted when it lives inside ~/.gathm
+    # (the default). A checkout somewhere else — ~/audio.cpp, or a custom
+    # GATHM_AUDIOCPP_SRC — is left alone, since we did not create it.
+    # Either way say which happened: rebuilding costs up to an hour on a phone.
+    local audio_src; audio_src=$(_audiocpp_src_dir)
+    if [[ -d "$audio_src" && "$audio_src" == "$HOME/.gathm/"* ]]; then
+        warn "Deleting the audio.cpp build at $audio_src (a rebuild takes 20-60 min on a phone)"
+    fi
+
     info "Removing data directory..."
     rm -rf "$HOME/.gathm"
+
+    if [[ -d "$audio_src" ]]; then
+        warn "audio.cpp source kept at $audio_src (delete manually to reclaim the space)"
+    fi
     ok "Uninstalled. Source directory not removed: $SCRIPT_DIR"
 }
 
@@ -2026,11 +3500,11 @@ main() {
     # Visible step count. Termux has one extra step (storage permission),
     # which runs first so a permission-grant restart costs no real work.
     # Steps: [storage] connectivity, python, deps, files, ollama, llm-model,
-    # pilot-deps, playwright, shortcuts, verify.
+    # pilot-deps, playwright, audio.cpp, shortcuts, verify.
     if [[ "$platform" == "termux" ]]; then
-        _GATHM_TOTAL_STEPS=11
+        _GATHM_TOTAL_STEPS=12
     else
-        _GATHM_TOTAL_STEPS=10
+        _GATHM_TOTAL_STEPS=11
     fi
 
     # Termux storage permission FIRST: granting it can restart Termux, so we
@@ -2087,6 +3561,12 @@ main() {
     step_begin "Installing Playwright browser engine"
     install_playwright_browser
     step_done "Browser engine ready"
+
+    # Speech runtime (lets Pilot talk). Native C++ on every platform — on
+    # Termux that is the only thing that works, so it runs by default there
+    # and is opt-in elsewhere. Emits its own step_done / step_skip / step_fail.
+    step_begin "Installing audio.cpp (speech runtime)"
+    install_audio_cpp "$platform"
 
     step_begin "Installing shell shortcuts"
     setup_shortcuts "$platform"

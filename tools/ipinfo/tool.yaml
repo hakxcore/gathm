@@ -40,4 +40,4 @@ output_schema:
       type: string
 
 fallback_tool: geo
-tags: [networking, ip, geolocation, lookup]
+tags: [networking, ip, geolocation, lookup, located, where, location]

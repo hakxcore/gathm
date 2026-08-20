@@ -42,7 +42,19 @@ LOCAL_BIN="$HOME/.local/bin"
 DATA_DIR="$HOME/.gathm"
 PILOT_VENV="$SCRIPT_DIR/pilot/venv"
 
-SHORTCUTS=("$LOCAL_BIN/gathm" "$LOCAL_BIN/gathm-agent" "$LOCAL_BIN/gathm-api")
+SHORTCUTS=("$LOCAL_BIN/gathm" "$LOCAL_BIN/gathm-agent" "$LOCAL_BIN/gathm-api" "$LOCAL_BIN/audiocpp_cli")
+
+# audio.cpp speech runtime source tree. install clones it into ~/.gathm by
+# default (so it goes with DATA_DIR below), but reuses an existing ~/audio.cpp
+# checkout if one is there. Only the copy we created is removed — a checkout
+# the user made themselves is left alone.
+if [[ -n "${GATHM_AUDIOCPP_SRC:-}" ]]; then
+    AUDIOCPP_SRC="$GATHM_AUDIOCPP_SRC"
+elif [[ -d "$HOME/audio.cpp/.git" ]]; then
+    AUDIOCPP_SRC="$HOME/audio.cpp"
+else
+    AUDIOCPP_SRC="$DATA_DIR/audio.cpp"
+fi
 
 # Shell RC files that may contain the PATH entry added by install
 RC_FILES=(
@@ -65,6 +77,16 @@ done
 [[ -d "$DATA_DIR"    ]] && echo "    • $DATA_DIR  (config & logs)"   || echo "    • $DATA_DIR  (not found — skip)"
 [[ -d "$PILOT_VENV"  ]] && echo "    • $PILOT_VENV  (Python venv)"  || echo "    • $PILOT_VENV  (not found — skip)"
 echo "    • PATH entry from shell RC files"
+
+# Call out the audio.cpp build explicitly: it is removed only as part of
+# DATA_DIR, and rebuilding it costs 20-60 min on a phone.
+if [[ -d "$AUDIOCPP_SRC" ]]; then
+    if [[ "$AUDIOCPP_SRC" == "$DATA_DIR/"* ]]; then
+        echo -e "    • $AUDIOCPP_SRC  ${YELLOW}(audio.cpp build — goes with $DATA_DIR)${RESET}"
+    else
+        echo -e "    ${GREEN}Kept:${RESET} $AUDIOCPP_SRC  (your own audio.cpp checkout)"
+    fi
+fi
 echo ""
 
 read -r -p "$(echo -e "${YELLOW}> Proceed with uninstallation? [y/N]: ${RESET}")" answer </dev/tty || answer="n"

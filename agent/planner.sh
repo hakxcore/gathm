@@ -196,8 +196,8 @@ ip:geo
 location:geo
 geolocation:geo
 network:geo
-search:googler
-google:googler
+search:websearch
+google:websearch
 movie:movie
 film:movie
 define:define

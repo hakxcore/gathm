@@ -126,7 +126,7 @@ capabilities:
 
   urlscan_search:
     description: "Search URLScan intelligence for suspicious domains/URLs"
-    tools: [urlscan, googler]
+    tools: [urlscan, websearch]
     primary: urlscan
 
   waf_detection:
@@ -161,8 +161,8 @@ capabilities:
 
   web_search:
     description: "Search the web"
-    tools: [googler]
-    primary: googler
+    tools: [websearch]
+    primary: websearch
 
   movie_lookup:
     description: "Look up movie information"

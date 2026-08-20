@@ -133,8 +133,9 @@ MIME_TYPES = {
 # When set, all requests must include: Authorization: Bearer <key>
 # Health and root endpoints are exempt.
 GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
-PUBLIC_PATHS = {"", "/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
-# GUI static files are also public (any path not starting with /api/)
+# NOTE: PUBLIC_PATHS lives next to the auth logic below. It used to be defined
+# here as well, and that earlier copy was silently shadowed by the later one --
+# so entries added here (notably /api/v1/ping) never took effect.
 
 import hashlib
 import secrets
@@ -219,8 +220,9 @@ def _build_token_map() -> dict[str, str]:
 TOKEN_MAP: dict[str, str] = _build_token_map()
 AUTH_ENABLED = bool(TOKEN_MAP)
 
-# Public paths that skip auth entirely
-PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health"}
+# Public paths that skip auth entirely.
+# GUI static files are also public (any path not starting with /api/).
+PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
 
 def resolve_role(request: Request) -> str | None:
     """Return the role for the request's bearer token, or None if unauthenticated."""
@@ -386,13 +388,54 @@ def _pilot_python() -> str:
             return str(c)
     return sys.executable  # last resort (may lack langchain → handled gracefully)
 
-def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict:
+# One agent turn on a phone is slow: CPU-only inference, a long tool-routing
+# prompt, and LangGraph on top. 180s was not enough — the GUI reported "agent
+# timed out" on a Termux device that was still working. This is only a ceiling,
+# so a generous value costs nothing when the reply is fast.
+CHAT_TIMEOUT = int(os.environ.get("GATHM_CHAT_TIMEOUT", "600"))
+
+# Ceiling on an uploaded recording. 16 kHz mono 16-bit WAV is ~32 KB/s, so 25 MB
+# is over ten minutes of speech — far more than a spoken query, and short of
+# anything that would exhaust memory on a phone.
+MAX_AUDIO_BYTES = int(os.environ.get("GATHM_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
+
+
+_SPEECH_MODULE: Any = None
+_SPEECH_TRIED = False
+
+
+def _speech():
+    """Import lib/speech.py lazily, or None when it is unusable.
+
+    Imported on demand rather than at module scope because `python3
+    api/server.py` puts api/ on sys.path[0], not the repo root — the same
+    reason the GUI's chat route needed the path fix in main().
+    """
+    global _SPEECH_MODULE, _SPEECH_TRIED
+    if _SPEECH_TRIED:
+        return _SPEECH_MODULE
+    _SPEECH_TRIED = True
+    root = str(GATHM_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from lib import speech as _mod  # noqa: PLC0415
+        _SPEECH_MODULE = _mod
+    except Exception:  # noqa: BLE001
+        _SPEECH_MODULE = None
+    return _SPEECH_MODULE
+
+
+def run_chat_agent(query: str, history: list = None, timeout: int | None = None) -> dict:
     """Run the real Pilot LLM agent for one turn and return its reply.
 
     Shells out to pilot/chat_once.py using the Pilot venv's Python so the
     stdlib-only API server stays dependency-free. Returns {"reply": ...} on
     success, or {"error": ...} which the caller can fall back on.
     """
+    if timeout is None:
+        timeout = CHAT_TIMEOUT
+
     if not CHAT_SCRIPT.exists():
         return {"error": "chat agent not installed (pilot/chat_once.py missing)"}
 
@@ -408,7 +451,12 @@ def run_chat_agent(query: str, history: list = None, timeout: int = 180) -> dict
             env={**os.environ},
         )
     except subprocess.TimeoutExpired:
-        return {"error": f"agent timed out after {timeout}s"}
+        return {"error": (
+            f"the agent did not finish within {timeout}s. On a phone this "
+            "usually means the model is just slow rather than stuck — try a "
+            "shorter question, or raise the ceiling with "
+            "GATHM_CHAT_TIMEOUT=<seconds> before starting the server."
+        )}
     except Exception as e:
         return {"error": str(e)}
 
@@ -661,6 +709,15 @@ class ExecuteRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
 
+class ChatRequest(BaseModel):
+    """GUI chat turn. `history` is prior turns as {"role", "content"} dicts."""
+    query: str
+    history: list = []
+
+class SpeechRequest(BaseModel):
+    """Text to render as speech for the browser to play."""
+    text: str
+
 class TaskRequest(BaseModel):
     task: str
 
@@ -772,6 +829,23 @@ async def agent_ask(body: QueryRequest, request: Request):
     if not role_has_permission(role, "tool:execute"):
         raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
     return await run_agent_command("ask", body.query)
+
+@app.post("/api/v1/agent/chat", tags=["agent"])
+async def agent_chat(body: ChatRequest, request: Request):
+    """Talk to the real Pilot LLM agent for one turn, with history.
+
+    run_chat_agent() and pilot/chat_once.py were both written for this route,
+    but the route itself was never registered — so the GUI's POST fell through
+    to the StaticFiles mount at "/", which only serves GET/HEAD, and came back
+    405 Method Not Allowed instead of a reply.
+
+    Runs in a thread: run_chat_agent uses blocking subprocess.run, and calling
+    it directly here would stall the event loop for the whole turn.
+    """
+    role = _get_role(request)
+    if not role_has_permission(role, "tool:execute"):
+        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    return await asyncio.to_thread(run_chat_agent, body.query, body.history)
 
 @app.post("/api/v1/agent/plan", tags=["agent"])
 async def agent_plan(body: TaskRequest, request: Request):
@@ -938,8 +1012,157 @@ async def cancel_job(job_id: str, request: Request):
     return JSONResponse({"id": job_id, "status": "cancelled"})
 
 # ---------------------------------------------------------------------------
+# Routes: speech
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/speech/status", tags=["speech"])
+async def speech_status():
+    """Whether replies can be spoken, and with what.
+
+    The GUI checks this once on load so it only asks for audio when the voice
+    runtime is actually installed (Termux) — elsewhere it stays text-only
+    instead of firing requests that can never succeed.
+    """
+    mod = _speech()
+    if mod is None:
+        return {"available": False, "reason": "lib/speech.py not importable"}
+    cfg = mod.resolve()
+    # Not "is audio.cpp installed" but "can anything here produce a wav": on
+    # macOS the OS voice can, and gating on audio.cpp alone left the browser
+    # silent on a machine where Pilot speaks.
+    available = mod.enabled() and mod.can_synthesize_file()
+    reason = ""
+    if mod.speech_disabled():
+        reason = "speech disabled (GATHM_SPEAK=0)"
+    elif not available:
+        reason = ("no speech engine that can write a wav — install audio.cpp "
+                  "(Termux) or a system voice such as say/espeak-ng")
+    return {
+        "available": available,
+        "reason": reason,
+        "engine": mod.engine(),
+        "family": cfg["family"],
+        "voice": cfg["voice"],
+        "runtime": cfg["bin"] or mod.system_voice_to_file(),
+        "model": cfg["model"],
+    }
+
+@app.get("/api/v1/transcribe/status", tags=["speech"])
+async def transcribe_status():
+    """Whether the browser's microphone can be turned into text here."""
+    mod = _speech()
+    if mod is None:
+        return {"available": False, "reason": "lib/speech.py not importable"}
+    cfg = mod.resolve_asr()
+    available = mod.asr_enabled()
+    return {
+        "available": available,
+        # Phrased for the platform: the Termux rebuild command is not advice a
+        # macOS user can act on, and the GUI shows this text verbatim.
+        "reason": mod.asr_unavailable_reason(),
+        "family": cfg["family"],
+        "model": cfg["model"],
+    }
+
+@app.post("/api/v1/transcribe", tags=["speech"])
+async def transcribe_audio(request: Request):
+    """Transcribe an uploaded recording. Body is the raw audio bytes.
+
+    Raw body rather than multipart on purpose: multipart would pull in
+    python-multipart, and the browser has a Blob to hand either way. The GUI
+    records 16 kHz mono WAV, which is what the ASR models want, so no
+    conversion is needed on this path.
+    """
+    mod = _speech()
+    if mod is None:
+        raise HTTPException(503, "speech runtime unavailable")
+    if not mod.asr_enabled():
+        raise HTTPException(503, mod.asr_unavailable_reason())
+
+    audio = await request.body()
+    if not audio:
+        raise HTTPException(400, "no audio in the request body")
+    if len(audio) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, f"recording too large (max {MAX_AUDIO_BYTES // 1024 // 1024} MB)")
+
+    suffix = ".wav"
+    ctype = (request.headers.get("content-type") or "").lower()
+    for mime, ext in (("webm", ".webm"), ("ogg", ".ogg"), ("mp4", ".m4a"),
+                      ("mpeg", ".mp3")):
+        if mime in ctype:
+            suffix = ext
+            break
+
+    import tempfile  # noqa: PLC0415 - only this route needs it
+    fd, path = tempfile.mkstemp(prefix="gathm-upload-", suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(audio)
+        # Anything that is not already a WAV goes through ffmpeg first; the
+        # models want 16 kHz mono and will not resample a webm container.
+        if suffix != ".wav":
+            ok, converted = await asyncio.to_thread(mod.to_wav16, path)
+            if not ok:
+                raise HTTPException(503, str(converted))
+            work = converted
+        else:
+            work = path
+        ok, text = await asyncio.to_thread(mod.transcribe, work)
+        if work != path:
+            try:
+                os.unlink(work)
+            except Exception:  # noqa: BLE001
+                pass
+        if not ok:
+            raise HTTPException(422, str(text))
+        return {"text": text}
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:  # noqa: BLE001
+            pass
+
+@app.post("/api/v1/speech", tags=["speech"])
+async def speech_synthesize(body: SpeechRequest):
+    """Render text to a WAV with audio.cpp and return the audio itself.
+
+    Playback happens in the browser rather than on the server: the API process
+    may have no audio device at all, and on Termux the browser is on the same
+    phone anyway. Runs in a thread — synthesis is a blocking subprocess that
+    takes seconds on a phone and would otherwise stall the event loop.
+    """
+    mod = _speech()
+    if mod is None:
+        raise HTTPException(503, "speech runtime unavailable")
+    if mod.speech_disabled():
+        raise HTTPException(503, "speech disabled (GATHM_SPEAK=0)")
+    if not mod.can_synthesize_file():
+        raise HTTPException(503, "no speech engine that can write a wav")
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    ok, result = await asyncio.to_thread(mod.synthesize_bytes, text)
+    if not ok:
+        raise HTTPException(500, str(result))
+    return Response(content=result, media_type="audio/wav",
+                    headers={"Cache-Control": "no-store"})
+
+# ---------------------------------------------------------------------------
 # Routes: API info
 # ---------------------------------------------------------------------------
+
+@app.get("/api/v1/ping", tags=["meta"])
+async def ping():
+    """Cheap liveness probe.
+
+    The GUI polls this every 30s for its Online/Offline badge and falls back to
+    /api/v1/tools when it 404s. That fallback shells out to enumerate every
+    tool, so a missing /ping meant a full tool scan twice a minute on a phone
+    (plus a 404 in the log each time). Deliberately does no work.
+    """
+    return {"status": "ok", "service": "gathm-api", "version": API_VERSION}
 
 @app.get("/api/v1", tags=["meta"])
 @app.get("/api", tags=["meta"])
@@ -953,6 +1176,7 @@ async def api_info():
             "GET /api/v1/tools": "List all tools",
             "GET /api/v1/tools/{name}": "Get tool metadata",
             "POST /api/v1/tools/{name}/execute": "Execute a tool (synchronous)",
+            "GET /api/v1/ping": "Liveness probe (public)",
             "GET /api/v1/health": "System health check (public)",
             "GET /api/v1/health/{tool}": "Tool health check",
             "POST /api/v1/agent/ask": "Natural language query",
@@ -961,6 +1185,10 @@ async def api_info():
             "POST /api/v1/agent/chain": "Execute tool pipeline",
             "POST /api/v1/agent/parallel": "Execute tools in parallel",
             "GET /api/v1/agent/status": "Agent status",
+            "GET /api/v1/speech/status": "Whether replies can be spoken",
+            "POST /api/v1/speech": "Render text to speech (audio/wav)",
+            "GET /api/v1/transcribe/status": "Whether audio can be transcribed",
+            "POST /api/v1/transcribe": "Transcribe raw audio bytes to text",
             "POST /api/v1/agent/heal": "Self-heal tools",
             "POST /api/v1/jobs": "Submit async job — returns 202 + job_id immediately",
             "GET /api/v1/jobs": "List all jobs (filter: ?status=running)",
@@ -1019,6 +1247,51 @@ def main():
 ║  Docs: http://{host}:{port}/api/docs{' ' * 14}║
 ╚══════════════════════════════════════════════════╝
 """)
+
+    # uvicorn imports the app by module path, so the repo root has to be on
+    # sys.path. When this file is run as a script — `python3 api/server.py`,
+    # which is how the installer and the gathm-api shortcut both launch it —
+    # sys.path[0] is the api/ directory instead, and "api.server:app" fails
+    # with ModuleNotFoundError: No module named 'api'.
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+
+    # Check the port before uvicorn does. Its own failure is a one-line
+    # "[Errno 48] address already in use" printed *after* "Application startup
+    # complete", which reads like the server came up — and an older server left
+    # running on the port is then the one the browser talks to, so a pull looks
+    # like it changed nothing. Name that cause and how to clear it.
+    import socket  # noqa: PLC0415 - only needed on this path
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR because uvicorn sets it too: without it this probe is the
+    # stricter of the two and would refuse to start over a socket still in
+    # TIME_WAIT from a server that has already exited — reporting a conflict
+    # where uvicorn would have bound successfully.
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind((host, port))
+    except OSError:
+        if sys.platform == "win32":
+            who = f"netstat -ano | findstr :{port}"
+            kill_hint = "taskkill /PID <pid> /F"
+        else:
+            who = f"lsof -nP -iTCP:{port} -sTCP:LISTEN"
+            kill_hint = (f"lsof -ti:{port} | xargs kill      "
+                         f"(add -9 if it survives: lsof -ti:{port} | xargs kill -9)")
+        print(
+            f"ERROR: something is already listening on {host}:{port}.\n"
+            "       If that is an older Gathm API server, the browser is still\n"
+            "       talking to it and code changes will not take effect until it\n"
+            f"       is stopped.\n\n"
+            f"       See what holds it:  {who}\n"
+            f"       Stop it:            {kill_hint}\n"
+            f"       Or use another port: gathm-api --port {port + 1}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    finally:
+        probe.close()
 
     uvicorn.run(
         "api.server:app",

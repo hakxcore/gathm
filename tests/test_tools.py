@@ -14,9 +14,8 @@ AGENT_SCRIPT = PROJECT_ROOT / "agent" / "orchestrator.sh"
 TOOLS_DIR = PROJECT_ROOT / "tools"
 VERSION_PATTERN = re.compile(r"\b\d+\.\d+(?:\.\d+)?\b")
 
-# Most tools expose `-v`; googler uses `--version`.
+# Most tools expose `-v`.
 TOOL_SMOKE_ARGS = {
-    "googler": "--version",
 }
 
 COMPLEX_QUERY_CASES = [

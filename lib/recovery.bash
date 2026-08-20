@@ -67,14 +67,16 @@ execute_with_recovery() {
 
     if [[ "$depth" -ge "$max_fallback_depth" ]]; then
         log_error "recovery" "Fallback depth limit ($max_fallback_depth) reached, aborting chain: $chain -> $tool_name"
-        echo '{"error":"fallback_depth_exceeded","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Maximum fallback depth reached. Possible cycle in fallback configuration."}' >&2
+        # stdout, not stderr: callers capture this function's stdout, so a
+        # message on stderr is dropped and the failure becomes silent.
+        echo '{"error":"fallback_depth_exceeded","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Maximum fallback depth reached. Possible cycle in fallback configuration."}'
         return 1
     fi
 
     case ":${chain}:" in
         *":${tool_name}:"*)
             log_error "recovery" "Fallback cycle detected: $chain -> $tool_name"
-            echo '{"error":"fallback_cycle","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Cycle detected in fallback chain. Check tool manifest fallback_tool fields."}' >&2
+            echo '{"error":"fallback_cycle","tool":"'"$tool_name"'","chain":"'"$chain"'","message":"Cycle detected in fallback chain. Check tool manifest fallback_tool fields."}'
             return 1
             ;;
     esac
@@ -95,7 +97,7 @@ execute_with_recovery() {
             return $?
         fi
         log_error "recovery" "No fallback available for $tool_name, circuit is open"
-        echo '{"error":"service_unavailable","tool":"'"$tool_name"'","message":"Circuit breaker is open. Tool temporarily disabled due to repeated failures."}' >&2
+        echo '{"error":"service_unavailable","tool":"'"$tool_name"'","message":"Circuit breaker is open. Tool temporarily disabled due to repeated failures. Retry in up to '"$CB_RECOVERY_TIMEOUT"'s, or reset it now with: gathm heal '"$tool_name"'"}'
         return 1
     fi
 
@@ -156,6 +158,12 @@ get_fallback_tool() {
 
 # Auto-install missing dependencies for a tool
 # Usage: auto_install_deps TOOL_NAME
+# shellcheck source=lib/deps.bash
+if ! declare -f gathm_dep_hint >/dev/null 2>&1; then
+    _gathm_deps_lib="$(dirname "${BASH_SOURCE[0]}")/deps.bash"
+    [[ -f "$_gathm_deps_lib" ]] && source "$_gathm_deps_lib"
+fi
+
 auto_install_deps() {
     local tool_name="$1"
     local manifest="$SCRIPT_DIR_RECOVERY/tools/$tool_name/tool.yaml"
@@ -192,90 +200,58 @@ _termux_pkg_name() {
 # Try to install a dependency using available package manager
 _try_install_dep() {
     local dep="$1"
-    local platform
-    platform=$(_detect_platform_for_install)
 
-    case "$platform" in
-        termux)
-            local termux_dep
-            termux_dep=$(_termux_pkg_name "$dep")
-            pkg install -y "$termux_dep" 2>/dev/null && {
-                log_info "recovery" "Installed dependency: $dep -> $termux_dep (via pkg/Termux)"
-                return 0
-            }
-            ;;
-        darwin)
-            if command -v brew &>/dev/null; then
-                brew install "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via brew)"
-                    return 0
-                }
-            elif command -v port &>/dev/null; then
-                sudo port install "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via MacPorts)"
-                    return 0
-                }
-            fi
-            ;;
-        windows)
-            if command -v scoop &>/dev/null; then
-                scoop install "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via scoop)"
-                    return 0
-                }
-            elif command -v choco &>/dev/null; then
-                choco install -y "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via choco)"
-                    return 0
-                }
-            elif command -v pacman &>/dev/null; then
-                pacman -S --noconfirm "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via pacman/MSYS2)"
-                    return 0
-                }
-            fi
-            ;;
+    # config/agent.yaml has carried allow_auto_install_deps for a while and
+    # nothing read it, so this ran `sudo apt-get install -y` on a desktop
+    # without asking. The flag is honoured now; GATHM_AUTO_INSTALL overrides it.
+    if declare -f gathm_auto_install_allowed >/dev/null 2>&1 \
+            && ! gathm_auto_install_allowed; then
+        log_info "recovery" "Auto-install disabled; '$dep' must be installed by hand"
+        return 1
+    fi
+
+    # Prefer the curated recipe over guessing that the package is named after
+    # the command — true for telnet, false for every ProjectDiscovery binary.
+    local hint=""
+    if declare -f gathm_dep_hint >/dev/null 2>&1; then
+        hint=$(gathm_dep_hint "$dep")
+    fi
+    if [[ -z "$hint" ]] && declare -f gathm_pkg_command >/dev/null 2>&1; then
+        hint=$(gathm_pkg_command "$(_termux_pkg_name "$dep")")
+    fi
+    if [[ -z "$hint" ]]; then
+        log_error "recovery" "No install recipe for dependency: $dep"
+        return 1
+    fi
+
+    # Run only plain package-manager installs unattended. Compiling Go modules,
+    # downloading an installer, or anything needing sudo is reported instead —
+    # those are decisions for the person at the keyboard, not a retry loop.
+    local runnable=0
+    case "$hint" in
+        "pkg install "*|"brew install "*|"apk add "*|"scoop install "*|"choco install "*)
+            runnable=1 ;;
+        "sudo "*)
+            case "${GATHM_AUTO_INSTALL:-}" in
+                1|true|yes|on) runnable=1 ;;
+                *) log_warn "recovery" \
+                       "Installing '$dep' needs sudo; not doing that unattended. Run: $hint"
+                   return 1 ;;
+            esac ;;
         *)
-            if command -v apt-get &>/dev/null; then
-                sudo apt-get install -y "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via apt-get)"
-                    return 0
-                }
-            elif command -v dnf &>/dev/null; then
-                sudo dnf install -y "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via dnf)"
-                    return 0
-                }
-            elif command -v yum &>/dev/null; then
-                sudo yum install -y "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via yum)"
-                    return 0
-                }
-            elif command -v pacman &>/dev/null; then
-                sudo pacman -S --noconfirm "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via pacman)"
-                    return 0
-                }
-            elif command -v zypper &>/dev/null; then
-                sudo zypper install -y "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via zypper)"
-                    return 0
-                }
-            elif command -v apk &>/dev/null; then
-                apk add "$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via apk)"
-                    return 0
-                }
-            elif command -v nix-env &>/dev/null; then
-                nix-env -iA "nixpkgs.$dep" 2>/dev/null && {
-                    log_info "recovery" "Installed dependency: $dep (via nix)"
-                    return 0
-                }
-            fi
-            ;;
+            log_warn "recovery" "Cannot install '$dep' unattended. Run: $hint"
+            return 1 ;;
     esac
 
-    log_error "recovery" "Failed to auto-install dependency: $dep"
+    if (( runnable )); then
+        log_info "recovery" "Installing missing dependency '$dep': $hint"
+        if eval "$hint" >/dev/null 2>&1 && command -v "$dep" >/dev/null 2>&1; then
+            log_info "recovery" "Installed dependency: $dep"
+            return 0
+        fi
+    fi
+
+    log_error "recovery" "Failed to auto-install '$dep'. Run: $hint"
     return 1
 }
 

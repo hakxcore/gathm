@@ -57,6 +57,17 @@ def _read_request() -> dict:
     return {}
 
 
+def _describe_failure(exc: BaseException) -> str:
+    """Delegate to the agent's describer so both paths say the same thing."""
+    try:
+        from main import describe_agent_failure  # type: ignore[import]
+    except ImportError:
+        try:
+            from pilot.main import describe_agent_failure  # type: ignore[import]
+        except ImportError:
+            return "agent error: %s" % exc
+    return describe_agent_failure(exc)
+
 def main() -> int:
     req = _read_request()
     query = (req.get("query") or "").strip()
@@ -99,7 +110,7 @@ def main() -> int:
                 if key == "agent" and value.get("next_step") == "end":
                     reply = value["messages"][-1].content
     except Exception as exc:  # noqa: BLE001
-        return _emit({"error": f"agent error: {exc}"}, 3)
+        return _emit({"error": _describe_failure(exc)}, 3)
 
     return _emit({
         "reply": reply or "(no response)",

@@ -48,15 +48,23 @@ query_dns() {
   local type="$2"
   local query_domain
   query_domain=$(normalize_domain "$domain")
+  local url="$BASE_URL?name=$query_domain&type=$type"
   local response
-  response=$(httpGet "$BASE_URL?name=$query_domain&type=$type")
-  if [[ -z "$response" ]]; then
-    echo "Error: Empty response from DNS service."
+  response=$(httpGet "$url")
+  # "Empty response" and "Expecting value: line 1 column 1" both told the user
+  # nothing: what identifies the problem is the status, the content type and the
+  # first bytes of whatever did come back.
+  if ! printf '%s' "$response" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    httpJsonError "$url" "$response" "dns.google"
     return 1
   fi
 
-  echo "$response" | python3 - "$query_domain" "$type" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$query_domain" "$type" <<'PY'
 import json
+import os
 import sys
 
 domain = sys.argv[1]
@@ -85,7 +93,7 @@ type_map = {
 }
 
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: Unable to parse DNS response ({exc}).")
     sys.exit(1)

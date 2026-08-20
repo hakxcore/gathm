@@ -62,7 +62,7 @@ categories:
     requires_approval: false
   data:
     description: "Data and information retrieval"
-    tools: [cheat, covidinfo, cryptocurrency, define, googler, lyrics, movie, news, weather]
+    tools: [cheat, covidinfo, cryptocurrency, define, websearch, lyrics, movie, news, weather]
     requires_approval: false
   media:
     description: "Media and entertainment"

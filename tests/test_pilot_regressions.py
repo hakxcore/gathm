@@ -29,8 +29,8 @@ class TestPilotRegressions(unittest.TestCase):
         self.assertEqual(PILOT.extract_tool_input(text), "define ubiquitous")
 
     def test_extract_tool_input_nonstandard_action_line(self):
-        text = "Thought: Need search.\nAction: googler \"The Matrix movie\" --np"
-        self.assertEqual(PILOT.extract_tool_input(text), "googler 'The Matrix movie' --np")
+        text = "Thought: Need search.\nAction: websearch \"The Matrix movie\" -n 3"
+        self.assertEqual(PILOT.extract_tool_input(text), "websearch 'The Matrix movie' -n 3")
 
     def test_extract_tool_input_ignores_placeholder_template(self):
         text = "Action: gathm\nAction Input: [tool_name] [arguments]"

@@ -16,7 +16,23 @@
 
 set -euo pipefail
 
-AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# Resolve this script through any symlinks before deriving the install dir.
+# ~/.local/bin/gathm-agent is a symlink to the checkout, and BASH_SOURCE[0] is the
+# *link* path — so a plain dirname pointed INSTALL_DIR at ~/.local/bin and every
+# subcommand died on a missing lib/utils.bash. Hand-rolled rather than
+# `readlink -f`, which is not portable to macOS's BSD readlink.
+_gathm_self="${BASH_SOURCE[0]}"
+_gathm_hops=0
+while [[ -L "$_gathm_self" && $_gathm_hops -lt 20 ]]; do
+    _gathm_link="$(readlink "$_gathm_self")"
+    if [[ "$_gathm_link" == /* ]]; then
+        _gathm_self="$_gathm_link"
+    else
+        _gathm_self="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)/$_gathm_link"
+    fi
+    _gathm_hops=$((_gathm_hops + 1))
+done
+AGENT_DIR="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)"
 GATHM_ROOT="$(cd "$AGENT_DIR/.." &>/dev/null && pwd)"
 
 # Source all libraries
@@ -199,10 +215,15 @@ cmd_run() {
         fi
     fi
 
-    # Execute with full recovery pipeline
-    local output
-    output=$(execute_with_recovery "$tool_name" "${tool_args[@]}")
-    local exit_code=$?
+    # Execute with full recovery pipeline.
+    # `|| exit_code=$?` is load-bearing: this script runs under `set -e`, so a
+    # bare assignment from a failing command substitution aborts the whole
+    # script right here — before the exit-code handling below, before
+    # `echo "$output"`, before _update_memory. Every failing tool therefore
+    # exited 1 with no output at all, including the circuit-breaker and
+    # dependency messages written specifically to explain the failure.
+    local output exit_code=0
+    output=$(execute_with_recovery "$tool_name" "${tool_args[@]}") || exit_code=$?
 
     # Cache successful results
     if [[ $exit_code -eq 0 && "$skip_cache" == "false" && -n "$output" ]]; then
@@ -259,7 +280,7 @@ portscan tcp_scan udp_scan port_range service_discovery nmap|portscan
 maltego graph_investigation entity_graph transforms|maltego
 tipcheck threat_intel virustotal abuseipdb ioc_reputation|tipcheck
 imganalyze image_analysis ocr object_detection image_forensics|imganalyze
-search google find_online look_up_online|googler
+search google find_online look_up_online websearch|websearch
 movie film cinema imdb rating|movie
 define meaning definition dictionary|define
 encrypt decrypt cipher encode decode base64|cipher
@@ -541,9 +562,11 @@ cmd_chain() {
             return 1
         fi
 
+        # Same `set -e` hazard as cmd_run: without `|| exit_code=$?` a failing
+        # step killed the script instead of reporting which step failed.
+        local exit_code=0
         # shellcheck disable=SC2086
-        prev_output=$(execute_with_recovery "$tool_name" $tool_args 2>&1)
-        local exit_code=$?
+        prev_output=$(execute_with_recovery "$tool_name" $tool_args 2>&1) || exit_code=$?
 
         if [[ $exit_code -ne 0 ]]; then
             echo -e "${RED}Pipeline failed at step $step ($tool_name)${RESETBG}" >&2

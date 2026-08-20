@@ -68,15 +68,19 @@ search_urlscan() {
     return 1
   fi
 
-  echo "$response" | python3 - "$query" "$limit" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$query" "$limit" <<'PY'
 import json
+import os
 import sys
 
 query = sys.argv[1]
 limit = int(sys.argv[2])
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: Could not parse URLScan response ({exc}).")
     sys.exit(1)

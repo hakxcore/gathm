@@ -40,5 +40,5 @@ output_schema:
     - name: score
       type: number
 
-fallback_tool: googler
+fallback_tool: websearch
 tags: [security, urlscan, threat-intel, phishing, url, domain]

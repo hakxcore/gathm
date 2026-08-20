@@ -5,7 +5,10 @@
 source "$(dirname "$0")/../../lib/utils.bash"
 
 currentVersion="3.0.0"
-API_BASE="https://api.bgpview.io"
+# api.bgpview.io stopped resolving entirely ("Could not resolve host"), so this
+# moved to RIPEstat: free, no key, and run by the RIPE NCC rather than a hobby
+# project. GATHM_ASN_API overrides it.
+API_BASE="${GATHM_ASN_API:-https://stat.ripe.net/data}"
 
 usage() {
   cat <<EOF
@@ -59,11 +62,11 @@ lookup_asn() {
   local normalized_asn
   if is_ip_query "$query"; then
     mode="ip"
-    endpoint="$API_BASE/ip/$query"
+    endpoint="$API_BASE/prefix-overview/data.json?resource=$query"
   elif is_asn_query "$query"; then
     mode="asn"
     normalized_asn=$(echo "$query" | tr '[:lower:]' '[:upper:]' | sed 's/^AS//')
-    endpoint="$API_BASE/asn/$normalized_asn"
+    endpoint="$API_BASE/as-overview/data.json?resource=AS$normalized_asn"
   else
     echo "Error: Query must be an ASN (AS12345) or an IP address."
     return 1
@@ -71,79 +74,87 @@ lookup_asn() {
 
   local response
   response=$(httpGet "$endpoint")
-  if [[ -z "$response" ]]; then
-    echo "Error: Empty response from BGPView API."
+  if ! printf '%s' "$response" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    httpJsonError "$endpoint" "$response" "the RIPEstat API"
     return 1
   fi
 
-  echo "$response" | python3 - "$mode" "$query" <<'PY'
+  # Prefix counts come from a second call; only for an ASN, and only if the
+  # first one worked, so a failure here degrades the report rather than it.
+  local prefixes=""
+  if [[ "$mode" == "asn" ]]; then
+    prefixes=$(httpGet "$API_BASE/announced-prefixes/data.json?resource=AS$normalized_asn" 2>/dev/null)
+    printf '%s' "$prefixes" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null \
+        || prefixes=""
+  fi
+
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies stdin (it is
+  # the program), so piped data never arrived and every parse failed with
+  # "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" GATHM_PREFIXES="${prefixes}" \
+  python3 - "$mode" "$query" <<'PY'
 import json
+import os
 import sys
 
 mode = sys.argv[1]
 query = sys.argv[2]
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: Could not parse ASN response ({exc}).")
     sys.exit(1)
 
 if payload.get("status") != "ok":
-    print("Error: ASN lookup failed.")
+    message = payload.get("status") or "unknown status"
+    print(f"Error: RIPEstat lookup failed ({message}).")
     sys.exit(1)
 
 data = payload.get("data") or {}
 
 if mode == "asn":
-    asn = data.get("asn", "N/A")
-    name = data.get("name", "N/A")
-    desc = data.get("description_short") or data.get("description_full") or "N/A"
-    country = data.get("country_code", "N/A")
-    rir = data.get("rir_allocation", "N/A")
-    email_contacts = ", ".join((data.get("email_contacts") or [])[:3]) or "N/A"
-    abuse_contacts = ", ".join((data.get("abuse_contacts") or [])[:3]) or "N/A"
-    prefixes_v4 = data.get("prefixes", {}).get("ipv4", []) or []
-    prefixes_v6 = data.get("prefixes", {}).get("ipv6", []) or []
+    resource = data.get("resource") or query
+    holder = data.get("holder") or "N/A"
+    announced = data.get("announced")
+    block = data.get("block") or {}
 
-    print(f"ASN: AS{asn}")
-    print(f"Name: {name}")
-    print(f"Description: {desc}")
-    print(f"Country: {country}")
-    print(f"RIR Allocation: {rir}")
-    print(f"Email Contacts: {email_contacts}")
-    print(f"Abuse Contacts: {abuse_contacts}")
-    print(f"IPv4 Prefix Count: {len(prefixes_v4)}")
-    print(f"IPv6 Prefix Count: {len(prefixes_v6)}")
-    if prefixes_v4:
+    print(f"ASN: AS{str(resource).lstrip('ASas')}")
+    print(f"Holder: {holder}")
+    print(f"Announced: {'yes' if announced else 'no'}")
+    if block:
+        print(f"Block: {block.get('resource', 'N/A')} ({block.get('desc') or block.get('name') or 'N/A'})")
+
+    v4, v6 = [], []
+    try:
+        pref = json.loads(os.environ.get("GATHM_PREFIXES", "") or "{}")
+        for entry in (pref.get("data") or {}).get("prefixes") or []:
+            value = entry.get("prefix", "")
+            (v6 if ":" in value else v4).append(value)
+    except Exception:
+        pass
+    print(f"IPv4 Prefix Count: {len(v4)}")
+    print(f"IPv6 Prefix Count: {len(v6)}")
+    if v4:
         print("Top IPv4 Prefixes:")
-        for p in prefixes_v4[:5]:
-            print(f"  - {p.get('prefix', 'N/A')}")
-    if prefixes_v6:
+        for value in v4[:5]:
+            print(f"  - {value}")
+    if v6:
         print("Top IPv6 Prefixes:")
-        for p in prefixes_v6[:5]:
-            print(f"  - {p.get('prefix', 'N/A')}")
+        for value in v6[:5]:
+            print(f"  - {value}")
 else:
-    prefixes = data.get("prefixes") or []
     print(f"IP: {query}")
-    print(f"Prefix Matches: {len(prefixes)}")
-    if not prefixes:
-        sys.exit(0)
-    print("Associated ASNs:")
-    seen = set()
-    for pref in prefixes[:8]:
-        asn_obj = pref.get("asn") or {}
-        asn_id = asn_obj.get("asn")
-        if asn_id in seen:
-            continue
-        seen.add(asn_id)
-        asn_name = asn_obj.get("name", "N/A")
-        asn_desc = asn_obj.get("description", "N/A")
-        country = asn_obj.get("country_code", "N/A")
-        prefix = pref.get("prefix", "N/A")
-        print(f"  - AS{asn_id} ({asn_name}, {country})")
-        print(f"    Prefix: {prefix}")
-        print(f"    Description: {asn_desc}")
+    print(f"Prefix: {data.get('resource', 'N/A')}")
+    asns = data.get("asns") or []
+    print(f"Announcing ASNs: {len(asns)}")
+    for entry in asns:
+        number = entry.get("asn", "N/A")
+        holder = entry.get("holder") or "N/A"
+        print(f"  - AS{number}  {holder}")
+    if data.get("block"):
+        blk = data["block"]
+        print(f"Block: {blk.get('resource', 'N/A')} ({blk.get('desc') or 'N/A'})")
 PY
 }
 

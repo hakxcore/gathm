@@ -448,7 +448,7 @@ body {
 
 .text-input-wrapper {
     flex: 1;
-    height: 50px;
+    min-height: 50px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 25px;
@@ -461,7 +461,11 @@ body {
     border-color: rgba(74,120,255,0.4);
 }
 
-.text-input-wrapper input {
+.text-input-wrapper {
+    padding: 13px 20px;          /* vertical padding, since height now grows */
+}
+.text-input-wrapper input,
+.text-input-wrapper textarea {
     background: transparent;
     border: none;
     color: var(--text-primary);
@@ -470,7 +474,40 @@ body {
     width: 100%;
     outline: none;
 }
-.text-input-wrapper input::placeholder {
+.text-input-wrapper textarea {
+    resize: none;                /* height is driven by content, see autoGrow */
+    line-height: 1.35;
+    max-height: 7.5em;           /* ~5 lines, then it scrolls */
+    overflow-y: auto;
+    display: block;
+}
+.text-input-wrapper input::placeholder,
+.text-input-wrapper textarea::placeholder {
+    color: var(--text-muted);
+}
+
+/* Recording indicator — the mic needs to show that it is actually capturing */
+.recording-bubble {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+.recording-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #e05252;
+    flex-shrink: 0;
+    animation: recPulse 1s ease-in-out infinite;
+}
+@keyframes recPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.35; transform: scale(0.8); }
+}
+.recording-timer {
+    font-variant-numeric: tabular-nums;
     color: var(--text-muted);
 }
 
@@ -506,6 +543,16 @@ body {
     border-color: rgba(200,80,80,0.4);
     box-shadow: 0 0 20px rgba(200,50,50,0.25);
 }
+
+.speak-btn {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid var(--border);
+}
+.speak-btn.active {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+    box-shadow: 0 0 18px rgba(74,123,247,0.28);
+}
+.speak-btn[hidden] { display: none; }
 
 .btn-icon {
     width: 18px;

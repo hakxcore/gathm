@@ -19,7 +19,14 @@ LANGCHAIN_AVAILABLE = True
 try:
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
     from langgraph.graph import StateGraph, END
-except ModuleNotFoundError as exc:
+except ImportError as exc:
+    # ImportError, not just ModuleNotFoundError. langchain_core resolves public
+    # names lazily through a module __getattr__ and re-raises any miss as a
+    # bare ImportError -- e.g. "module 'langchain_core.runnables'.'base' not
+    # found" when a version mismatch or a broken install prevents a submodule
+    # from importing. That is not a ModuleNotFoundError, so a narrower except
+    # let it escape and crashed Pilot with a traceback instead of falling back
+    # to the degraded no-LangChain mode this block exists to provide.
     LANGCHAIN_IMPORT_ERROR = exc
     LANGCHAIN_AVAILABLE = False
     AIMessage = Any  # type: ignore[assignment]
@@ -75,7 +82,7 @@ try:
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
         start_waiting, stop_waiting, print_user_message, get_user_input,
-        console,
+        stop_speaking, console,
     )
 except ImportError:
     try:
@@ -84,7 +91,7 @@ except ImportError:
             print_status_bar, render_help, render_tools_list, render_error,
             render_goodbye, check_connectivity,
             start_waiting, stop_waiting, print_user_message, get_user_input,
-            console,
+            stop_speaking, console,
         )
     except ImportError as exc:
         missing = getattr(exc, "name", None) or str(exc)
@@ -150,6 +157,48 @@ def print_tricolor_banner():
     # render_welcome handles os.system("clear") internally
     render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
+
+def describe_agent_failure(exc: BaseException) -> str:
+    """Turn a raw agent exception into something the user can act on.
+
+    A dead Ollama server surfaced as bare "[Errno 111] Connection refused" in
+    the TUI and "agent error: [Errno 111] ..." over the API — neither says what
+    to start. Walk the
+    exception chain looking for a refused/unreachable connection and name the
+    server and the fix instead.
+    """
+    seen = []
+    cur: BaseException | None = exc
+    while cur is not None and len(seen) < 10:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+
+    text = " | ".join("%s: %s" % (type(e).__name__, e) for e in seen).lower()
+    refused = (
+        "errno 111" in text
+        or "connection refused" in text
+        or "connectionerror" in text
+        or "failed to establish a new connection" in text
+        or "max retries exceeded" in text
+        or "all connection attempts failed" in text
+        or "cannot connect to host" in text
+    )
+    if not refused:
+        return "agent error: %s" % exc
+
+    backend = os.environ.get("GATHM_LLM_BACKEND", "ollama")
+    if backend == "ollama":
+        url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        host = url.split("/v1")[0]
+        return (
+            "cannot reach the Ollama server at %s — it is not running. "
+            "Start it with:  ollama serve  (then retry)" % host
+        )
+    return (
+        "cannot reach the %s LLM backend — the connection was refused. "
+        "Check that it is running and reachable." % backend
+    )
+
 
 def report_to_engineer(error_msg: str, task: str):
     """Notify the user and trigger the AutoGen Engineer."""
@@ -401,12 +450,191 @@ def _require_langchain_runtime() -> None:
             "Install pilot/requirements.txt and retry" + detail
         )
 
+# Messages that never need a tool. Kept deliberately tight: the whole message
+# must be small talk, so "hi" matches but "hi, what is AAPL trading at" does not.
+_SMALL_TALK = {
+    "hi", "hii", "hiii", "hey", "heyy", "hello", "helo", "yo", "sup",
+    "hi there", "hello there", "hey there", "good morning", "good afternoon",
+    "good evening", "good night", "gm", "gn",
+    "thanks", "thank you", "thx", "ty", "cheers", "nice", "cool", "ok", "okay",
+    "bye", "goodbye", "see you", "who are you", "what are you", "what can you do",
+    "how are you", "how are you?", "what's up", "whats up",
+}
+
+
+def _is_small_talk(text: str) -> bool:
+    """True when the entire message is a greeting or pleasantry."""
+    cleaned = re.sub(r"[^\w\s']", "", (text or "")).strip().lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned or len(cleaned) > 24:
+        return False
+    return cleaned in _SMALL_TALK
+
+
+# Short prompt for small talk: no tool list at all.
+#
+# The full prompt lists every tool plus 14 numbered rules, and rule 0 already
+# says not to call a tool for a greeting. A 1B model on a phone cannot reliably
+# honour that — "hi" came back as a stocks lookup reciting a 2023 AAPL price,
+# because the rules mention "For company STOCKS (Apple, Google)". Removing the
+# tools from the prompt makes the misroute structurally impossible instead of
+# merely forbidden, and the far shorter prompt is markedly faster on-device.
+_SMALL_TALK_PROMPT = """You are Pilot, a friendly AI assistant for the Gathm ecosystem.
+Reply to the user conversationally in one or two short sentences.
+Do not mention tools, actions, or your own instructions. Plain text only."""
+
+
+# Every turn used to send all 56 tool descriptions — 4.4 KB, about 1100 tokens
+# of the ~1800-token system prompt — before the model could produce a single
+# word. On a phone that prefill is the bulk of the wait, which is why
+# `ollama run gemma3:1b` felt instant next to Pilot. Only the tools plausibly
+# related to the question are listed now. 0 restores the full list.
+TOOL_SHORTLIST = int(os.getenv("GATHM_TOOL_SHORTLIST", "10"))
+
+# Words that carry no routing signal, so they must not score a tool.
+_STOPWORDS = frozenset("""
+a an and are as at be but by can could do does for from get give go had has have
+how i if in into is it its me my no not of on or please should show so tell that
+the their them then there these this to up us use was we were what when where
+which who why will with would you your
+""".split())
+
+# Asked about its own capabilities, the model does need the whole catalogue.
+_CATALOGUE_RE = re.compile(
+    r"\b(what (can|do) you (do|have)|which tools|list (the )?tools|"
+    r"your tools|available tools|capabilit(y|ies)|help me with)\b", re.I)
+
+
+def _query_terms(query: str) -> set:
+    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+
+
+_TOOL_INDEX: dict = {}
+
+
+def _tool_index() -> dict:
+    """{tool: (words, tags)} from its description and manifest, built once.
+
+    The manifest tags matter: a description is prose aimed at the model, while
+    tags are the vocabulary a user actually types ("registrar", "calculus"),
+    and reading them is what keeps narrowing from hiding the right tool.
+    """
+    if _TOOL_INDEX:
+        return _TOOL_INDEX
+    for name in discover_tools():
+        text = (get_tool_description(name) or "").lower()
+        tags: set = set()
+        manifest = TOOLS_DIR / name / "tool.yaml"
+        try:
+            for line in manifest.read_text().splitlines():
+                if line.startswith("tags:"):
+                    tags = {t.strip().strip("\"'") for t in
+                            line.split(":", 1)[1].strip(" []").split(",")}
+                    tags = {t for t in tags if t}
+                    break
+        except Exception:  # noqa: BLE001 - a tool without a manifest still works
+            tags = set()
+        words = set(re.findall(r"[a-z0-9]+", text)) | tags
+        _TOOL_INDEX[name] = (words, tags)
+    return _TOOL_INDEX
+
+
+def _matches(term: str, words: set) -> int:
+    """Score one query term against one tool's vocabulary."""
+    if term in words:
+        return 4
+    # Light stemming by shared prefix: "derivative" has to find "derive",
+    # "registered" has to find "registrar", "transcription" has to find
+    # "transcribe". Five characters is long enough not to collide by accident.
+    if len(term) >= 5:
+        for word in words:
+            if len(word) >= 5 and (term.startswith(word[:5]) or word.startswith(term[:5])):
+                return 2
+    return 0
+
+
+def _shortlist_tools(query: str, tools: list) -> list:
+    """Tools worth showing the model for this question, best first.
+
+    Scores each tool's name, description and manifest tags against the query's
+    content words. A tool named outright always wins; when nothing matches at
+    all the everyday tools are offered rather than an empty list, so a vague
+    question can still route.
+    """
+    if TOOL_SHORTLIST <= 0 or len(tools) <= TOOL_SHORTLIST:
+        return tools
+    if _CATALOGUE_RE.search(query or ""):
+        return tools
+
+    terms = _query_terms(query)
+    index = _tool_index()
+    lowered = (query or "").lower()
+    scored = []
+    for name in tools:
+        words, tags = index.get(name, (set(), set()))
+        score = 0
+        if name.lower() in lowered:
+            score += 100                      # named the tool explicitly
+        for term in terms:
+            if term == name.lower():
+                score += 50
+            elif term in name.lower():
+                score += 8
+            if term in tags:
+                score += 6
+            score += _matches(term, words)
+        if score:
+            scored.append((score, name))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    picked = [name for _score, name in scored[:TOOL_SHORTLIST]]
+
+    if not picked:
+        # No signal at all: the common cases, so "how hot is it" still finds a way.
+        fallback = ["weather", "dns", "ipinfo", "define", "websearch", "news",
+                    "stocks", "cryptocurrency", "currency", "browser"]
+        picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
+    return picked
+
+
+_BROWSER_HELP = """13. For WEB BROWSING use the 'browser' tool. Available actions:
+    - browser open <url>              → open URL in the user's system browser
+    - browser fetch <url>             → read page text (HTTP, works everywhere)
+    - browser navigate <url>          → go to URL in the controlled session
+    - browser click <selector|text>   → click element (CSS selector or visible text)
+    - browser type <selector> <text>  → type text into a field
+    - browser fill <selector> <value> → fill a form field
+    - browser read                    → read current page text
+    - browser scroll up|down          → scroll the page
+    - browser screenshot [url]        → capture a screenshot
+    - browser search <query>          → DuckDuckGo search and return results
+    - browser close                   → close the controlled browser session
+    Works on all platforms including Termux (requires `pkg install chromium` on Termux)."""
+
+
 # System prompt for models without native tool support
 def call_model(state: AgentState):
     _require_langchain_runtime()
 
+    # Small talk never needs a tool. Answer with the short prompt and finish,
+    # skipping tool discovery and the long rule list entirely.
+    _last = ""
+    for _m in reversed(state.get("messages") or []):
+        if isinstance(_m, HumanMessage):
+            _last = str(getattr(_m, "content", "") or "")
+            break
+    if _is_small_talk(_last):
+        from langchain_core.messages import AIMessage as _AIMsg
+        _llm = _build_llm()
+        _resp = _llm.invoke([HumanMessage(content=_SMALL_TALK_PROMPT),
+                             HumanMessage(content=_last)])
+        _text = _clean_agent_response(_resp.content)
+        return {"messages": [_AIMsg(content=_text)], "next_step": "end"}
+
     # Re-discover tools to ensure we have the latest descriptions
     available_tools = discover_tools()
+    available_tools = _shortlist_tools(_last, available_tools)
 
     # When offline, flag tools that need internet so the model doesn't try
     # them (and can tell the user why). Online, the list is left clean.
@@ -434,12 +662,18 @@ requires an internet connection and offer to retry once they're back online.
 Tools you CAN use offline: {usable}.
 """
 
+    # Only spell out the browser sub-commands when the browser is actually on
+    # offer — otherwise it is ~800 characters of prompt for an unlisted tool.
+    browser_help = _BROWSER_HELP if "browser" in available_tools else ""
+
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
 You have access to the following gathm tools:
 {tool_descriptions}
 {offline_notice}
 CRITICAL RULES:
 0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
+0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
+0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
@@ -448,28 +682,15 @@ Action Input: [tool_name] [arguments]
 2. For MATH (derivatives, integrals, etc.), use the 'newton' tool.
 3. For company STOCKS (Apple, Google), use the 'stocks' tool.
 4. For CRYPTO (Bitcoin, ETH), use the 'cryptocurrency' tool.
-5. If a tool fails (like 'googler' returning no results), explain the failure and reassure the user that the Engineer is on the way.
+5. For anything you need from the INTERNET — who a person is, what something means, current events — use the 'websearch' tool.
 6. For CURRENCY conversion, use exact order: currency [base] [target] [amount], e.g. currency USD EUR 100
 7. For GIF searches, use a single keyword argument, e.g. gif dancing or gif funny_cats
 8. You MUST remember conversation context for follow-ups (for example, if user asks "where is it compromised?" after an email breach check).
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
-11. If you encounter any tool-related error, inform the user: "This issue will be taken care by our engineer, don't worry it will be resolve shortly."
+11. If a tool fails, say in one sentence WHAT failed and quote the error text you were given, then add that the engineer has been notified. Never replace the error with a generic message — the user cannot fix what they cannot see.
 12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
-13. For WEB BROWSING use the 'browser' tool. Available actions:
-    - browser open <url>              → open URL in the user's system browser
-    - browser fetch <url>             → read page text (HTTP, works everywhere)
-    - browser navigate <url>          → go to URL in the controlled session
-    - browser click <selector|text>   → click element (CSS selector or visible text)
-    - browser type <selector> <text>  → type text into a field
-    - browser fill <selector> <value> → fill a form field
-    - browser read                    → read current page text
-    - browser scroll up|down          → scroll the page
-    - browser screenshot [url]        → capture a screenshot
-    - browser search <query>          → DuckDuckGo search and return results
-    - browser close                   → close the controlled browser session
-    Works on all platforms including Termux (requires `pkg install chromium` on Termux).
-
+{browser_help}
 When you have a final answer, provide it directly without the Action format.
 """
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
@@ -494,6 +715,44 @@ When you have a final answer, provide it directly without the Action format.
         "next_step": "end"
     }
 
+# Terminal art is for humans. `weather` alone returns ~3.5 KB of box-drawing and
+# ANSI escapes, which a 1B model has to read as ~1000 tokens of noise before it
+# can answer — and did not survive: it produced the canned failure line for a
+# lookup that had actually worked. Observations are stripped and capped.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
+_BOX_RE = re.compile(r"[\u2500-\u257f\u2580-\u259f]+")
+OBS_MAX_CHARS = int(os.getenv("GATHM_OBS_MAX_CHARS", "1500"))
+
+
+def _clean_observation(output: str) -> str:
+    """Reduce a tool's terminal output to what a model can actually use."""
+    text = _ANSI_RE.sub("", output or "")
+    text = _BOX_RE.sub(" ", text)
+    # Collapse the runs of spaces that the art leaves behind, and drop the blank
+    # lines that come with it, without joining separate lines together.
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    text = "\n".join(lines)
+    if OBS_MAX_CHARS > 0 and len(text) > OBS_MAX_CHARS:
+        text = (text[:OBS_MAX_CHARS].rstrip()
+                + f"\n[... output truncated at {OBS_MAX_CHARS} characters ...]")
+    return text
+
+
+def _looks_like_tool_failure(output: str) -> bool:
+    """Whether a tool's output is an error rather than an answer."""
+    text = (output or "").strip()
+    if not text or text == "(no output)":
+        return True
+    lowered = text.lower()
+    return (lowered.startswith(("error:", "usage:")) or "[stderr]:" in lowered
+            or "command not found" in lowered or "not installed" in lowered
+            or '"error"' in lowered)
+
+
 def tool_node(state: AgentState):
     last_message = state["messages"][-1]
     content = last_message.content
@@ -507,7 +766,20 @@ def tool_node(state: AgentState):
             normalized_input = tool_input
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
-        return {"messages": [HumanMessage(content=f"Observation: {result}")]}
+
+        # Label a failure as a failure. Left as a bare "Observation:", a tool
+        # error was answered with the canned engineer line and the actual
+        # reason never reached the user — which is how a broken weather lookup
+        # became "This issue will be taken care by our engineer".
+        if _looks_like_tool_failure(result):
+            return {"messages": [HumanMessage(content=(
+                f"Observation: the tool FAILED. Its exact output was:\n"
+                f"{_clean_observation(result)}\n"
+                "Tell the user what failed and quote that error, then say the "
+                "engineer has been notified. Do not try the same tool again."
+            ))]}
+        return {"messages": [HumanMessage(content=
+                                          f"Observation: {_clean_observation(result)}")]}
     return {"messages": [HumanMessage(content="Error: Could not parse tool input.")]}
 
 def should_continue(state: AgentState):
@@ -531,6 +803,105 @@ else:
     workflow = None
     app = None
 
+def _voice_input(arg: str) -> Optional[str]:
+    """/listen — record from the mic and return the transcript as the query.
+
+    Deliberately not a tool: the agent needs the words before it can decide
+    anything, so listening happens at the input edge, ahead of the graph.
+    """
+    try:
+        from lib import speech
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"\n  [color(196)][x][/color(196)] speech unavailable: {exc}")
+        return None
+
+    seconds = None
+    if arg:
+        try:
+            seconds = int(arg.split()[0])
+        except ValueError:
+            console.print(f"\n  [color(214)][!][/color(214)] /listen takes seconds, "
+                          f"got '{arg}'")
+            return None
+
+    if not speech.asr_enabled():
+        cfg = speech.resolve_asr()
+        if not cfg["bin"]:
+            console.print("\n  [color(214)][!][/color(214)] Speech runtime not "
+                          "installed. Run ./install on Termux.")
+        else:
+            console.print("\n  [color(214)][!][/color(214)] No speech-to-text model "
+                          "installed. Add it with:")
+            console.print("      [dim]GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
+                          "GATHM_AUDIOCPP_FORCE=1 ./install[/dim]")
+        return None
+
+    if speech.find_recorder() is None:
+        console.print("\n  [color(214)][!][/color(214)] No way to record audio. On "
+                      "Termux: [dim]pkg install termux-api[/dim] plus the "
+                      "Termux:API app.")
+        return None
+
+    secs = seconds or int(os.getenv("GATHM_LISTEN_SECONDS", "8"))
+    console.print(f"\n  [color(208)]🎤 Listening for {secs}s...[/color(208)]")
+    ok, text = speech.listen(seconds)
+    if not ok:
+        console.print(f"  [color(196)][x][/color(196)] {text}")
+        return None
+    console.print(f"  [dim]heard:[/dim] {text}")
+    return text
+
+
+def _handle_speak_command(arg: str) -> None:
+    """/speak — inspect, toggle, or test the audio.cpp voice.
+
+    Speech is opt-out via GATHM_SPEAK, and on a phone it is worth being able to
+    silence a long answer without restarting Pilot.
+    """
+    try:
+        from lib import speech
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"\n  [color(196)][x][/color(196)] speech unavailable: {exc}")
+        return
+
+    arg_lower = arg.lower()
+
+    if arg_lower in ("on", "enable"):
+        os.environ["GATHM_SPEAK"] = "1"
+        cfg = speech.resolve()
+        if not cfg["bin"] or not cfg["model"]:
+            console.print("\n  [color(214)][!][/color(214)] Speech on, but the voice "
+                          "runtime is not installed. Run ./install on Termux.")
+        else:
+            console.print("\n  [color(40)][+][/color(40)] Speech on.")
+        return
+
+    if arg_lower in ("off", "disable", "mute"):
+        os.environ["GATHM_SPEAK"] = "0"
+        speech.stop()
+        console.print("\n  [color(40)][+][/color(40)] Speech off.")
+        return
+
+    if arg:  # anything else is a phrase to try out loud
+        console.print(f"\n  [dim]speaking:[/dim] {arg}")
+        if not speech.speak(arg, quiet=False):
+            console.print("  [color(214)][!][/color(214)] Nothing was played — "
+                          "see /speak for the reason.")
+        return
+
+    cfg = speech.resolve()
+    player = speech.find_player()
+    console.print("")
+    console.print(f"  [color(208)]Runtime:[/color(208)] {cfg['bin'] or 'not installed'}")
+    console.print(f"  [color(208)]Voice:[/color(208)]   {cfg['voice']} ({cfg['family']})")
+    console.print(f"  [color(208)]Model:[/color(208)]   {cfg['model'] or 'not configured'}")
+    console.print(f"  [color(208)]Player:[/color(208)]  "
+                  f"{' '.join(player) if player else 'none — pkg install mpv'}")
+    console.print(f"  [color(208)]Enabled:[/color(208)] {speech.enabled()}")
+    if not speech.enabled() or not player:
+        console.print("  [dim]Fix what is missing above, then: /speak hello[/dim]")
+
+
 def _handle_slash_command(cmd: str) -> bool:
     """Handle slash commands. Returns True if a command was handled."""
     cmd_lower = cmd.strip().lower()
@@ -552,6 +923,10 @@ def _handle_slash_command(cmd: str) -> bool:
     if cmd_lower == "/model":
         console.print(f"\n  [color(208)]Backend:[/color(208)] {LLM_BACKEND.upper()}")
         console.print(f"  [color(208)]Model:[/color(208)]   {OLLAMA_MODEL}")
+        return True
+
+    if cmd_lower == "/speak" or cmd_lower.startswith("/speak "):
+        _handle_speak_command(cmd.strip()[len("/speak"):].strip())
         return True
 
     if cmd_lower in ("/quit", "/exit"):
@@ -588,6 +963,20 @@ def main():
             user_input = get_user_input()
             if not user_input:
                 continue
+
+            # The previous answer may still be being read aloud; synthesis of a
+            # long reply outlives the turn that produced it. Whatever the user
+            # types next takes precedence over hearing the rest of it.
+            stop_speaking()
+
+            # /listen is not a slash command like the others: it produces the
+            # query rather than printing something, so the transcript falls
+            # through into the normal turn below.
+            if user_input.lower() == "/listen" or user_input.lower().startswith("/listen "):
+                heard = _voice_input(user_input[len("/listen"):].strip())
+                if not heard:
+                    continue
+                user_input = heard
 
             # ── Exit ──
             if user_input.lower() in ("exit", "quit", "/quit", "/exit"):
@@ -630,11 +1019,15 @@ def main():
                 console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
+                # The TUI used to print the raw exception, so a stopped Ollama
+                # server read as "[Errno 111] Connection refused" with no hint
+                # that `ollama serve` is the fix. Same describer as the API path.
+                described = describe_agent_failure(e)
                 report_to_engineer(str(e), user_input)
                 _stream_error = True
                 stop_waiting()
-                render_error(str(e))
-                final_agent_reply = "I encountered an error. The Engineer is on it."
+                render_error(described)
+                final_agent_reply = described
             finally:
                 stop_waiting()
 

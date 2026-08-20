@@ -107,16 +107,20 @@ run_virustotal() {
     return 1
   fi
 
-  echo "$response" | python3 - "$indicator" "$type" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$indicator" "$type" <<'PY'
 import datetime
 import json
+import os
 import sys
 
 indicator = sys.argv[1]
 indicator_type = sys.argv[2]
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print("Provider: VirusTotal")
     print(f"Status: parse error ({exc})")
@@ -193,14 +197,18 @@ run_abuseipdb() {
     return 1
   fi
 
-  echo "$response" | python3 - "$indicator" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$indicator" <<'PY'
 import json
+import os
 import sys
 
 indicator = sys.argv[1]
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print("Provider: AbuseIPDB")
     print(f"Status: parse error ({exc})")

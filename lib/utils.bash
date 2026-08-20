@@ -90,6 +90,47 @@ httpGet() {
     esac
 }
 
+# Run a command under a wall-clock bound, wherever we are.
+# macOS has no GNU `timeout` — tools that called it directly either failed for
+# every invocation or ran unbounded, which is how siteciphers came to hang.
+run_bounded() {
+    local seconds="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+    else
+        # No bound available: still run, rather than failing outright.
+        "$@"
+    fi
+}
+
+# Explain why a JSON API call did not return JSON, instead of "empty response".
+# The status, the content type and the first bytes are what actually identify
+# the problem — a 403, an HTML error page, a captive portal, a moved endpoint.
+httpJsonError() {
+    local url="$1" body="$2" service="${3:-the service}"
+    local status="" ctype="" probe=""
+    if command -v curl >/dev/null 2>&1; then
+        probe=$(curl -sS -o /dev/null -A curl -L \
+                     -w '%{http_code} %{content_type}' "$url" 2>/dev/null) || probe=""
+        status="${probe%% *}"
+        ctype="${probe#* }"
+    fi
+    echo "Error: $service did not return usable JSON."
+    if [[ -n "$status" ]]; then
+        echo "       HTTP status: $status   content-type: ${ctype:-unknown}"
+    fi
+    if [[ -n "${body// }" ]]; then
+        echo "       First bytes: $(printf '%s' "$body" | tr -d '\r' | tr '\n' ' ' | head -c 200)"
+    else
+        echo "       The response body was empty."
+    fi
+    echo "       Reproduce with: curl -sS -D - '$url' | head -20"
+}
+
 checkInternet() {
     httpGet github.com > /dev/null 2>&1 || return 1
 }
@@ -151,17 +192,28 @@ print_divider() {
     printf "${ORANGE}%*s\n${RESETBG}" "$cols" | tr ' ' '-'
 }
 
+# Install recipes, so a missing dependency comes with the command that fixes it.
+# shellcheck source=lib/deps.bash
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/deps.bash" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/deps.bash"
+fi
+
 check_dependencies() {
     local missing_deps=0
     for dep in "$@"; do
         if ! command -v "$dep" &>/dev/null; then
             echo "${RED}Error: Required command '$dep' is not installed.${RESETBG}"
+            # "Please install the missing dependencies and try again" told the
+            # user nothing — and for a Go binary or a differently-named package,
+            # guessing `pkg install <command>` does not work either.
+            if declare -f gathm_dep_report >/dev/null 2>&1; then
+                gathm_dep_report "$dep"
+            fi
             missing_deps=1
         fi
     done
 
     if [ "$missing_deps" -eq 1 ]; then
-        echo "Please install the missing dependencies and try again."
         exit 1
     fi
 }

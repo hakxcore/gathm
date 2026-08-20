@@ -48,14 +48,23 @@
         <div class="input-area">
             <div class="input-row">
                 <div class="text-input-wrapper">
-                    <input type="text" id="messageInput"
-                           placeholder="Ask anything…" autocomplete="off">
+                    <!-- textarea, not input: a long prompt has to stay readable
+                         while it is being typed. Grows to a few lines, then
+                         scrolls. Enter sends, Shift+Enter makes a newline. -->
+                    <textarea id="messageInput" rows="1"
+                              placeholder="Ask anything…  (/clear to reset)"
+                              autocomplete="off"></textarea>
                 </div>
                 <button class="action-btn send-btn" id="sendBtn" aria-label="Send">
                     <i data-lucide="send" class="btn-icon"></i>
                 </button>
                 <button class="action-btn mic-btn" id="micBtn" aria-label="Voice input">
                     <i data-lucide="mic" class="btn-icon"></i>
+                </button>
+                <!-- Shown only when the server reports a working voice runtime -->
+                <button class="action-btn speak-btn" id="speakBtn"
+                        aria-label="Speak replies" hidden>
+                    <i data-lucide="volume-2" class="btn-icon"></i>
                 </button>
             </div>
         </div>

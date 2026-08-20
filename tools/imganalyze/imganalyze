@@ -87,6 +87,7 @@ run_object_analysis() {
   payload=$(python3 - "$image_path" "$model" <<'PY'
 import base64
 import json
+import os
 import pathlib
 import sys
 
@@ -118,14 +119,18 @@ PY
     return 1
   fi
 
-  echo "$response" | python3 - "$model" <<'PY'
+  # GATHM_PAYLOAD, not a pipe: the heredoc below already occupies
+  # stdin (it is the program), so piped data never arrived and every
+  # parse failed with "Expecting value: line 1 column 1".
+  GATHM_PAYLOAD="${response}" python3 - "$model" <<'PY'
 import json
+import os
 import sys
 
 model = sys.argv[1]
 
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(os.environ.get("GATHM_PAYLOAD", ""))
 except Exception as exc:
     print(f"Error: could not parse Ollama response ({exc})")
     sys.exit(1)

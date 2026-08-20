@@ -1,11 +1,48 @@
 #!/usr/bin/env bash
 # Author: hakxcore
 # Gathm - A modular tool framework
+#
+# One command starts everything: `gathm` brings up the web GUI in your browser
+# and drops you into the Pilot TUI in this terminal. The old dialog-driven tool
+# menu is gone — Pilot (and `gathm run <tool>`) covers everything it did, and it
+# no longer forces `dialog`/`pv` to be installed just to launch.
 
 currentVersion="3.0.0"
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# Resolve this script through any symlinks before deriving the install dir.
+# ~/.local/bin/gathm is a symlink to the checkout, and BASH_SOURCE[0] is the
+# *link* path — so a plain dirname pointed INSTALL_DIR at ~/.local/bin and every
+# subcommand died on a missing lib/utils.bash. Hand-rolled rather than
+# `readlink -f`, which is not portable to macOS's BSD readlink.
+_gathm_self="${BASH_SOURCE[0]}"
+_gathm_hops=0
+while [[ -L "$_gathm_self" && $_gathm_hops -lt 20 ]]; do
+    _gathm_link="$(readlink "$_gathm_self")"
+    if [[ "$_gathm_link" == /* ]]; then
+        _gathm_self="$_gathm_link"
+    else
+        _gathm_self="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)/$_gathm_link"
+    fi
+    _gathm_hops=$((_gathm_hops + 1))
+done
+INSTALL_DIR="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)"
 AGENT_SCRIPT="$INSTALL_DIR/agent/orchestrator.sh"
 source "$INSTALL_DIR/lib/utils.bash"
+
+# --- Where the GUI lives ---
+GUI_HOST="${GATHM_GUI_HOST:-${GATHM_HOST:-127.0.0.1}}"
+GUI_PORT="${GATHM_GUI_PORT:-${GATHM_PORT:-8080}}"
+# 0.0.0.0 is a bind address, not somewhere a browser can go — advertise
+# loopback instead so the URL we print and open is always reachable.
+_gui_display_host="$GUI_HOST"
+[[ "$_gui_display_host" == "0.0.0.0" || "$_gui_display_host" == "::" ]] && _gui_display_host="127.0.0.1"
+GUI_URL="http://${_gui_display_host}:${GUI_PORT}"
+
+GATHM_STATE_DIR="${GATHM_CONFIG_DIR:-$HOME/.gathm}"
+GUI_PID_FILE="$GATHM_STATE_DIR/gui.pid"
+GUI_LOG="$GATHM_STATE_DIR/gui.log"
+
+OPEN_BROWSER=1
+START_GUI=1
 
 # --- Graceful shutdown ---
 _gathm_cleanup() {
@@ -16,36 +53,228 @@ _gathm_cleanup() {
 }
 trap _gathm_cleanup INT TERM
 
-# Ensure dependencies
-check_menu_dependencies() {
-    local deps=("dialog" "pv")
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            echo "${RED}Error: $dep is required but not installed.${RESETBG}"
-            echo "Please install it using your package manager (e.g., pkg install $dep or apt install $dep)."
-            exit 1
-        fi
+# --- Python selection -------------------------------------------------------
+# The installer builds a venv at pilot/venv and puts FastAPI/uvicorn in it, so
+# prefer that over whatever python3 happens to be on PATH.
+pick_python() {
+    local candidate
+    for candidate in \
+        "$INSTALL_DIR/pilot/venv/bin/python3" \
+        "$INSTALL_DIR/pilot/venv/bin/python"; do
+        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
     done
-    getConfiguredClient
+    for candidate in python3 python; do
+        command -v "$candidate" &>/dev/null && { command -v "$candidate"; return 0; }
+    done
+    return 1
 }
 
-# Dynamic Tool Discovery
-scan_tools() {
-    tools=()
-    tool_descs=()
-    
-    # Built-in tools
-    for dir in "$INSTALL_DIR"/tools/*/; do
-        tool_name=$(basename "$dir")
-        # Check if a file with the same name as the directory exists, and it's an executable
-        if [[ -f "$dir/$tool_name" && -x "$dir/$tool_name" ]]; then
-            tools+=("$tool_name")
-            # Try to extract description from the tool script (looking for "Description:")
-            desc=$(grep -m 1 "Description:" "$dir/$tool_name" | sed 's/Description: //')
-            if [[ -z "$desc" ]]; then desc="No description available"; fi
-            tool_descs+=("$desc")
+# --- GUI server -------------------------------------------------------------
+# Is anything answering on the GUI port? curl first, then wget, then Python —
+# a Termux install that skipped curl should still get a working launcher.
+gui_responding() {
+    local timeout="${1:-2}" py
+    if command -v curl &>/dev/null; then
+        curl -fsS --max-time "$timeout" -o /dev/null "$GUI_URL/" 2>/dev/null && return 0
+        return 1
+    fi
+    if command -v wget &>/dev/null; then
+        wget -q -T "$timeout" -O /dev/null "$GUI_URL/" 2>/dev/null && return 0
+        return 1
+    fi
+    py="$(pick_python)" || return 1
+    "$py" -c 'import sys,urllib.request; urllib.request.urlopen(sys.argv[1], timeout=float(sys.argv[2]))' \
+        "$GUI_URL/" "$timeout" &>/dev/null
+}
+
+open_url() {
+    local url="$1" platform
+    platform="$(detect_platform)"
+    case "$platform" in
+        darwin)  open "$url" &>/dev/null || true ;;
+        termux)  termux-open-url "$url" &>/dev/null || true ;;
+        windows) cmd.exe /c start "" "$url" &>/dev/null || true ;;
+        wsl)     cmd.exe /c start "" "$url" &>/dev/null || xdg-open "$url" &>/dev/null || true ;;
+        *)       xdg-open "$url" &>/dev/null \
+                     || sensible-browser "$url" &>/dev/null \
+                     || x-www-browser "$url" &>/dev/null || true ;;
+    esac
+}
+
+# Start api/server.py in the background. Returns 0 when the GUI is serving.
+start_gui() {
+    if gui_responding 2; then
+        echo -e "${GREEN}[+]${RESETBG} GUI already running at ${CYAN}${GUI_URL}${RESETBG}"
+        return 0
+    fi
+
+    local server_script="$INSTALL_DIR/api/server.py"
+    if [[ ! -f "$server_script" ]]; then
+        echo -e "${ORANGE}[!]${RESETBG} API server not found at $server_script — starting Pilot only." >&2
+        return 1
+    fi
+
+    local py
+    if ! py="$(pick_python)"; then
+        echo -e "${ORANGE}[!]${RESETBG} Python 3 not found — cannot start the GUI." >&2
+        return 1
+    fi
+
+    mkdir -p "$GATHM_STATE_DIR" 2>/dev/null || true
+    echo -e "${GREEN}[*]${RESETBG} Starting GUI server on port ${GUI_PORT}..."
+    rm -f "$GUI_PID_FILE" 2>/dev/null || true
+
+    # The server has to end up in its OWN process group, not ours.
+    #
+    # A background job in a non-interactive script inherits the script's
+    # process group, and because launch_pilot `exec`s, Pilot becomes the leader
+    # of that same group — the terminal's foreground group. So Ctrl+C at the
+    # Pilot prompt was delivered to the GUI server too and took it down with
+    # Pilot (uvicorn logging "Shutting down"). `nohup` does not help: it blocks
+    # SIGHUP, not SIGINT.
+    #
+    # `set -m` in a subshell turns on job control there, which makes the
+    # background job a process-group leader. That is enough — terminal signals
+    # only reach the foreground group — and unlike `setsid` it exists
+    # everywhere bash does, including macOS. stdin comes from /dev/null so a
+    # background read can never raise SIGTTIN.
+    (
+        set -m
+        nohup "$py" "$server_script" --host "$GUI_HOST" --port "$GUI_PORT" \
+            </dev/null >>"$GUI_LOG" 2>&1 &
+        echo $! >"$GUI_PID_FILE" 2>/dev/null || true
+    )
+    local gui_pid; gui_pid="$(cat "$GUI_PID_FILE" 2>/dev/null || true)"
+    if [[ -z "$gui_pid" ]]; then
+        echo -e "${ORANGE}[!]${RESETBG} Could not start the GUI server." >&2
+        return 1
+    fi
+
+    # Termux phones are slow to import FastAPI; give them longer.
+    local max_wait=8
+    [[ "$(detect_platform)" == "termux" ]] && max_wait=20
+    local waited=0
+    while (( waited < max_wait )); do
+        sleep 1
+        waited=$((waited + 1))
+        if gui_responding 2; then
+            echo -e "${GREEN}[+]${RESETBG} GUI ready at ${CYAN}${GUI_URL}${RESETBG}"
+            return 0
+        fi
+        # Died on startup (port in use, missing FastAPI) — stop waiting and say why.
+        if ! kill -0 "$gui_pid" 2>/dev/null; then
+            break
         fi
     done
+
+    echo -e "${ORANGE}[!]${RESETBG} GUI server did not come up — see $GUI_LOG" >&2
+    if [[ -s "$GUI_LOG" ]]; then
+        tail -n 12 "$GUI_LOG" 2>/dev/null | sed 's/^/      /' >&2
+    fi
+    rm -f "$GUI_PID_FILE" 2>/dev/null || true
+    return 1
+}
+
+stop_gui() {
+    local pid="" stopped=0
+    [[ -f "$GUI_PID_FILE" ]] && pid="$(cat "$GUI_PID_FILE" 2>/dev/null)"
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        local waited=0
+        while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+        stopped=1
+    fi
+    rm -f "$GUI_PID_FILE" 2>/dev/null || true
+
+    if (( stopped )); then
+        echo -e "${GREEN}[+]${RESETBG} GUI server stopped (pid $pid)."
+        return 0
+    fi
+    if gui_responding 2; then
+        # Someone else's server, or one started before this pid file existed.
+        echo -e "${ORANGE}[!]${RESETBG} Something is still serving ${GUI_URL} but Gathm did not start it."
+        echo "    Stop it with: pkill -f api/server.py"
+        return 1
+    fi
+    echo "No GUI server is running."
+    return 0
+}
+
+launch_pilot() {
+    local pilot_run="$INSTALL_DIR/pilot/run.sh"
+    local pilot_main="$INSTALL_DIR/pilot/main.py"
+
+    if [[ -f "$pilot_run" ]]; then
+        exec bash "$pilot_run" "$@"
+    fi
+    if [[ -f "$pilot_main" ]]; then
+        local py
+        py="$(pick_python)" || {
+            echo -e "${RED}Error: Python 3 not found — cannot start Pilot.${RESETBG}" >&2
+            exit 1
+        }
+        exec "$py" "$pilot_main" "$@"
+    fi
+    echo -e "${RED}Error: Pilot not found at $pilot_main${RESETBG}" >&2
+    echo "Re-run the installer: ./install" >&2
+    exit 1
+}
+
+# Shared flag parsing for `gathm` and `gathm gui`.
+parse_launch_flags() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-gui|--tui-only) START_GUI=0; shift ;;
+            --no-browser)        OPEN_BROWSER=0; shift ;;
+            --port)              GUI_PORT="${2:-$GUI_PORT}"; shift 2 ;;
+            --port=*)            GUI_PORT="${1#*=}"; shift ;;
+            --host)              GUI_HOST="${2:-$GUI_HOST}"; shift 2 ;;
+            --host=*)            GUI_HOST="${1#*=}"; shift ;;
+            *)                   shift ;;
+        esac
+    done
+    _gui_display_host="$GUI_HOST"
+    [[ "$_gui_display_host" == "0.0.0.0" || "$_gui_display_host" == "::" ]] && _gui_display_host="127.0.0.1"
+    GUI_URL="http://${_gui_display_host}:${GUI_PORT}"
+}
+
+# `gathm` with no arguments: GUI in the browser, Pilot in this terminal.
+cmd_start() {
+    parse_launch_flags "$@"
+
+    echo ""
+    echo -e "${BOLD}${GREEN}Gathm v$currentVersion${RESETBG}"
+    echo ""
+
+    if (( START_GUI )); then
+        if start_gui; then
+            if (( OPEN_BROWSER )); then
+                echo -e "${GREEN}[*]${RESETBG} Opening ${CYAN}${GUI_URL}${RESETBG} in your browser..."
+                open_url "$GUI_URL"
+            fi
+            echo "    The GUI keeps running after you leave Pilot. Stop it with: gathm stop"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BOLD}Starting Pilot...${RESETBG}  ${ORANGE}(/exit or Ctrl+C to quit)${RESETBG}"
+    echo ""
+    launch_pilot
+}
+
+# `gathm gui`: server + browser, no TUI.
+cmd_gui() {
+    parse_launch_flags "$@"
+    start_gui || exit 1
+    if (( OPEN_BROWSER )); then
+        open_url "$GUI_URL"
+    fi
+    echo "    Stop it with: gathm stop"
 }
 
 # Unified command help
@@ -54,14 +283,24 @@ show_help() {
 Gathm v$currentVersion
 
 Usage:
-  gathm                          Open interactive menu
-  gathm menu                     Open interactive menu
+  gathm                          Start the web GUI in your browser and Pilot here
+  gathm tui                      Pilot only (no GUI server, no browser)
+  gathm gui                      GUI server + browser only (no Pilot)
+  gathm stop                     Stop the GUI server Gathm started
   gathm <agent-command> [...]    Run orchestrator command (run/ask/plan/...)
   gathm <tool> [args...]         Shortcut for: gathm run <tool> [args...]
 
+Launch options (for 'gathm' and 'gathm gui'):
+  --no-gui, --tui-only           Skip the GUI server and the browser
+  --no-browser                   Start the GUI server but do not open a browser
+  --port <n>                     GUI port (default $GUI_PORT, env GATHM_GUI_PORT)
+  --host <addr>                  GUI bind address (default $GUI_HOST, env GATHM_GUI_HOST)
+
 Examples:
   gathm
-  gathm menu
+  gathm --no-browser
+  gathm tui
+  gathm gui --port 9090
   gathm ask "weather in Tokyo"
   gathm run dns -t MX gmail.com
   gathm weather "Paris"
@@ -97,83 +336,34 @@ tool_exists() {
     [[ -f "$INSTALL_DIR/tools/$tool_name/$tool_name" && -x "$INSTALL_DIR/tools/$tool_name/$tool_name" ]]
 }
 
-# Main Menu
-main_menu() {
-    check_menu_dependencies
-
-    while true; do
-        scan_tools
-        
-        # Construct dialog menu items
-        menu_items=()
-        for i in "${!tools[@]}"; do
-            menu_items+=("${tools[$i]}" "${tool_descs[$i]}")
-        done
-        
-        exec 3>&1
-        selection=$(dialog \
-            --backtitle "Gathm Framework v$currentVersion" \
-            --title "Main Menu" \
-            --clear \
-            --cancel-label "Exit" \
-            --menu "Select a tool to run:" 20 70 15 \
-            "${menu_items[@]}" \
-            2>&1 1>&3)
-        exit_status=$?
-        exec 3>&-
-        
-        if [ $exit_status -ne 0 ]; then
-            clear
-            echo "Goodbye!"
-            exit 0
-        fi
-        
-        run_tool "$selection"
-    done
-}
-
-run_tool() {
-    local tool=$1
-    local tool_path="$INSTALL_DIR/tools/$tool/$tool"
-
-    # Ask for arguments (dialog may be cancelled with Esc/Cancel)
-    local args=""
-    exec 3>&1
-    args=$(dialog \
-        --title "$tool" \
-        --inputbox "Enter arguments for $tool (leave empty if none):" 10 60 \
-        2>&1 1>&3) || { exec 3>&-; return 0; }
-    exec 3>&-
-
-    clear
-    print_header
-    echo "Running $tool..."
-    echo "------------------------------------------------"
-
-    # Run the tool in a subshell; catch errors and interrupts
-    (source "$INSTALL_DIR/lib/utils.bash"; "$tool_path" $args) || {
-        local rc=$?
-        if [[ $rc -eq 130 ]]; then
-            echo -e "\n${ORANGE}[!] Tool interrupted.${RESETBG}"
-        else
-            echo -e "\n${RED}[!] Tool exited with error (code $rc).${RESETBG}"
-            echo -e "${GREEN}The Engineer will take care of this shortly.${RESETBG}"
-        fi
-    }
-
-    echo "------------------------------------------------"
-    pause
-}
-
 main() {
     local first_arg="${1:-}"
 
-    if [[ -z "$first_arg" || "$first_arg" == "menu" ]]; then
-        main_menu
-        return 0
-    fi
-
     case "$first_arg" in
+        ""|start|up|menu)
+            [[ -n "$first_arg" ]] && shift
+            cmd_start "$@"
+            return 0
+            ;;
+        # Launch flags with no subcommand in front: `gathm --no-browser` is
+        # still `gathm`, so start normally rather than calling it unknown.
+        --no-gui|--tui-only|--no-browser|--port|--port=*|--host|--host=*)
+            cmd_start "$@"
+            return 0
+            ;;
+        tui|pilot|chat)
+            shift
+            launch_pilot "$@"
+            ;;
+        gui|web|browser)
+            shift
+            cmd_gui "$@"
+            return 0
+            ;;
+        stop)
+            stop_gui
+            return $?
+            ;;
         help|-h|--help)
             show_help
             return 0
