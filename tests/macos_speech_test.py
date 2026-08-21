@@ -11,6 +11,7 @@ what is under test is the decision logic rather than this machine's hardware.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -170,11 +171,39 @@ def test_recorder_device() -> None:
         os.environ.pop("GATHM_AUDIO_INPUT", None)
 
 
-def test_installer_gate() -> None:
-    print("\ninstall: the audio.cpp gate now admits macOS")
-    src = open(os.path.join(ROOT, "install")).read()
+def _gate_says(platform: str) -> str:
+    """Run the installer's real platform gate for one platform string.
 
-    ok("_is_darwin exists", "_is_darwin()" in src)
+    The functions are pulled out of `install` and evaluated on their own, so
+    this tests the shipped code rather than a copy of its logic.
+    """
+    script = (
+        f'_GATHM_PLATFORM={platform}\n'
+        'detect_platform() { echo "$_GATHM_PLATFORM"; }\n'
+        'eval "$(sed -n \'/^_is_termux()/,/^}/p\' install)"\n'
+        'eval "$(sed -n \'/^_is_darwin()/,/^}/p\' install)"\n'
+        'eval "$(sed -n \'/^_audiocpp_supported()/,/^}/p\' install)"\n'
+        '_audiocpp_supported && echo builds || echo skipped\n'
+    )
+    res = subprocess.run(["bash", "-c", script], capture_output=True,
+                         text=True, cwd=ROOT, timeout=30)
+    return (res.stdout or "").strip()
+
+
+def test_installer_gate() -> None:
+    print("\ninstall: the audio.cpp gate, run for real")
+
+    # This is the assertion that was missing. The old test only checked that
+    # _is_darwin() appeared in the source — which it did, while comparing
+    # against "darwin" when this installer's own detect_platform says "macos".
+    # The step skipped itself on every Mac and the test stayed green.
+    check("a mac builds it", _gate_says("macos"), "builds")
+    check("...by either spelling of Darwin", _gate_says("darwin"), "builds")
+    check("termux builds it", _gate_says("termux"), "builds")
+    check("linux does not", _gate_says("linux"), "skipped")
+    check("windows does not", _gate_says("windows"), "skipped")
+
+    src = open(os.path.join(ROOT, "install")).read()
     ok("a supported-platform helper replaces the termux-only test",
        "_audiocpp_supported()" in src)
     ok("the entry point uses it", "if ! _audiocpp_supported; then" in src)
@@ -187,6 +216,10 @@ def test_installer_gate() -> None:
        "avfoundation" in src or "ffmpeg's avfoundation" in src)
     ok("OpenMP is not demanded of Apple clang",
        "libomp" in src)
+    ok("CMake 4 gets the pre-3.5 policy escape hatch",
+       "CMAKE_POLICY_VERSION_MINIMUM=3.5" in src)
+    ok("...only when CMake is actually 4 or newer",
+       "cmake_major >= 4" in src)
     ok("brew goes through the guarded helper", "_brew_install()" in src)
     ok("brew cannot upgrade unrelated dependents",
        "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1" in src)

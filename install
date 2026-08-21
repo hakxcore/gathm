@@ -1876,10 +1876,15 @@ _is_termux() {
 # True on macOS. audio.cpp builds there too — Darwin is a first-class ggml
 # target and the sentencepiece patch below is Bionic-specific, so the only
 # real differences are the package manager and OpenMP.
+#
+# Both spellings on purpose: this installer's own detect_platform says "macos"
+# (line ~794) while lib/utils.bash's says "darwin", and whichever one is in
+# scope decides. Matching only one silently skipped the whole audio.cpp step on
+# a Mac, with a message claiming macOS was supported.
 _is_darwin() {
     local p="${_GATHM_PLATFORM:-}"
     [[ -z "$p" ]] && p=$(detect_platform)
-    [[ "$p" == "darwin" ]]
+    [[ "$p" == "macos" || "$p" == "darwin" ]]
 }
 
 # Homebrew, with its two most destructive habits disabled.
@@ -2325,6 +2330,19 @@ _audiocpp_cmake_build() {
         # the source tree for any family whose spec is not embedded in its GGUF.
         -DAUDIOCPP_DEPLOYMENT_BUILD=ON
     )
+    # CMake 4 removed compatibility with cmake_minimum_required(VERSION < 3.5),
+    # and vendored dependencies (sentencepiece, parts of ggml) still declare
+    # older minimums — configure then dies before a single file is compiled.
+    # This is CMake's own escape hatch for exactly that. Only passed to CMake 4+:
+    # older CMake would just report it as an unused variable.
+    local cmake_major
+    cmake_major=$(cmake --version 2>/dev/null | head -1 \
+                  | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+    if [[ "$cmake_major" =~ ^[0-9]+$ ]] && (( cmake_major >= 4 )); then
+        info "CMake $cmake_major detected — allowing pre-3.5 policy minimums"
+        cm_args+=( -DCMAKE_POLICY_VERSION_MINIMUM=3.5 )
+    fi
+
     if [[ "$model_set" == "custom" ]]; then
         cm_args+=( -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS="$models" )
         info "Model families: $models"
