@@ -190,6 +190,52 @@ def _gate_says(platform: str) -> str:
     return (res.stdout or "").strip()
 
 
+def test_sample_rate_guard() -> None:
+    print("\nensure_wav16: the model only accepts 16 kHz mono")
+    import struct
+    import tempfile
+    import wave as wavemod
+
+    def make(rate, channels):
+        path = os.path.join(tempfile.mkdtemp(), f"t{rate}x{channels}.wav")
+        with wavemod.open(path, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack("<h", 0) * rate * channels)
+        return path
+
+    check("a 16 kHz mono wav is read correctly",
+          speech.wav_format(make(16000, 1)), (16000, 1))
+    check("so is 22050 stereo", speech.wav_format(make(22050, 2)), (22050, 2))
+    check("a non-wav reports nothing rather than raising",
+          speech.wav_format(os.path.join(ROOT, "README.md")), (0, 0))
+
+    # Already correct: passed through untouched, no ffmpeg needed.
+    good = make(16000, 1)
+    ok_flag, out = speech.ensure_wav16(good)
+    check("16 kHz mono is not converted", (ok_flag, out), (True, good))
+
+    # Wrong rate: must NOT be handed to the model as-is. That was the bug —
+    # PocketTTS writes 24 kHz and `say -o` writes 22.05 kHz, and checking only
+    # the .wav extension let both through to fail inside the engine.
+    wrong = make(22050, 1)
+    saved = speech.shutil.which
+    try:
+        speech.shutil.which = lambda name: None          # no ffmpeg
+        ok_flag, msg = speech.ensure_wav16(wrong)
+        check("without ffmpeg it refuses rather than failing in the engine",
+              ok_flag, False)
+        ok("the refusal names the rate and what is needed",
+           "22050" in msg and "16 kHz mono" in msg and "ffmpeg" in msg)
+    finally:
+        speech.shutil.which = saved
+
+    src = open(os.path.join(ROOT, "install")).read()
+    ok("the installer's ASR test goes through lib/speech.py",
+       "lib/speech.py\" --transcribe" in src or "--transcribe" in src)
+
+
 def test_installer_gate() -> None:
     print("\ninstall: the audio.cpp gate, run for real")
 
@@ -294,6 +340,7 @@ def main() -> int:
     test_engine_choice()
     test_asr_reason()
     test_recorder_device()
+    test_sample_rate_guard()
     test_installer_gate()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")

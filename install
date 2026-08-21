@@ -2855,7 +2855,24 @@ _audiocpp_asr_smoke_test() {
     rm -f "$seg" 2>/dev/null || true
 
     info "Testing transcription..."
-    if run_with_spinner "transcribing the test phrase" -- \
+    # Through lib/speech.py, not straight at the binary.
+    #
+    # Calling audiocpp_cli directly meant the test took a different path from
+    # every real caller, and it showed: the TTS smoke WAV that PocketTTS had
+    # just written is 24 kHz, the model accepts only 16 kHz mono, and the test
+    # failed with "Silero VAD 16k model only supports sample_rate=16000" on an
+    # installation that was in fact fine. Routing it through the module means
+    # the test exercises the resampling every user gets, and a pass here means
+    # the thing users call actually works.
+    local py; py=$(_python_cmd)
+    if [[ -n "$py" ]] && [[ -f "$SCRIPT_DIR/lib/speech.py" ]]; then
+        if run_with_spinner "transcribing the test phrase" -- \
+                "$py" "$SCRIPT_DIR/lib/speech.py" --transcribe "$_AUDIOCPP_SMOKE_WAV"; then
+            ok "Transcription works (family '$AUDIOCPP_ASR_FAMILY')"
+            rm -f "$seg" 2>/dev/null || true
+            return 0
+        fi
+    elif run_with_spinner "transcribing the test phrase" -- \
             bash -c "cd '$src' 2>/dev/null || true; '$bin' --task asr \
                    --family '$AUDIOCPP_ASR_FAMILY' \
                    --model '$model_dir' \

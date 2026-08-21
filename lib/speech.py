@@ -49,6 +49,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".gathm"
@@ -968,14 +969,15 @@ def transcribe(audio_path: str) -> tuple[bool, str]:
     if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
         return False, f"no audio to transcribe ({audio_path})"
 
-    # Anything that is not a WAV goes through ffmpeg first. A phone recording is
-    # AAC or Opus, and handing that straight to the model is a decode error, not
-    # a transcript — `transcribe voicenote.m4a` has to just work.
+    # Everything reaches the model as 16 kHz mono. A phone recording is AAC or
+    # Opus; a synthesised WAV is 22-24 kHz. Both are rejected by the model, so
+    # both are converted here rather than surfacing as a decode error.
     converted = None
-    if not audio_path.lower().endswith(".wav"):
-        good, result = to_wav16(audio_path)
-        if not good:
-            return False, result
+    original = audio_path
+    good, result = ensure_wav16(audio_path)
+    if not good:
+        return False, result
+    if result != original:
         converted = audio_path = result
 
     try:
@@ -1061,6 +1063,44 @@ def to_wav16(path: str) -> tuple[bool, str]:
         tail = (err or "").strip().splitlines()
         return False, f"ffmpeg failed: {tail[-1] if tail else rc}"
     return True, wav
+
+
+def wav_format(path: str) -> tuple:
+    """(rate, channels) of a WAV, or (0, 0) if it is not a readable WAV.
+
+    Header only — no decoding, no dependency.
+    """
+    try:
+        with wave.open(path, "rb") as handle:
+            return handle.getframerate(), handle.getnchannels()
+    except Exception:  # noqa: BLE001 - not a WAV, or a variant wave cannot read
+        return 0, 0
+
+
+def ensure_wav16(path: str) -> tuple[bool, str]:
+    """A path to 16 kHz mono WAV, converting only when it has to.
+
+    SenseVoice (and the Silero VAD in front of it) accept exactly 16 kHz mono
+    and reject anything else outright — "Silero VAD 16k model only supports
+    sample_rate=16000". Checking only the file EXTENSION was not enough: a
+    perfectly valid .wav from PocketTTS or `say -o` is 24 kHz or 22.05 kHz, and
+    went to the model untouched to fail there.
+    """
+    if not path.lower().endswith(".wav"):
+        return to_wav16(path)
+
+    rate, channels = wav_format(path)
+    if rate == 16000 and channels == 1:
+        return True, path
+    if rate == 0:
+        # Named .wav but not one this build can parse; let ffmpeg try.
+        return to_wav16(path)
+
+    if not shutil.which("ffmpeg"):
+        return False, (f"this WAV is {rate} Hz {channels}-channel and the "
+                       "speech model needs 16 kHz mono; install ffmpeg so it "
+                       "can be converted (brew install ffmpeg / pkg install ffmpeg)")
+    return to_wav16(path)
 
 
 def record_dir() -> str:
