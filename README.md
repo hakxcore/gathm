@@ -131,6 +131,15 @@ It needs speech-to-text, so the button only appears when the server reports a
 working transcription engine — Termux and macOS today. Replies are spoken when
 a voice engine is available; without one it still listens and answers in text.
 
+Replies are spoken a sentence at a time. The speech endpoint renders whatever
+text it is handed *in full* before returning a single byte, so asking it for a
+whole answer means waiting for the whole answer to be synthesised — a pause at
+the end of every turn. `gui/chunker.js` splits the reply and the client keeps
+one request in flight ahead of playback, so audio starts after the first
+sentence and the rest renders while it plays. It mirrors
+`split_speech_chunks()` in `lib/speech.py`, and `tests/chunker_test.js` asserts
+the two agree.
+
 The endpointing lives in `gui/vad.js`, deliberately free of DOM and Web Audio so
 it can be tested without a microphone:
 
@@ -654,6 +663,8 @@ python3 tests/speech_stream_test.py       # sentence chunking and pipelining
 python3 tests/reply_stream_test.py        # speaking a reply as it is generated
 python3 tests/macos_speech_test.py        # engine choice, mic device, installer
 node     tests/vad_test.js                # conversation endpointing
+node     tests/chunker_test.js            # sentence splitting, and that it
+                                          # matches the Python chunker
 bash     tests/launcher_test.sh           # the gathm launcher
 ```
 

@@ -28,9 +28,17 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { splitSpeech } =
+    require(path.join(__dirname, '..', 'gui', 'chunker.js'));
 
 const ROOT = path.join(__dirname, '..');
 const GUI = path.join(ROOT, 'gui');
+
+// Several sentences, so the client has something to chunk.
+const REPLY = 'It is thirty two degrees and clear in Delhi right now. ' +
+              'A light breeze is coming from the north west. ' +
+              'No rain is expected before the evening.';
+const FIRST_SENTENCE = 'It is thirty two degrees and clear in Delhi right now.';
 
 let PASS = 0, FAIL = 0;
 function check(name, got, want) {
@@ -78,7 +86,13 @@ function startStubServer(calls) {
             req.on('data', function (d) { body.push(d); });
             req.on('end', function () {
                 const raw = Buffer.concat(body);
-                calls.push({ url: url, method: req.method, bytes: raw.length });
+                let text = '';
+                if (url === '/api/v1/speech') {
+                    try { text = JSON.parse(raw.toString()).text || ''; }
+                    catch (_) { text = ''; }
+                }
+                calls.push({ url: url, method: req.method, bytes: raw.length,
+                             text: text, at: Date.now() });
 
                 if (url === '/api/v1/ping') return json({ ok: true });
                 if (url === '/api/v1/transcribe/status')
@@ -88,7 +102,7 @@ function startStubServer(calls) {
                 if (url === '/api/v1/transcribe')
                     return json({ text: 'what is the weather in delhi' });
                 if (url === '/api/v1/agent/chat')
-                    return json({ reply: 'It is thirty two degrees and clear.' });
+                    return json({ reply: REPLY });
                 if (url === '/api/v1/speech') {
                     // Four seconds, so there is time to talk over it. Silence
                     // is fine: what matters is that it plays and can be cut.
@@ -223,6 +237,26 @@ async function main() {
         await page.evaluate(function () { window.__mic.speak(true); });
         await page.waitForTimeout(1500);
         await page.evaluate(function () { window.__mic.speak(false); });
+        // Watch for the first moment audio is playing, to compare against the
+        // server-side timestamps of the speech requests.
+        let startedPlayingAt = 0;
+        let requestsWhenPlaybackBegan = -1;
+        const watchPlayback = (async function () {
+            for (let i = 0; i < 400; i++) {
+                const playing = await page.evaluate(function () {
+                    return typeof currentAudio !== 'undefined' && currentAudio !== null;
+                }).catch(function () { return false; });
+                if (playing) {
+                    startedPlayingAt = Date.now();
+                    requestsWhenPlaybackBegan = calls.filter(function (c) {
+                        return c.url === '/api/v1/speech';
+                    }).length;
+                    return;
+                }
+                await new Promise(function (r) { setTimeout(r, 50); });
+            }
+        })();
+
         const replied = await page.waitForFunction(function () {
             return document.body.innerText.indexOf('thirty two degrees') !== -1;
         }, null, { timeout: 25000 }).then(function () { return true; },
@@ -277,10 +311,44 @@ async function main() {
         });
         ok('what was said appears in the chat', said);
 
+        await watchPlayback;
+
+        // ── the reply is spoken sentence by sentence ────────────────────
+        // Asking the server for the whole answer means waiting for the whole
+        // answer to be rendered before hearing anything.
+        const speechCalls = calls.filter(function (c) {
+            return c.url === '/api/v1/speech';
+        });
+        ok('the reply was split into several requests, not one',
+           speechCalls.length > 1);
+        check('the first request is only the first sentence',
+              speechCalls[0].text, FIRST_SENTENCE);
+        ok('every request is shorter than the whole reply',
+           speechCalls.every(function (c) { return c.text.length < REPLY.length; }));
+        ok('what has been requested so far is a prefix of the reply',
+           REPLY.replace(/\s+/g, ' ').trim().indexOf(
+               speechCalls.map(function (c) { return c.text; }).join(' ')
+                   .replace(/\s+/g, ' ').trim()) === 0);
+
+        // The property this exists for: audio starts before the whole reply has
+        // been rendered. Counted at the instant playback began, because the
+        // later requests are issued as it plays — comparing against the final
+        // total would be a race, and comparing timestamps proves nothing
+        // against a stub that renders instantly.
+        const expectedChunks = splitSpeech(REPLY).length;
+        ok('the reply needs more than one request (' + expectedChunks + ')',
+           expectedChunks > 1);
+        ok('playback began before the whole reply was rendered (' +
+           requestsWhenPlaybackBegan + ' of ' + expectedChunks + ' requested)',
+           requestsWhenPlaybackBegan > 0 &&
+           requestsWhenPlaybackBegan < expectedChunks);
+
         // ── barge-in ────────────────────────────────────────────────────
         // Talk over the reply: it should stop mid-sentence and listen instead.
+        // speakingActive, not currentAudio: between sentences there is a
+        // moment with no clip loaded, and that is still "Gathm is talking".
         const playing = await page.waitForFunction(
-            'typeof currentAudio !== "undefined" && currentAudio !== null',
+            'typeof speakingActive !== "undefined" && speakingActive',
             null, { timeout: 10000 }).then(function () { return true; },
                                            function () { return false; });
         ok('the reply is being played', playing);
@@ -290,8 +358,9 @@ async function main() {
         }).length;
 
         await page.evaluate(function () { window.__mic.speak(true); });
-        const cut = await page.waitForFunction('currentAudio === null',
-            null, { timeout: 6000 }).then(function () { return true; },
+        const cut = await page.waitForFunction(
+            'speakingActive === false && currentAudio === null',
+            null, { timeout: 8000 }).then(function () { return true; },
                                           function () { return false; });
         ok('speaking over the reply stops it', cut);
         await page.waitForTimeout(1200);

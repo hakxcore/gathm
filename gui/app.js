@@ -221,7 +221,17 @@ function updateSpeakBtn() {
     refreshIcons();
 }
 
+// Bumped by stopSpeaking(); an in-flight queue notices and abandons the rest.
+let speechGeneration = 0;
+// True for the whole reply, not just while a clip is playing. The gaps between
+// sentences are still "Gathm is talking" as far as barge-in is concerned —
+// without this the endpointer would drop to its normal threshold mid-reply and
+// the next sentence could trigger on its own echo.
+let speakingActive = false;
+
 function stopSpeaking() {
+    speechGeneration++;
+    speakingActive = false;
     if (currentAudio) {
         try { currentAudio.pause(); } catch (_) { /* already gone */ }
         currentAudio = null;
@@ -229,47 +239,109 @@ function stopSpeaking() {
     if (!voiceActive) setOrbState('idle');
 }
 
-// Resolves when the reply has finished being spoken — which is when a
-// hands-free conversation may start listening again. Callers that do not care
-// simply ignore the promise.
-async function speakReply(text) {
-    if (!speechAvailable || !speakEnabled || !text) return;
-    stopSpeaking();
+/** Render one utterance. Returns an object URL, or null if it failed. */
+async function fetchSpeech(text) {
     try {
         const res = await fetch(API_BASE + '/api/v1/speech', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: text }),
         });
-        if (!res.ok) return;                  // silence is the right failure here
-        const url = URL.createObjectURL(await res.blob());
+        if (!res.ok) return null;             // silence is the right failure
+        return URL.createObjectURL(await res.blob());
+    } catch (_) {
+        return null;
+    }
+}
+
+/** Play one clip to the end. Resolves on end, error, or a barge-in pause. */
+function playClip(url) {
+    return new Promise(function (resolve) {
         const audio = new Audio(url);
         currentAudio = audio;
-        if (!voiceActive) setOrbState('speaking');
-        await new Promise(function(resolve) {
-            let settled = false;
-            const done = function() {
-                if (settled) return;
-                settled = true;
-                URL.revokeObjectURL(url);
-                if (currentAudio === audio) currentAudio = null;
-                if (!voiceActive) setOrbState('idle');
-                resolve();
-            };
-            audio.onended = done;
-            audio.onerror = done;
-            // stopSpeaking() drops our reference; that is a barge-in, and the
-            // waiter has to be released or the conversation loop would hang.
-            audio.onpause = done;
-            audio.play().catch(done);         // autoplay may need a tap first
-        });
-    } catch (_) { /* speech is a bonus, never an error path */ }
+        let settled = false;
+        const done = function () {
+            if (settled) return;
+            settled = true;
+            URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
+            resolve();
+        };
+        audio.onended = done;
+        audio.onerror = done;
+        // stopSpeaking() pauses rather than ends; the waiter has to be
+        // released or a barge-in would hang the conversation loop.
+        audio.onpause = done;
+        audio.play().catch(done);             // autoplay may need a tap first
+    });
+}
+
+/**
+ * Say a reply out loud, one sentence at a time.
+ *
+ * Resolves when it has finished — which is when a hands-free conversation may
+ * listen again. Callers that do not care simply ignore the promise.
+ *
+ * Sentence by sentence, because the server renders whatever text it is handed
+ * IN FULL before returning a single byte. Sending a whole answer therefore
+ * means waiting for the whole answer to be synthesised before hearing a word,
+ * which is a pause you can feel at the end of every turn. Sending one sentence
+ * gets audio started after the first, and the next is rendered while it plays.
+ */
+async function speakReply(text) {
+    if (!speechAvailable || !speakEnabled || !text) return;
+    stopSpeaking();
+
+    const chunks = (window.GathmChunker
+        ? GathmChunker.splitSpeech(text)
+        : [text]);                            // no chunker: one shot, as before
+    if (!chunks.length) return;
+
+    const mine = ++speechGeneration;
+    speakingActive = true;
+    if (!voiceActive) setOrbState('speaking');
+
+    try {
+        // One request in flight ahead of playback. Not the whole reply at
+        // once: a cancelled answer would have spent the time rendering audio
+        // nobody will hear.
+        let pending = fetchSpeech(chunks[0]);
+        for (let i = 0; i < chunks.length; i++) {
+            const current = pending;
+            pending = (i + 1 < chunks.length)
+                ? fetchSpeech(chunks[i + 1]) : null;
+
+            const url = await current;
+            if (mine !== speechGeneration) {   // barge-in, or a newer reply
+                if (url) URL.revokeObjectURL(url);
+                if (pending) pending.then(function (u) {
+                    if (u) URL.revokeObjectURL(u);
+                });
+                return;
+            }
+            if (!url) continue;                // this one failed; keep going
+            await playClip(url);
+            if (mine !== speechGeneration) {
+                if (pending) pending.then(function (u) {
+                    if (u) URL.revokeObjectURL(u);
+                });
+                return;
+            }
+        }
+    } catch (_) {
+        /* speech is a bonus, never an error path */
+    } finally {
+        if (mine === speechGeneration) {
+            speakingActive = false;
+            if (!voiceActive) setOrbState('idle');
+        }
+    }
 }
 
 // The most recent reply's playback, so the conversation loop can wait for it.
 let speaking = Promise.resolve();
 
-function isSpeakingNow() { return currentAudio !== null; }
+function isSpeakingNow() { return speakingActive || currentAudio !== null; }
 
 if (speakBtn) {
     speakBtn.addEventListener('click', function() {
@@ -777,11 +849,23 @@ function convoFrame(frame) {
     const event = convoVad.push(level, performance.now(), isSpeakingNow());
 
     if (event === 'start') {
-        if (turnBusy) return;              // still answering the last one
-        if (isSpeakingNow()) {             // barge-in: they get the floor
+        // Speaking is checked BEFORE turnBusy, and that order is the whole
+        // feature. turnBusy stays true for as long as the turn is being
+        // answered — which includes every second the reply is being read out —
+        // so testing it first made the barge-in branch below unreachable and
+        // talking over an answer did nothing.
+        if (isSpeakingNow()) {
+            // Cut the reply. Capture does not begin here: the turn loop is
+            // still inside `await speaking`, and its cleanup would clobber a
+            // half-started capture. Releasing it lets it finish and rearm the
+            // endpointer, and the words still being spoken open a fresh turn
+            // about startMs later.
             stopSpeaking();
+            setOrbState('listening');
             convoStatus('Listening…');
+            return;
         }
+        if (turnBusy) return;              // thinking, not speaking: wait
         capturing = true;
         pcmChunks = preroll.slice();
         preroll = [];
