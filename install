@@ -2990,7 +2990,7 @@ _audiocpp_build_and_install() {
             # The weights live in the source tree, so it still has to exist for
             # the voice/ASR models — clone it, but skip the build entirely.
             if [[ ! -d "$src/.git" ]]; then
-                _audiocpp_install_build_deps
+                _audiocpp_install_build_deps || true
                 _audiocpp_clone_or_update "$src" || true
             fi
             _audiocpp_setup_voice "$cachedbin" "$src"
@@ -3009,7 +3009,16 @@ _audiocpp_build_and_install() {
         return 0
     fi
 
-    _audiocpp_install_build_deps
+    # `|| ...` deliberately: under `set -euo pipefail` a bare call that returns
+    # non-zero exits the whole installer. A Mac with no Xcode command line
+    # tools would have aborted here, taking the shortcuts, the verify step and
+    # the completion message with it — for an optional feature.
+    if ! _audiocpp_install_build_deps; then
+        step_fail "audio.cpp needs a build toolchain that could not be installed"
+        note_missing "audio.cpp speech runtime" \
+            "install the toolchain above, then: ./install --audio-only"
+        return 0
+    fi
 
     if ! _audiocpp_clone_or_update "$src"; then
         step_fail "audio.cpp clone failed — Pilot will run without voice"

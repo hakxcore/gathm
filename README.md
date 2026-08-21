@@ -59,6 +59,27 @@ cd gathm
 ./install
 ```
 
+#### On a brand-new Mac
+
+macOS ships neither a compiler nor a package manager, so two things have to
+exist before `./install` can do its job:
+
+```bash
+xcode-select --install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+The first is Apple's command line developer tools, which provide `git`,
+`clang` and `python3` — cloning this repo will prompt for them anyway. The
+second is Homebrew, which the installer uses for `jq`, `cmake` and friends.
+
+Without them the installer still runs and still finishes; it reports what it
+could not set up rather than pretending. Without Homebrew in particular you
+lose `jq` (several tools need it) and the speech runtime, which needs `cmake`.
+
+The installer targets the `bash` macOS actually ships (3.2), so there is no
+need to install a newer one first.
+
 ### Verify Install
 
 ```bash

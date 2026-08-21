@@ -222,6 +222,22 @@ def test_installer_gate() -> None:
     ok("the failure tells the user they can clone it themselves",
        "clone it yourself" in src)
 
+    # install runs under `set -euo pipefail`, so a bare call to anything that
+    # can return non-zero exits the WHOLE installer. Speech is optional; a Mac
+    # with no Xcode command line tools must not lose its shortcuts, its verify
+    # step and its completion message over it.
+    ok("install still runs under set -e (this test assumes it)",
+       "set -euo pipefail" in src)
+    unguarded = []
+    for i, line in enumerate(src.splitlines(), 1):
+        if "_audiocpp_install_build_deps" in line:
+            body = line.strip()
+            if body.endswith("() {") or body.startswith("#"):
+                continue
+            if not any(g in body for g in ("if !", "||", "&&", "if ")):
+                unguarded.append(f"{i}: {body}")
+    check("no bare call to the toolchain installer", unguarded, [])
+
     # `timeout` does not exist on a stock macOS, so a bare `timeout N cmd`
     # there silently means no limit at all.
     ok("a portable time limit exists", "_bounded()" in src)
