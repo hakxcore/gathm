@@ -210,6 +210,28 @@ def test_installer_gate() -> None:
        "platform is '${platform}'" in src)
     ok("the speech runtime can be installed on its own",
        "--audio-only|--speech)" in src)
+
+    # A flaky connection was burning 20 minutes and losing everything, because
+    # one combined clone means one failure discards the whole transfer.
+    ok("the clone is retried", "GATHM_AUDIOCPP_GIT_RETRIES" in src)
+    ok("submodules are fetched separately from the main repo",
+       "--no-recurse-submodules" in src
+       and "submodule update --init --recursive" in src)
+    ok("a failed clone directory is cleared before retrying",
+       'rm -rf "$src"' in src)
+    ok("the failure tells the user they can clone it themselves",
+       "clone it yourself" in src)
+
+    # `timeout` does not exist on a stock macOS, so a bare `timeout N cmd`
+    # there silently means no limit at all.
+    ok("a portable time limit exists", "_bounded()" in src)
+    ok("it falls back past GNU timeout",
+       "gtimeout" in src and "alarm shift" in src)
+    # Mentioning it in a comment is fine; *calling* it is not, since this file
+    # never sources the library that defines it.
+    calls = [ln for ln in src.splitlines()
+             if "run_bounded" in ln and not ln.lstrip().startswith("#")]
+    check("nothing calls the undefined run_bounded", calls, [])
     ok("the entry point uses it", "if ! _audiocpp_supported; then" in src)
     ok("the skip message names both platforms",
        "built on Termux and macOS only" in src)

@@ -774,6 +774,27 @@ _setup_cleanup() {
 }
 trap _setup_cleanup INT TERM
 
+# Run a command with a time limit, portably.
+#
+# macOS has no GNU `timeout` unless coreutils is installed, so a bare
+# `timeout ...` silently means "no limit at all" there — which is how a failing
+# clone was allowed to run for 21 minutes under a "15 minute" limit. Same
+# ladder as lib/utils.bash's run_bounded, defined locally because this file
+# must not source that one: it has a detect_platform() that answers "darwin"
+# where this one answers "macos".
+_bounded() {
+    local seconds="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 # --- Internet connectivity check ---
 GATHM_ONLINE="false"
 check_internet() {
@@ -1901,7 +1922,7 @@ _is_darwin() {
 _brew_install() {
     HOMEBREW_NO_AUTO_UPDATE=1 \
     HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
-    run_bounded 900 brew install "$@" &>/dev/null
+    _bounded 900 brew install "$@" &>/dev/null
 }
 
 # Platforms Gathm builds the speech runtime on. Everywhere else keeps whatever
@@ -2056,13 +2077,8 @@ _audiocpp_git() {
     local limit="${GATHM_AUDIOCPP_GIT_TIMEOUT:-900}"
     [[ "$limit" =~ ^[0-9]+$ ]] && (( limit > 0 )) || limit=900
 
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$limit" env GIT_TERMINAL_PROMPT=0 \
-            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
-    else
-        env GIT_TERMINAL_PROMPT=0 \
-            git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
-    fi
+    _bounded "$limit" env GIT_TERMINAL_PROMPT=0 \
+        git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 "$@"
 }
 
 # Clone audio.cpp, or update an existing checkout.
@@ -2081,18 +2097,68 @@ _audiocpp_clone_or_update() {
     fi
 
     mkdir -p "$(dirname "$src")" 2>/dev/null || true
-    info "Cloning audio.cpp into $src ..."
-    # Shallow, including submodules: ggml is a submodule and the full history
-    # of both is a large download for a build we only ever do once.
-    if run_with_spinner "git clone audio.cpp" -- \
-            _audiocpp_git clone --depth 1 --recurse-submodules --shallow-submodules \
-                "$AUDIOCPP_REPO" "$src"; then
-        return 0
+
+    # Two stages, each retried on its own, rather than one clone with
+    # --recurse-submodules.
+    #
+    # A single combined clone is one long transfer, and on a connection that
+    # drops large transfers ("RPC failed; curl 56 Recv failure", "fatal: early
+    # EOF") every failure throws away all of it — twenty minutes to learn
+    # nothing. Split, the main repo and each submodule are separate downloads,
+    # a retry only redoes the one that broke, and submodules already fetched
+    # are skipped on the next attempt.
+    local attempts="${GATHM_AUDIOCPP_GIT_RETRIES:-3}"
+    [[ "$attempts" =~ ^[0-9]+$ ]] && (( attempts > 0 )) || attempts=3
+
+    local try rc=1
+    for (( try = 1; try <= attempts; try++ )); do
+        if [[ -d "$src/.git" ]]; then
+            rc=0
+            break
+        fi
+        [[ $try -gt 1 ]] && info "Clone attempt $try of $attempts..."
+        # A failed clone leaves an unusable partial directory behind; git
+        # refuses to clone into it, so the retry must start clean.
+        rm -rf "$src" 2>/dev/null || true
+        info "Cloning audio.cpp into $src ..."
+        rc=0
+        run_with_spinner "git clone audio.cpp (try $try/$attempts)" -- \
+            _audiocpp_git clone --depth 1 --no-recurse-submodules \
+                "$AUDIOCPP_REPO" "$src" || rc=$?
+        (( rc == 0 )) && break
+        warn "Clone attempt $try failed — the transfer was interrupted"
+    done
+
+    if (( rc != 0 )) || [[ ! -d "$src/.git" ]]; then
+        warn "Could not clone audio.cpp after $attempts attempts."
+        warn "The transfer keeps being cut off rather than timing out, which is"
+        warn "a network problem, not a Gathm one. Options:"
+        warn "  - retry: ./install --audio-only"
+        warn "  - more attempts: GATHM_AUDIOCPP_GIT_RETRIES=8 ./install --audio-only"
+        warn "  - clone it yourself, then re-run --audio-only (any checkout at"
+        warn "    ~/audio.cpp or \$GATHM_AUDIOCPP_SRC is reused as-is):"
+        warn "      git clone --depth 1 $AUDIOCPP_REPO ~/audio.cpp"
+        return 1
     fi
 
-    warn "git clone failed or timed out (audio.cpp; default limit: 15 min)"
-    warn "Set GATHM_AUDIOCPP_GIT_TIMEOUT=1800 to allow a 30-minute download"
-    return 1
+    # Submodules second. ggml and sentencepiece are separate transfers, so one
+    # failing no longer costs the main repo.
+    for (( try = 1; try <= attempts; try++ )); do
+        rc=0
+        run_with_spinner "git submodules (try $try/$attempts)" -- \
+            _audiocpp_git -C "$src" submodule update --init --recursive \
+                --depth 1 || rc=$?
+        (( rc == 0 )) && break
+        warn "Submodule fetch attempt $try failed — retrying the parts that are missing"
+    done
+
+    if (( rc != 0 )); then
+        warn "Submodules incomplete after $attempts attempts; the build will"
+        warn "probably fail on a missing vendored dependency. Finish them with:"
+        warn "  git -C $src submodule update --init --recursive --depth 1"
+        return 1
+    fi
+    return 0
 }
 
 # Termux-only source patch: make sentencepiece link on Android.
