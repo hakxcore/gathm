@@ -584,6 +584,52 @@ at all.
 - `science` (1): newton
 - `productivity` (1): todo
 
+## System control
+
+Pilot can run shell commands on the machine it is on — to inspect it (disk,
+processes, network) or to change it (install something, move files). It knows
+which platform it is on and writes the command for that platform: `sw_vers`
+rather than `lsb_release` on macOS, `pkg` rather than `apt` on Termux.
+
+**It is off until you turn it on**, because a language model with a shell should
+be a decision somebody made:
+
+```bash
+GATHM_ALLOW_SHELL=1 gathm tui        # this session only
+touch ~/.gathm/allow_shell           # from now on
+```
+
+Every command is classified before it runs (`lib/sysexec.py`):
+
+| Tier | What | What happens |
+|---|---|---|
+| **safe** | read-only commands with no shell operators — `uname`, `df`, `ps`, `ls`, `git status`, `brew list` | runs immediately |
+| **confirm** | everything else — writes, installs, `sudo`, unrecognised binaries, and *anything containing a pipe, redirect or `;`* | you are shown the command and the reason, and asked |
+| **blocked** | catastrophic or irreversible — recursive force-deletes, `mkfs`, `dd` to a device, fork bombs, `curl … | sh`, shutdown | never runs, and no confirmation can override it |
+
+Two rules do most of the work. First, a shell metacharacter demotes anything to
+`confirm`: `ls` is read-only, `ls; rm -rf ~` starts with the same binary and is
+not. Second, the safe list contains only binaries that *cannot write* — anything
+absent isn't assumed hostile, just unproven, so it goes to a human.
+
+Where there is nobody to ask — the GUI and the REST API, which have no
+terminal — anything needing confirmation is refused rather than assumed fine,
+with a message saying to run it in `gathm tui` instead. Read-only commands still
+work there.
+
+Every attempt is appended to `~/.gathm/shell.log` with its verdict, whether it
+ran or not:
+
+```
+2026-08-21 09:14:02	safe	exit-0	df -h
+2026-08-21 09:14:31	blocked	refused	rm -rf /
+2026-08-21 09:15:07	confirm	declined	brew install ffmpeg
+```
+
+`python3 lib/sysexec.py <command>` prints how a command would be classified
+without running it. `tests/sysexec_test.py` holds 126 assertions, most of them
+about exactly which commands land in which tier.
+
 ## Security and Reliability Model
 
 Gathm includes platform controls in the orchestrator path:

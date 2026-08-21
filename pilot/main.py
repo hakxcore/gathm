@@ -113,6 +113,9 @@ TOOL_ALIASES = {
 BUILTIN_TOOLS: dict[str, str] = {
     "browser": "Open URLs, fetch web pages, or take screenshots. "
                "Usage: browser open <url> | browser fetch <url> | browser screenshot <url>",
+    "system": "Run a shell command on this machine to inspect or control it "
+              "(disk space, processes, network, installing things, files). "
+              "Usage: system <command>",
 }
 
 # Lazy-import the browser module so a missing optional dep doesn't crash Pilot
@@ -125,6 +128,71 @@ def _run_browser_action(command: str) -> str:
         return run_browser_action(command)
     except Exception as exc:
         return f"Browser error: {exc}"
+
+# --- Running commands on this machine -------------------------------------
+# lib/sysexec.py decides what may run; this decides who gets asked. The two are
+# separate on purpose: the rules are testable without a terminal, and the
+# prompt is the only part that needs one.
+try:
+    from lib import sysexec as _sysexec
+except Exception:  # noqa: BLE001 - degrade to "no system control"
+    _sysexec = None
+
+
+def _can_ask_the_user() -> bool:
+    """Whether there is a human at a terminal to confirm with.
+
+    chat_once (the GUI's per-turn process) has no usable stdin, and prompting
+    into a void would hang a web request forever. Anything needing
+    confirmation is refused there instead, with a message saying where it can
+    be confirmed.
+    """
+    if os.environ.get("GATHM_NON_INTERACTIVE") == "1":
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _confirm_command(command: str, reason: str) -> bool:
+    """Ask before running something that can change the machine."""
+    # The shimmer animation is mid-write on this line; leaving it running would
+    # scribble over the question.
+    stop_waiting()
+    console.print()
+    console.print(
+        "  [color(208) bold][?][/color(208) bold] Gathm wants to run a command "
+        "on this machine:"
+    )
+    console.print(f"      [bold]{command}[/bold]")
+    console.print(f"      [color(244)]{reason}[/color(244)]")
+    try:
+        answer = input("      run it? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    granted = answer in ("y", "yes")
+    console.print()
+    start_waiting()
+    return granted
+
+
+def _run_system_command(command: str) -> str:
+    """The `system` tool: run a shell command, with the guardrails."""
+    if _sysexec is None:
+        return ("Error: system control is unavailable — lib/sysexec.py could "
+                "not be imported.")
+    command = (command or "").strip()
+    if not command:
+        return ("Usage: system <command>   e.g. system df -h\n"
+                f"This machine is: {_sysexec.platform_summary()}")
+
+    approve = _confirm_command if _can_ask_the_user() else None
+    ok_flag, output = _sysexec.run(command, approve=approve)
+    if ok_flag:
+        return output
+    return f"Command not completed: {output}"
+
 
 HIGH_RISK_QUERY_PATTERNS = (
     r"\bopen(?:ly)?\s+available\s+(?:ftp|cameras?)\b",
@@ -334,8 +402,18 @@ def normalize_tool_command(command: str) -> str:
     return shlex.join(normalized)
 
 def run_gathm_tool_raw(command: str) -> str:
+    text = (command or "").strip()
+
+    # `system` is handled before any parsing. Its argument is a shell command,
+    # so quotes, pipes and redirects are meaningful — shlex.split would tokenise
+    # them and shlex.join would quote them back into something different, and an
+    # unbalanced quote would be rejected here rather than by the shell that has
+    # to run it. The string the classifier reads is the string that runs.
+    if text == "system" or text.startswith("system "):
+        return _run_system_command(text[len("system"):].strip())
+
     try:
-        parts = shlex.split(command.strip())
+        parts = shlex.split(text)
     except ValueError as exc:
         return f"Error: Invalid command syntax ({exc})."
     if not parts:
@@ -736,7 +814,20 @@ def _shortlist_tools(query: str, tools: list) -> list:
     return picked
 
 
-_BROWSER_HELP = """13. For WEB BROWSING use the 'browser' tool. Available actions:
+_SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool with a shell
+    command: Action Input: system <command>
+    This machine is: {platform}
+    System control is currently: {state}
+    Write the command for THAT platform — `sw_vers` not `lsb_release` on macOS,
+    `pkg` not `apt` on Termux, `vm_stat` not `free` on macOS.
+    One command per action, and prefer the narrowest one that answers the
+    question. Read-only commands run immediately; anything that could change
+    the machine asks the user first, so do not try to avoid the prompt by
+    chaining commands together.
+    Never run a command the user did not ask for, and never one whose purpose
+    you cannot state in a sentence."""
+
+_BROWSER_HELP = """14. For WEB BROWSING use the 'browser' tool. Available actions:
     - browser open <url>              → open URL in the user's system browser
     - browser fetch <url>             → read page text (HTTP, works everywhere)
     - browser navigate <url>          → go to URL in the controlled session
@@ -804,6 +895,18 @@ Tools you CAN use offline: {usable}.
     # offer — otherwise it is ~800 characters of prompt for an unlisted tool.
     browser_help = _BROWSER_HELP if "browser" in available_tools else ""
 
+    # Same reasoning for `system`: only describe it when it is on offer, and
+    # tell the model which machine it is on — the command for "how much disk is
+    # left" is not the same on a Mac as it is in Termux, and a model guessing
+    # the platform will guess wrong about half the time.
+    system_help = ""
+    if "system" in available_tools and _sysexec is not None:
+        system_help = _SYSTEM_HELP.format(
+            platform=_sysexec.platform_summary(),
+            state=("ENABLED" if _sysexec.enabled() else
+                   "DISABLED — say so and stop; do not retry"),
+        )
+
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
 You have access to the following gathm tools:
 {tool_descriptions}
@@ -828,6 +931,7 @@ Action Input: [tool_name] [arguments]
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If a tool fails, say in one sentence WHAT failed and quote the error text you were given, then add that the engineer has been notified. Never replace the error with a generic message — the user cannot fix what they cannot see.
 12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+{system_help}
 {browser_help}
 When you have a final answer, provide it directly without the Action format.
 """
