@@ -2992,7 +2992,10 @@ install_audio_cpp() {
     local platform="$1"
 
     if ! _audiocpp_supported; then
-        step_skip "audio.cpp skipped (built on Termux and macOS only)"
+        # Name the platform actually detected. The version of this message that
+        # did not said "built on Termux and macOS only" while skipping on a Mac,
+        # which read as a supported platform being deliberately skipped.
+        step_skip "audio.cpp skipped: platform is '${platform}' (built on Termux and macOS)"
         return 0
     fi
 
@@ -3604,12 +3607,24 @@ main() {
             verify; exit $? ;;
         --uninstall|-u)
             uninstall; exit 0 ;;
+        --audio-only|--speech)
+            # Just the speech runtime. Re-running the whole installer to retry
+            # one compile means sitting through eleven unrelated steps.
+            _GATHM_PLATFORM=$(detect_platform)
+            info "Platform detected: ${_GATHM_PLATFORM}"
+            check_internet
+            step_begin "Installing audio.cpp (speech runtime)"
+            install_audio_cpp "$_GATHM_PLATFORM"
+            echo ""
+            info "Now check it with:  python3 lib/speech.py --check"
+            exit 0 ;;
         --help|-h)
             echo "Usage: ./install [OPTION]"
             echo ""
             echo "Options:"
             echo "  (default)     Auto-detect platform and install"
             echo "  --check       Verify environment only"
+            echo "  --audio-only  Install just the speech runtime (audio.cpp)"
             echo "  --uninstall   Remove shortcuts and data"
             echo "  --help        Show this help"
             exit 0 ;;

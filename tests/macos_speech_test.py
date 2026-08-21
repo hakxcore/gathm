@@ -206,6 +206,10 @@ def test_installer_gate() -> None:
     src = open(os.path.join(ROOT, "install")).read()
     ok("a supported-platform helper replaces the termux-only test",
        "_audiocpp_supported()" in src)
+    ok("a skip names the platform it detected",
+       "platform is '${platform}'" in src)
+    ok("the speech runtime can be installed on its own",
+       "--audio-only|--speech)" in src)
     ok("the entry point uses it", "if ! _audiocpp_supported; then" in src)
     ok("the skip message names both platforms",
        "built on Termux and macOS only" in src)
