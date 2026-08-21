@@ -320,15 +320,44 @@ def _get_pt_session() -> Optional[object]:
     return _pt_session
 
 
+def _event_loop_running() -> bool:
+    """Whether an asyncio loop is running on this thread.
+
+    Playwright's SYNC api runs one, and Pilot keeps the browser session open
+    between commands on purpose — so after `browser screenshot` a loop is live
+    for the rest of the session. prompt_toolkit's synchronous prompt() calls
+    asyncio.run() internally, which refuses to start inside a running loop:
+    "asyncio.run() cannot be called from a running event loop". Taking a
+    screenshot therefore broke the input prompt for good.
+    """
+    try:
+        import asyncio
+        asyncio.get_running_loop()
+        return True
+    except Exception:  # noqa: BLE001 - RuntimeError when there is none
+        return False
+
+
 def get_user_input() -> str:
     """Read user input (prompt_toolkit with history, or plain input fallback)."""
     session = _get_pt_session()
+    # Plain input() needs no event loop of its own, so it still works when
+    # something else owns one. History is lost for these turns; a working
+    # prompt matters more.
+    if session is not None and _event_loop_running():
+        session = None
     if session is not None:
         # prompt_toolkit does not interpret raw ANSI escape sequences in prompt
         # strings — it displays them literally as ^[[...m.  Wrapping with ANSI()
         # tells it to parse and render the escape codes as intended colors/styles.
         prompt_str = f"\n{_A_ACCENT}🐚{_A_RESET} {_A_BOLD}›{_A_RESET} "
-        text = session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
+        try:
+            text = session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
+        except RuntimeError:
+            # Belt and braces: a loop that appeared between the check above and
+            # here must not cost the user their prompt.
+            print_prompt()
+            return input().strip()
         # Erase the raw input line so only the styled bubble below remains.
         sys.stdout.write("\x1b[1A\x1b[2K\r")
         sys.stdout.flush()

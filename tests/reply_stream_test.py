@@ -257,6 +257,69 @@ def test_render_response_signature() -> None:
     os.environ.pop("GATHM_SPEAK", None)
 
 
+def test_loop_error_guard() -> None:
+    print("\nthe main loop stops instead of spinning on a repeating error")
+    track = pilot_main.track_loop_error
+
+    # One failure, then a different one: keep going.
+    last, count, stop = track("boom", "", 0)
+    check("first failure is counted", (last, count, stop), ("boom", 1, False))
+    last, count, stop = track("other", last, count)
+    check("a different failure resets the count",
+          (last, count, stop), ("other", 1, False))
+
+    # The same failure over and over is the spin: give up on the third.
+    last, count, stop = track("boom", "", 0)
+    last, count, stop = track("boom", last, count)
+    ok("two identical failures still continue", not stop)
+    last, count, stop = track("boom", last, count)
+    ok("the third identical failure stops the loop", stop)
+    check("and it took exactly three", count, 3)
+
+    ok("the limit is a named constant", pilot_main.LOOP_ERROR_LIMIT == 3)
+
+
+def test_input_survives_a_running_loop() -> None:
+    print("\nthe prompt survives an event loop someone else started")
+    import asyncio
+    import builtins
+    try:
+        from pilot import tui
+    except ImportError:
+        import tui  # type: ignore[no-redef]
+
+    ok("no loop is running here", not tui._event_loop_running())
+
+    async def inside():
+        # This is the state Playwright's sync API leaves the thread in after a
+        # screenshot: a live loop. prompt_toolkit's prompt() calls asyncio.run()
+        # and blows up; plain input() does not.
+        ok("a running loop is detected", tui._event_loop_running())
+        saved_input, saved_prompt = builtins.input, tui.print_prompt
+        used = {"pt": False}
+
+        class Exploding:
+            def prompt(self, *a, **kw):
+                used["pt"] = True
+                raise RuntimeError(
+                    "asyncio.run() cannot be called from a running event loop")
+
+        saved_session = tui._pt_session
+        try:
+            tui._pt_session = Exploding()
+            builtins.input = lambda *a: "  typed anyway  "
+            tui.print_prompt = lambda: None
+            got = tui.get_user_input()
+            check("input still reaches the caller", got, "typed anyway")
+            ok("prompt_toolkit was skipped rather than allowed to raise",
+               not used["pt"])
+        finally:
+            builtins.input, tui.print_prompt = saved_input, saved_prompt
+            tui._pt_session = saved_session
+
+    asyncio.run(inside())
+
+
 def main() -> int:
     print("Spoken-reply streaming tests")
     print("=" * 60)
@@ -270,6 +333,8 @@ def main() -> int:
     test_immediate_failure_raises()
     test_content_blocks()
     test_render_response_signature()
+    test_loop_error_guard()
+    test_input_survives_a_running_loop()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

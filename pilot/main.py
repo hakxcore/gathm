@@ -200,6 +200,25 @@ def describe_agent_failure(exc: BaseException) -> str:
     )
 
 
+# How many identical failures in a row before Pilot gives up on its own loop.
+LOOP_ERROR_LIMIT = 3
+
+
+def track_loop_error(message: str, last: str, count: int) -> tuple:
+    """(last, count, give_up) for one pass of the main loop's error handler.
+
+    An error raised while READING INPUT reproduces on the very next pass, so a
+    handler that renders it and continues spins as fast as it can print — which
+    is how one broken prompt became hundreds of identical panels. Counting
+    identical consecutive failures turns that into three panels and an exit.
+    """
+    if message == last:
+        count += 1
+    else:
+        last, count = message, 1
+    return last, count, count >= LOOP_ERROR_LIMIT
+
+
 def report_to_engineer(error_msg: str, task: str):
     """Notify the user and trigger the AutoGen Engineer."""
     print(f"\n{SAFFRON}[!] Issue Detected:{RESET} {error_msg}")
@@ -1077,6 +1096,10 @@ def main():
     print_tricolor_banner()
     conversation_history: List[BaseMessage] = []
 
+    # Guards against an error that recurs on every pass (see the handler below).
+    last_loop_error = ""
+    repeated_errors = 0
+
     while True:
         try:
             user_input = get_user_input()
@@ -1177,7 +1200,21 @@ def main():
             render_goodbye()
             break
         except Exception as e:
+            # An error here may well come from reading input, and retrying that
+            # immediately reproduces it — which is how one broken prompt turned
+            # into hundreds of identical panels scrolling past. Repeat the same
+            # failure twice and stop, with something the user can act on.
             render_error(str(e))
+            last_loop_error, repeated_errors, give_up = track_loop_error(
+                str(e), last_loop_error, repeated_errors)
+            if give_up:
+                console.print(
+                    "\n  [color(208)]\\[!][/color(208)] The same error keeps "
+                    "recurring, so Pilot is stopping rather than looping.\n"
+                    f"      {describe_agent_failure(e)}\n"
+                    "      Restart with:  gathm tui"
+                )
+                break
 
 
 if __name__ == "__main__":
