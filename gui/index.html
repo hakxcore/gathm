@@ -61,6 +61,12 @@
                 <button class="action-btn mic-btn" id="micBtn" aria-label="Voice input">
                     <i data-lucide="mic" class="btn-icon"></i>
                 </button>
+                <!-- Hands-free: listens, answers, listens again. Shown only
+                     when the server can both transcribe and speak. -->
+                <button class="action-btn convo-btn" id="convoBtn"
+                        aria-label="Start voice conversation" hidden>
+                    <i data-lucide="radio" class="btn-icon"></i>
+                </button>
                 <!-- Shown only when the server reports a working voice runtime -->
                 <button class="action-btn speak-btn" id="speakBtn"
                         aria-label="Speak replies" hidden>
@@ -70,6 +76,7 @@
         </div>
 
     </div>
+    <script src="vad.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

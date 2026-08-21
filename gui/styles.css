@@ -83,6 +83,7 @@ body {
     animation: ambientPulse 1.6s ease-in-out infinite;
 }
 
+.ai-orb.listening .orb-ambient,
 .ai-orb.speaking .orb-ambient {
     background: radial-gradient(circle, rgba(100,80,255,0.18) 0%, rgba(200,50,50,0.06) 50%, transparent 68%);
     animation: ambientPulse 0.9s ease-in-out infinite;
@@ -304,6 +305,18 @@ body {
     animation-duration: 4s;
 }
 
+/* listening — hands-free conversation, waiting for the user to talk.
+   Distinct from `speaking` so the orb says which way the conversation is
+   flowing; the mic drives the transforms, as it does for `speaking`. */
+.ai-orb.listening .orb-wrapper {
+    animation: orbFloat 11s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
+}
+.ai-orb.listening[data-live] .main-orb  { animation: none; }
+.ai-orb.listening:not([data-live]) .main-orb {
+    animation: orbBreath 3.4s cubic-bezier(0.4,0,0.6,1) infinite;
+}
+.ai-orb.listening .orb-swirl { animation-duration: 6s; }
+
 /* speaking — CSS fallback (no live mic) */
 .ai-orb.speaking:not([data-live]) .main-orb {
     animation: orbSpeak 2.2s ease-in-out infinite;
@@ -317,6 +330,7 @@ body {
 .ai-orb.speaking[data-live] .orb-swirl { animation-duration: 2s; }
 
 /* rings */
+.ai-orb.listening .orb-ring,
 .ai-orb.speaking .orb-ring {
     animation: ringExpand 2s ease-out infinite;
 }
@@ -553,6 +567,28 @@ body {
     box-shadow: 0 0 18px rgba(74,123,247,0.28);
 }
 .speak-btn[hidden] { display: none; }
+
+/* Hands-free conversation. Pulses while live, so it is obvious at a glance
+   that the microphone is open and nothing needs pressing. */
+.convo-btn {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid var(--border);
+}
+.convo-btn.active {
+    background: linear-gradient(135deg, rgba(40,160,110,0.75), rgba(30,120,160,0.75));
+    border-color: rgba(60,200,140,0.45);
+    animation: convoPulse 2.2s ease-in-out infinite;
+}
+.convo-btn[hidden] { display: none; }
+
+@keyframes convoPulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(40,180,120,0.25); }
+    50%      { box-shadow: 0 0 26px rgba(40,180,120,0.55); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .convo-btn.active { animation: none; }
+}
 
 .btn-icon {
     width: 18px;

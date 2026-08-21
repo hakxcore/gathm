@@ -99,6 +99,35 @@ voices from System Settings → Accessibility → Spoken Content).
 
 `python3 lib/speech.py --check` reports which engine is in use.
 
+#### Hands-free conversation (browser)
+
+The GUI has a conversation button next to the mic. Turn it on and there is
+nothing left to press: it listens, you talk, it answers out loud, and it
+listens again. Talk over an answer and it stops mid-sentence and listens to you
+instead.
+
+It needs speech-to-text, so the button only appears when the server reports a
+working transcription engine — Termux and macOS today. Replies are spoken when
+a voice engine is available; without one it still listens and answers in text.
+
+The endpointing lives in `gui/vad.js`, deliberately free of DOM and Web Audio so
+it can be tested without a microphone:
+
+| Knob | Default | What it does |
+|---|---|---|
+| `startMs` | 120 ms | speech must persist this long to open a turn |
+| `silenceMs` | 900 ms | silence this long closes it |
+| `minTurnMs` | 400 ms | anything shorter is a cough, not a sentence |
+| `maxTurnMs` | 20 s | hard stop, then the turn is sent and a new one opens |
+| `margin` | 3× | speech is this many times the measured noise floor |
+| `marginWhileSpeaking` | 6× | a higher bar while Gathm is talking, so echo does not interrupt it |
+
+The noise floor is measured at the start rather than assumed — a quiet room and
+a café have very different baselines — and it keeps adapting while nobody is
+talking. Barge-in relies on the browser's echo cancellation, so it works best
+with headphones; over speakers at high volume the 6× margin is what stops a
+reply from interrupting itself.
+
 The install does four things:
 
 1. Installs the build toolchain — `clang cmake ninja` plus `openmp` on Termux;
@@ -595,6 +624,30 @@ docker compose up --build
 python3 -m pip install pytest pyyaml
 python3 -m pytest tests -v
 ```
+
+The speech and conversation work has its own suites, which run standalone —
+no microphone, no speakers, no Ollama, no audio.cpp:
+
+```bash
+python3 tests/speech_stream_test.py       # sentence chunking and pipelining
+python3 tests/reply_stream_test.py        # speaking a reply as it is generated
+python3 tests/macos_speech_test.py        # engine choice, mic device, installer
+node     tests/vad_test.js                # conversation endpointing
+bash     tests/launcher_test.sh           # the gathm launcher
+```
+
+The browser end of conversation mode is tested in an actual browser, with the
+microphone synthesised inside the page and the API stubbed:
+
+```bash
+npm install playwright-core
+node tests/conversation_browser_test.js
+```
+
+It skips cleanly when playwright-core is absent. It exists because the failure
+that actually happens is a loop that passes every unit test and never fires in
+the page — which is how the hardcoded API port and the CDN-dependent icon
+call were found.
 
 ### Check that the tools actually work
 

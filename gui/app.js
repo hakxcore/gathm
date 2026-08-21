@@ -1,8 +1,23 @@
 // Gathm AI -- app.js
 
-const API_BASE = window.GATHM_API_URL || 'http://127.0.0.1:8080';
+// The page is served BY the API server, so its own origin is the right
+// default. Hardcoding 8080 meant `gathm gui --port 9090` opened a page that
+// talked to a server on a different port — usually one that was not running.
+const API_BASE = window.GATHM_API_URL ||
+    (location.protocol === 'http:' || location.protocol === 'https:'
+        ? location.origin
+        : 'http://127.0.0.1:8080');
 
-lucide.createIcons();
+// Icons come from a CDN, and Gathm is meant to work offline — on a phone with
+// no signal the script simply is not there. Every call goes through this so a
+// missing library costs you the icons, not the buttons.
+function refreshIcons() {
+    try {
+        if (window.lucide && lucide.createIcons) lucide.createIcons();
+    } catch (_) { /* decoration is never worth an exception */ }
+}
+
+refreshIcons();
 
 // -- Element refs ----------------------------------------------------------
 const aiOrb        = document.getElementById('aiOrb');
@@ -14,6 +29,7 @@ const messageInput = document.getElementById('messageInput');
 const sendBtn      = document.getElementById('sendBtn');
 const micBtn       = document.getElementById('micBtn');
 const speakBtn     = document.getElementById('speakBtn');
+const convoBtn     = document.getElementById('convoBtn');
 
 // -- Conversation memory ---------------------------------------------------
 // Declared up here because both persistence and sending touch it.
@@ -45,7 +61,9 @@ async function checkConnectivity() {
 // rebuilt with the ASR family, should light the features up without a reload.
 async function refreshCapabilities() {
     await checkConnectivity();
-    if (isOnline) { checkSpeech(); checkTranscribe(); }
+    if (!isOnline) return;
+    await Promise.all([checkSpeech(), checkTranscribe()]);
+    updateConvoBtn();
 }
 
 checkConnectivity();
@@ -200,7 +218,7 @@ function updateSpeakBtn() {
     speakBtn.setAttribute('aria-label', speakEnabled ? 'Mute replies' : 'Speak replies');
     speakBtn.innerHTML = '<i data-lucide="' + (speakEnabled ? 'volume-2' : 'volume-x') +
                          '" class="btn-icon"></i>';
-    lucide.createIcons();
+    refreshIcons();
 }
 
 function stopSpeaking() {
@@ -211,6 +229,9 @@ function stopSpeaking() {
     if (!voiceActive) setOrbState('idle');
 }
 
+// Resolves when the reply has finished being spoken — which is when a
+// hands-free conversation may start listening again. Callers that do not care
+// simply ignore the promise.
 async function speakReply(text) {
     if (!speechAvailable || !speakEnabled || !text) return;
     stopSpeaking();
@@ -225,16 +246,30 @@ async function speakReply(text) {
         const audio = new Audio(url);
         currentAudio = audio;
         if (!voiceActive) setOrbState('speaking');
-        const done = function() {
-            URL.revokeObjectURL(url);
-            if (currentAudio === audio) currentAudio = null;
-            if (!voiceActive) setOrbState('idle');
-        };
-        audio.onended = done;
-        audio.onerror = done;
-        await audio.play().catch(done);       // autoplay may need a tap first
+        await new Promise(function(resolve) {
+            let settled = false;
+            const done = function() {
+                if (settled) return;
+                settled = true;
+                URL.revokeObjectURL(url);
+                if (currentAudio === audio) currentAudio = null;
+                if (!voiceActive) setOrbState('idle');
+                resolve();
+            };
+            audio.onended = done;
+            audio.onerror = done;
+            // stopSpeaking() drops our reference; that is a barge-in, and the
+            // waiter has to be released or the conversation loop would hang.
+            audio.onpause = done;
+            audio.play().catch(done);         // autoplay may need a tap first
+        });
     } catch (_) { /* speech is a bonus, never an error path */ }
 }
+
+// The most recent reply's playback, so the conversation loop can wait for it.
+let speaking = Promise.resolve();
+
+function isSpeakingNow() { return currentAudio !== null; }
 
 if (speakBtn) {
     speakBtn.addEventListener('click', function() {
@@ -291,7 +326,9 @@ async function sendMessage() {
         const data = await res.json();
         const reply = formatAgentReply(data);
         addMessage(reply, 'bot');
-        speakReply(reply);        // fire-and-forget; text is already on screen
+        // Not awaited: the text is already on screen and the composer should
+        // come back immediately. Conversation mode awaits `speaking` instead.
+        speaking = speakReply(reply);
 
         // Remember this turn so follow-ups have context
         history.push({ role: 'user', content: text });
@@ -371,7 +408,7 @@ async function checkTranscribe() {
     }
 }
 
-checkTranscribe();
+checkTranscribe().then(function() { updateConvoBtn(); });
 
 // The API wants 16 kHz mono 16-bit WAV — what the ASR models read. MediaRecorder
 // would give webm/opus and need ffmpeg on the server, so the PCM is captured
@@ -475,12 +512,38 @@ function hideRecording() {
     if (recEl) { recEl.remove(); recEl = null; }
 }
 
+function chunkSeconds(chunks) {
+    return chunks.reduce(function(n, c) { return n + c.length; }, 0) / pcmRate;
+}
+
+/**
+ * Send captured audio to the server. Returns {text} on success, or {error}
+ * with something the user can act on. Shared by both voice modes.
+ */
+async function transcribeChunks(chunks) {
+    try {
+        const res = await fetch(API_BASE + '/api/v1/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/wav' },
+            body: encodeWav(chunks, pcmRate, 16000),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(function() { return {}; });
+            return { error: err.detail || 'could not transcribe that' };
+        }
+        const text = ((await res.json()).text || '').trim();
+        return text ? { text: text } : { error: '' };   // '' = heard nothing
+    } catch (err) {
+        return { error: err.message };
+    }
+}
+
 async function transcribeAndSend() {
     const chunks = pcmChunks;
     pcmChunks = [];
     if (!chunks.length) return;
 
-    const seconds = chunks.reduce(function(n, c) { return n + c.length; }, 0) / pcmRate;
+    const seconds = chunkSeconds(chunks);
     if (seconds < 0.4) {                    // a stray tap, not speech
         setRecordingLabel('Too short — hold the mic while you speak');
         setTimeout(hideRecording, 2500);
@@ -491,41 +554,27 @@ async function transcribeAndSend() {
 
     setRecordingLabel('Transcribing ' + seconds.toFixed(1) + 's of audio…');
     botStatus.textContent = 'Transcribing…';
-    try {
-        const res = await fetch(API_BASE + '/api/v1/transcribe', {
-            method: 'POST',
-            headers: { 'Content-Type': 'audio/wav' },
-            body: encodeWav(chunks, pcmRate, 16000),
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(function() { return {}; });
-            const why = err.detail || 'could not transcribe that';
-            setRecordingLabel('Transcription failed: ' + why);
-            setTimeout(hideRecording, 6000);
-            botStatus.textContent = why;
-            setTimeout(checkConnectivity, 3000);
-            return;
-        }
-        const text = ((await res.json()).text || '').trim();
-        if (!text) {
-            setRecordingLabel('Nothing recognised — try again, closer to the mic');
-            setTimeout(hideRecording, 5000);
-            setTimeout(checkConnectivity, 2500);
-            return;
-        }
-        hideRecording();
-        // Land it in the input and send, so the transcript is visible and
-        // correctable rather than vanishing into a request.
-        messageInput.value = text;
-        autoGrow();
-        checkConnectivity();
-        sendMessage();
-    } catch (err) {
-        setRecordingLabel('Transcription failed: ' + err.message);
+    const out = await transcribeChunks(chunks);
+    if (out.error) {
+        setRecordingLabel('Transcription failed: ' + out.error);
         setTimeout(hideRecording, 6000);
-        botStatus.textContent = 'Transcription failed: ' + err.message;
+        botStatus.textContent = out.error;
         setTimeout(checkConnectivity, 3000);
+        return;
     }
+    if (!out.text) {
+        setRecordingLabel('Nothing recognised — try again, closer to the mic');
+        setTimeout(hideRecording, 5000);
+        setTimeout(checkConnectivity, 2500);
+        return;
+    }
+    hideRecording();
+    // Land it in the input and send, so the transcript is visible and
+    // correctable rather than vanishing into a request.
+    messageInput.value = out.text;
+    autoGrow();
+    checkConnectivity();
+    sendMessage();
 }
 
 const bars = Array.from(freqBars.querySelectorAll('.fb'));
@@ -560,7 +609,17 @@ async function startVoice() {
     }
 
     try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micStream = await navigator.mediaDevices.getUserMedia({
+            // Without echo cancellation the mic hears the reply and the
+            // endpointer treats it as the user talking, so hands-free mode
+            // would interrupt itself on every answer.
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            },
+            video: false,
+        });
     } catch (err) {
         addMessage('Microphone blocked: ' + (err && err.name ? err.name : 'denied') +
                    '. Allow mic access for this site in the browser\'s site settings.',
@@ -590,7 +649,9 @@ async function startVoice() {
         recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
         recorderNode.onaudioprocess = function(e) {
             if (!voiceActive) return;
-            pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+            const frame = new Float32Array(e.inputBuffer.getChannelData(0));
+            if (convoMode) convoFrame(frame);
+            else pcmChunks.push(frame);
         };
         src.connect(recorderNode);
         // A ScriptProcessor only runs while connected to the destination; the
@@ -603,13 +664,19 @@ async function startVoice() {
 
     voiceActive = true;
     aiOrb.setAttribute('data-live', 'true');
-    setOrbState('speaking');
+    setOrbState(convoMode ? 'listening' : 'speaking');
     micBtn.classList.add('active');
-    botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
-                                         : 'Listening...';
-    if (recorderNode) {
+    if (convoMode) {
+        botStatus.textContent = 'Listening… just talk.';
+    } else {
+        botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
+                                             : 'Listening...';
+    }
+    if (recorderNode && !convoMode) {
+        // No bubble in conversation mode: its timer would count the whole
+        // session rather than one turn, and there is nothing to tap.
         showRecording();
-    } else if (asrAvailable) {
+    } else if (asrAvailable && !recorderNode) {
         // ASR is available but this browser has no ScriptProcessor at all.
         addMessage('This browser cannot capture audio for transcription ' +
                    '(no ScriptProcessor support). The visualiser still works.',
@@ -639,7 +706,13 @@ function stopVoice() {
     setOrbState('idle');
     micBtn.classList.remove('active');
 
-    if (hadAudio) {
+    if (convoMode) {
+        // Conversation dispatches its own turns as they end; whatever is in the
+        // buffer when the mic closes is a half-sentence, not a question.
+        pcmChunks = [];
+        hideRecording();
+        checkConnectivity();
+    } else if (hadAudio) {
         transcribeAndSend();               // ends with sendMessage() on success
     } else {
         if (recEl) {
@@ -671,6 +744,173 @@ function driveFrequency() {
 }
 
 micBtn.addEventListener('click', function() {
+    if (convoMode) { stopConversation(); return; }   // one voice mode at a time
     if (voiceActive) stopVoice();
     else startVoice();
 });
+
+// =========================================================================
+// Conversation mode -- hands free, voice only
+//
+// The mic stays open. gui/vad.js decides where each spoken turn starts and
+// stops, so nothing is pressed: you talk, it answers, it listens again. Speak
+// over an answer and it stops talking and listens instead.
+// =========================================================================
+
+let convoMode  = false;
+let convoVad   = null;
+let capturing  = false;     // inside a turn, keeping audio
+let turnBusy   = false;     // a turn is being transcribed/answered
+let preroll    = [];        // recent frames, so a turn does not lose its first
+                            // syllable to the time it takes to be recognised
+
+// ~370 ms at a 4096-sample frame and a 44.1 kHz context.
+const PREROLL_FRAMES = 4;
+
+function convoStatus(text) {
+    botStatus.textContent = text;
+    if (recEl) setRecordingLabel(text);
+}
+
+function convoFrame(frame) {
+    const level = GathmVAD.rmsOf(frame);
+    const event = convoVad.push(level, performance.now(), isSpeakingNow());
+
+    if (event === 'start') {
+        if (turnBusy) return;              // still answering the last one
+        if (isSpeakingNow()) {             // barge-in: they get the floor
+            stopSpeaking();
+            convoStatus('Listening…');
+        }
+        capturing = true;
+        pcmChunks = preroll.slice();
+        preroll = [];
+        setOrbState('listening');
+        convoStatus('Listening…');
+    } else if (event === 'end' || event === 'timeout') {
+        if (!capturing) return;
+        capturing = false;
+        const chunks = pcmChunks;
+        pcmChunks = [];
+        handleTurn(chunks);
+        return;
+    } else if (event === 'discard') {
+        capturing = false;
+        pcmChunks = [];
+        convoStatus('Listening…');
+    }
+
+    if (capturing) {
+        pcmChunks.push(frame);
+    } else {
+        preroll.push(frame);
+        if (preroll.length > PREROLL_FRAMES) preroll.shift();
+    }
+}
+
+async function handleTurn(chunks) {
+    if (turnBusy) return;
+    turnBusy = true;
+    try {
+        if (chunkSeconds(chunks) < 0.4) return;     // not a sentence
+        setOrbState('thinking');
+        convoStatus('Transcribing…');
+
+        const out = await transcribeChunks(chunks);
+        if (out.error) {
+            convoStatus('Could not transcribe: ' + out.error);
+            return;
+        }
+        if (!out.text) {
+            convoStatus('Did not catch that — say it again');
+            return;
+        }
+
+        messageInput.value = out.text;
+        autoGrow();
+        await sendMessage();
+        setOrbState('speaking');
+        convoStatus('Speaking…');
+        await speaking;                 // let the reply finish before listening
+    } catch (err) {
+        convoStatus('Conversation error: ' + err.message);
+    } finally {
+        turnBusy = false;
+        capturing = false;
+        pcmChunks = [];
+        preroll = [];
+        if (convoMode && voiceActive) {
+            // rearm, not reset: re-measuring the room here would sample the
+            // user mid-sentence after a barge-in and go deaf to them.
+            convoVad.rearm();
+            setOrbState('listening');
+            convoStatus('Listening…');
+        }
+    }
+}
+
+function updateConvoBtn() {
+    if (!convoBtn) return;
+    convoBtn.hidden = !asrAvailable;
+    convoBtn.classList.toggle('active', convoMode);
+    convoBtn.setAttribute('aria-label',
+        convoMode ? 'End voice conversation' : 'Start voice conversation');
+    convoBtn.innerHTML = '<i data-lucide="' + (convoMode ? 'square' : 'radio') +
+                         '" class="btn-icon"></i>';
+    refreshIcons();
+}
+
+async function startConversation() {
+    if (!asrAvailable) {
+        await checkTranscribe();
+        if (!asrAvailable) {
+            addMessage('Voice conversation needs speech-to-text: ' +
+                       (asrReason || 'the server reports no engine') + '.',
+                       'bot', 'bot-error');
+            updateConvoBtn();
+            return;
+        }
+    }
+    convoMode = true;
+    convoVad = new GathmVAD.VAD();
+    capturing = false;
+    turnBusy = false;
+    preroll = [];
+    updateConvoBtn();
+
+    await startVoice();
+    if (!voiceActive) {                  // blocked mic, insecure origin, …
+        convoMode = false;
+        updateConvoBtn();
+        return;
+    }
+    convoVad.reset(performance.now());
+    if (!speechAvailable || !speakEnabled) {
+        addMessage('Conversation is listening, but replies will not be spoken ' +
+                   (speechAvailable ? '(the speaker is muted).'
+                                    : '(no speech engine on this server).'),
+                   'bot', 'bot-error');
+    }
+    setOrbState('listening');
+    convoStatus('Listening… just talk. Tap again to stop.');
+}
+
+function stopConversation() {
+    convoMode = false;
+    capturing = false;
+    turnBusy = false;
+    preroll = [];
+    convoVad = null;
+    stopSpeaking();
+    if (voiceActive) stopVoice();
+    updateConvoBtn();
+    setOrbState('idle');
+    checkConnectivity();
+}
+
+if (convoBtn) {
+    convoBtn.addEventListener('click', function() {
+        if (convoMode) stopConversation();
+        else startConversation();
+    });
+}
