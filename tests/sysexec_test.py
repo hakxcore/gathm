@@ -688,6 +688,96 @@ def test_ios_spawn_failure_is_explained():
     ok("and how to change it", "GATHM_SHELL" in missing)
 
 
+def test_scaffolding_never_reaches_the_user():
+    print("\nthe user is never shown our own ReAct scaffolding")
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
+
+    # This exact string was rendered as the answer to "what's in my Downloads":
+    # a single line, so the line-stripper removed everything, and the old
+    # fallback then showed the raw text because nothing was left.
+    leak = "Action: gathm Action Input: ls ~/Downloads"
+    out = pilot_main._final_text(leak)
+    ok("no Action: in what the user sees", "Action:" not in out)
+    ok("no Action Input: either", "Action Input:" not in out)
+    ok("and it admits nothing ran", "nothing ran" in out)
+
+    check("a real answer is untouched",
+          pilot_main._final_text("Your Desktop has 9 files."),
+          "Your Desktop has 9 files.")
+    check("scaffolding around a real answer is trimmed",
+          pilot_main._final_text(
+              "Thought: I should answer\nYour Desktop has 9 files."),
+          "Your Desktop has 9 files.")
+
+
+def test_a_missing_system_prefix_is_recovered():
+    print("\na shell command written without the `system` prefix")
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
+    tools = set(pilot_main.discover_tools())
+
+    os.environ["GATHM_ALLOW_SHELL"] = "1"
+    try:
+        # What llama3.2:3b actually emitted, after being asked to do it.
+        check("a read-only command is recovered",
+              pilot_main._recover_bare_shell_command(
+                  "Action: gathm Action Input: ls ~/Downloads", tools),
+              "system ls ~/Downloads")
+        check("...and on its own line too",
+              pilot_main._recover_bare_shell_command(
+                  "Action: gathm\nAction Input: df -h", tools),
+              "system df -h")
+
+        # Recovery stops at the safe tier. Guessing that the user wanted a
+        # write, an install or a root command is not ours to do.
+        for attempt in ["rm ~/notes.txt", "brew install ffmpeg",
+                        "sudo ls /var", "mkdir ~/newdir", "rm -rf /",
+                        "touch ~/.gathm/allow_shell", "ls | rm -r x"]:
+            check(f"not recovered: {attempt}",
+                  pilot_main._recover_bare_shell_command(
+                      f"Action Input: {attempt}", tools), "")
+
+        # A real tool name is not a shell command and must not be rewritten.
+        check("a real tool is left alone",
+              pilot_main._recover_bare_shell_command(
+                  "Action Input: weather delhi", tools), "")
+        check("nor is a plain answer touched",
+              pilot_main._recover_bare_shell_command(
+                  "Your Desktop has 9 files.", tools), "")
+
+        # The recovered string has to survive the dispatch path unchanged, and
+        # actually run.
+        recovered = pilot_main._recover_bare_shell_command(
+            "Action Input: ls ~", tools)
+        check("it survives normalisation",
+              pilot_main.normalize_tool_command(recovered), recovered)
+        out = pilot_main.run_gathm_tool_raw(recovered)
+        ok("and it runs", out and "not completed" not in out)
+    finally:
+        os.environ.pop("GATHM_ALLOW_SHELL", None)
+
+    # With system control off, nothing is recovered at all.
+    check("nothing is recovered while system control is off",
+          pilot_main._recover_bare_shell_command(
+              "Action Input: ls ~/Downloads", tools), "")
+
+
+def test_the_prompt_says_to_act_not_explain():
+    print("\nthe prompt tells the model to do it, not describe it")
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
+    src = pilot_main._SYSTEM_HELP + open(
+        os.path.join(ROOT, "pilot", "main.py")).read()
+    ok("there is a do-not-describe rule", "DO IT, DO NOT DESCRIBE IT" in src)
+    ok("with the failing example in it", "ls ~/Desktop" in src)
+    ok("and a rule against arithmetic on command output",
+       "do not do arithmetic on it" in pilot_main._SYSTEM_HELP)
+
+
 def test_the_command_that_runs_is_the_command_written():
     print("\nnothing rewrites the command between the model and the shell")
     pilot_main = pilot_main_module()
@@ -933,6 +1023,9 @@ def main():
     test_platform_detection()
     test_summary_names_the_shell()
     test_ios_spawn_failure_is_explained()
+    test_scaffolding_never_reaches_the_user()
+    test_a_missing_system_prefix_is_recovered()
+    test_the_prompt_says_to_act_not_explain()
     test_the_command_that_runs_is_the_command_written()
     test_gathm_cannot_enable_itself()
     test_the_model_is_not_handed_the_recipe()

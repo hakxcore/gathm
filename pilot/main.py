@@ -709,8 +709,73 @@ def _clean_agent_response(content: str) -> str:
     _STRIP_PREFIXES = ("thought:", "action:", "action input:", "observation:")
     lines = content.splitlines()
     kept = [ln for ln in lines if not ln.strip().lower().startswith(_STRIP_PREFIXES)]
-    cleaned = "\n".join(kept).strip()
-    return cleaned if cleaned else content
+    return "\n".join(kept).strip()
+
+
+def _final_text(content: str) -> str:
+    """What the user actually sees when the model is done.
+
+    When a reply is nothing but scaffolding, the old code fell back to showing
+    it raw, so a user asking what was in their Downloads folder got
+    "Action: gathm Action Input: ls ~/Downloads" as their answer. Our internals
+    are never a better answer than admitting the call did not happen.
+    """
+    cleaned = _clean_agent_response(content)
+    if cleaned:
+        return cleaned
+    return ("I meant to run a command for that but got the call wrong, so "
+            "nothing ran. Ask me again and I will retry.")
+
+
+def _attempted_tool_call(content: str) -> str:
+    """The command a reply was trying to invoke, if it was trying to.
+
+    Used to recover from a reply that looks like a tool call but did not parse
+    as one — the alternative is showing the user the raw ReAct text.
+    """
+    if not isinstance(content, str) or not _REACT_MARKER_RE.search(content):
+        return ""
+    match = re.search(r"Action Input:\s*(.+)", content, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().splitlines()[0].strip()
+    match = re.search(r"(?im)^\s*Action:\s*(.+)$", content)
+    if match:
+        payload = match.group(1).strip()
+        if payload.lower().startswith("gathm "):
+            payload = payload[6:].strip()
+        return "" if payload.lower() == "gathm" else payload
+    return ""
+
+
+def _recover_bare_shell_command(content: str, tools) -> str:
+    """`Action Input: ls ~/Downloads` -> `system ls ~/Downloads`, or "".
+
+    Dropping the `system` prefix is the most common way a small model mangles
+    this: llama3.2:3b emitted exactly that, it failed to route as a tool named
+    `ls`, and the scaffolding was shown to the user instead of their files.
+
+    Recovery is limited to the `safe` tier on purpose. Those commands cannot
+    change anything and run without a confirmation prompt anyway, so this
+    grants nothing that the correctly-written call would not have had. A
+    command that writes, or that is unrecognised, is NOT recovered — guessing
+    that the user wanted it run is not ours to do.
+    """
+    if "system" not in (tools or ()) or _sysexec is None:
+        return ""
+    if not _sysexec.enabled():
+        return ""
+    attempt = _attempted_tool_call(content)
+    if not attempt:
+        return ""
+    head = attempt.split()[0].lower() if attempt.split() else ""
+    if not head or head in (tools or ()):
+        return ""      # a real tool name; not ours to rewrite
+    try:
+        if _sysexec.classify(attempt)[0] != "safe":
+            return ""
+    except Exception:  # noqa: BLE001 - an unclassifiable string is not recovered
+        return ""
+    return f"system {attempt}"
 
 
 # --- 2. LangGraph Stateful Reasoning (Text-based Tool Calling) ---
@@ -935,6 +1000,9 @@ _SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool w
     chaining commands together.
     If system control is off, say so and stop. You cannot switch it on, and
     no command you run will change that.
+    Report what the output says, and do not do arithmetic on it. `df` already
+    has an Avail column — that IS the free space, so quote it rather than
+    subtracting Used from Size and getting a different number.
     Never run a command the user did not ask for, and never one whose purpose
     you cannot state in a sentence."""
 
@@ -969,7 +1037,7 @@ def call_model(state: AgentState):
         _llm = _build_llm()
         _resp = _invoke_spoken(_llm, [HumanMessage(content=_SMALL_TALK_PROMPT),
                                       HumanMessage(content=_last)])
-        _text = _clean_agent_response(_resp.content)
+        _text = _final_text(_resp.content)
         return {"messages": [_AIMsg(content=_text)], "next_step": "end"}
 
     # Re-discover tools to ensure we have the latest descriptions
@@ -1027,6 +1095,7 @@ CRITICAL RULES:
 0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
 0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
 0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
+0c. DO IT, DO NOT DESCRIBE IT. If the user asks for something you have a tool for, call the tool. Never answer with the command they could type themselves — "you can list them with ls ~/Desktop" is a failure, running it and showing the result is the answer. They are talking to you because they do not want to type it.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
 Action: gathm
@@ -1059,10 +1128,20 @@ When you have a final answer, provide it directly without the Action format.
             "next_step": "action"
         }
 
+    from langchain_core.messages import AIMessage as _AIMsg
+
+    # A shell command written without the `system` prefix. Rewriting it here
+    # costs one turn instead of ending with our scaffolding on screen.
+    recovered = _recover_bare_shell_command(content, available_tools)
+    if recovered:
+        return {
+            "messages": [_AIMsg(content=f"Action: gathm\nAction Input: {recovered}")],
+            "next_step": "action",
+        }
+
     # No valid tool call — clean ReAct scaffolding before returning the
     # final answer so the user sees only the actual response text.
-    from langchain_core.messages import AIMessage as _AIMsg
-    cleaned = _clean_agent_response(content)
+    cleaned = _final_text(content)
     final = _AIMsg(content=cleaned) if cleaned != content else response
     return {
         "messages": [final],
