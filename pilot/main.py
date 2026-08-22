@@ -757,6 +757,36 @@ def _query_terms(query: str) -> set:
 _TOOL_INDEX: dict = {}
 
 
+# Built-in tools have no tool.yaml, so they have no tags — and tags are where
+# the words a user actually types live. Without these, "what macOS version am
+# I on" scored zero against every tool and fell through to the
+# weather/dns/ipinfo fallback, so Pilot answered a question about the machine
+# with a geolocation lookup. These are index-only: they are never shown to the
+# model, so the descriptions above stay readable prose.
+#
+# Words other tools own are deliberately absent — "ip" belongs to ipinfo,
+# "search" to websearch — because taking them would break those instead.
+BUILTIN_TAGS = {
+    "system": {
+        "machine", "computer", "laptop", "device", "phone", "os", "version",
+        "macos", "mac", "osx", "windows", "linux", "termux", "android", "ios",
+        "kernel", "uname", "hostname", "arch", "architecture",
+        "memory", "ram", "swap", "cpu", "processor", "core", "load",
+        "disk", "storage", "space", "free", "usage", "battery", "uptime",
+        "process", "running", "port", "listening", "service", "daemon",
+        "install", "uninstall", "update", "upgrade", "package", "brew", "apt",
+        "pkg", "dpkg", "pip", "npm",
+        "file", "folder", "directory", "path", "permission", "size",
+        "shell", "command", "terminal", "bash", "zsh", "powershell",
+        "environment", "variable", "user", "whoami", "sudo", "root",
+    },
+    "browser": {
+        "url", "website", "webpage", "page", "site", "click", "screenshot",
+        "navigate", "form", "link", "scroll", "chrome", "chromium", "tab",
+    },
+}
+
+
 def _tool_index() -> dict:
     """{tool: (words, tags)} from its description and manifest, built once.
 
@@ -779,6 +809,7 @@ def _tool_index() -> dict:
                     break
         except Exception:  # noqa: BLE001 - a tool without a manifest still works
             tags = set()
+        tags |= BUILTIN_TAGS.get(name, set())
         words = set(re.findall(r"[a-z0-9]+", text)) | tags
         _TOOL_INDEX[name] = (words, tags)
     return _TOOL_INDEX
@@ -835,9 +866,14 @@ def _shortlist_tools(query: str, tools: list) -> list:
     picked = [name for _score, name in scored[:TOOL_SHORTLIST]]
 
     if not picked:
-        # No signal at all: the common cases, so "how hot is it" still finds a way.
-        fallback = ["weather", "dns", "ipinfo", "define", "websearch", "news",
-                    "stocks", "cryptocurrency", "currency", "browser"]
+        # No signal at all: the common cases, so "how hot is it" still finds a
+        # way. `system` is in here because a question with no other signal is
+        # at least as likely to be about the machine in front of the user as
+        # about the weather, and without it the model cannot even see which
+        # platform it is on.
+        fallback = ["weather", "websearch", "system", "dns", "ipinfo",
+                    "define", "news", "browser", "stocks", "cryptocurrency",
+                    "currency"]
         picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
     return picked
 

@@ -25,7 +25,10 @@ from lib import sysexec  # noqa: E402
 # permission, while passing silently on a machine with no tty.
 os.environ["GATHM_NON_INTERACTIVE"] = "1"
 
-PASS = FAIL = 0
+PASS = FAIL = SKIP = 0
+_UNTRIED = object()
+_PILOT = _UNTRIED
+_PILOT_WHY = ""
 
 
 def check(name, got, want):
@@ -36,6 +39,40 @@ def check(name, got, want):
     else:
         FAIL += 1
         print(f"  FAIL {name}\n         got:  {got!r}\n         want: {want!r}")
+
+
+def pilot_main_module():
+    """The Pilot module, or None if its dependencies are not installed here.
+
+    pilot/main.py raises SystemExit at import when `rich` is missing — which
+    is right for a user starting Pilot and fatal for a test runner. Run with a
+    Python that has no `rich` (a Mac's system python3, while Pilot's deps live
+    in the installer's venv) and importing it killed the whole suite partway
+    through, taking the classifier tests with it. They have nothing to do with
+    `rich`, so they now keep running and the Pilot ones report a skip.
+    """
+    global SKIP, _PILOT, _PILOT_WHY
+    if _PILOT is not _UNTRIED:
+        if _PILOT is None:
+            SKIP += 1
+            print(f"  SKIP Pilot is not importable here ({_PILOT_WHY}) — "
+                  "run ./install, or use the venv Python")
+        return _PILOT
+
+    import contextlib
+    import io
+    sys.path.insert(0, os.path.join(ROOT, "pilot"))
+    try:
+        # main.py writes its own "Pilot can't start" advice to stderr before
+        # giving up. Useful to a user, noise in a test log.
+        with contextlib.redirect_stderr(io.StringIO()):
+            import main
+        _PILOT = main
+    except (ImportError, SystemExit) as exc:
+        _PILOT = None
+        _PILOT_WHY = f"{getattr(exc, 'name', None) or 'a dependency'} missing"
+        return pilot_main_module()
+    return _PILOT
 
 
 def ok(name, cond):
@@ -304,8 +341,9 @@ def test_junk():
 
 def test_pilot_integration():
     print("\nthe 'system' tool, as the agent reaches it")
-    sys.path.insert(0, os.path.join(ROOT, "pilot"))
-    import main as pilot_main
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
 
     ok("it is a built-in tool", "system" in pilot_main.BUILTIN_TOOLS)
     ok("so it is always discoverable", "system" in pilot_main.discover_tools())
@@ -358,8 +396,9 @@ def test_pilot_integration():
 def test_the_confirmation_prompt_itself():
     print("\nthe prompt a human actually sees")
     import builtins
-    sys.path.insert(0, os.path.join(ROOT, "pilot"))
-    import main as pilot_main
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
 
     saved_input = builtins.input
     saved_stop, saved_start = pilot_main.stop_waiting, pilot_main.start_waiting
@@ -401,8 +440,9 @@ def test_the_confirmation_prompt_itself():
 
 def test_prompt_tells_the_model_the_platform():
     print("\nthe prompt tells the model which machine it is on")
-    sys.path.insert(0, os.path.join(ROOT, "pilot"))
-    import main as pilot_main
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
 
     help_text = pilot_main._SYSTEM_HELP.format(platform="macos, arm64",
                                                shell="bash", state="ENABLED")
@@ -641,10 +681,61 @@ def test_ios_spawn_failure_is_explained():
     ok("and how to change it", "GATHM_SHELL" in missing)
 
 
+def test_machine_questions_reach_the_system_tool():
+    print("\na question about this machine is offered the system tool")
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
+    tools = pilot_main.discover_tools()
+
+    # Each of these scored zero against every tool and fell through to the
+    # weather/dns/ipinfo fallback, so "what macOS version am I on" was
+    # answered with a geolocation lookup on a real Mac.
+    for query in [
+        "what macOS version am I on",
+        "how much memory is free",
+        "what version of android is this",
+        "how much disk space is left",
+        "what is my hostname",
+        "which processes are running",
+        "how many cpu cores does this have",
+        "install ffmpeg",
+        "list the files in my home folder",
+        "what shell am I using",
+    ]:
+        ok(f"{query!r} can see it",
+           "system" in pilot_main._shortlist_tools(query, tools))
+
+    # And the tools that own those questions still win theirs. Narrowing that
+    # helps the machine questions by hijacking everything else is not a fix.
+    for query, expected in [
+        ("whats the weather in delhi", "weather"),
+        ("define serendipity", "define"),
+        ("dns google.com", "dns"),
+        ("bitcoin price", "cryptocurrency"),
+        ("search for rust tutorials", "websearch"),
+        ("screenshot example.com", "browser"),
+    ]:
+        picked = pilot_main._shortlist_tools(query, tools)
+        ok(f"{query!r} still leads with {expected}",
+           picked and picked[0] == expected)
+
+    # A question with no signal at all must still be able to see the machine,
+    # because that is also where the platform line lives.
+    picked = pilot_main._shortlist_tools("zzzz qqqq wwww", tools)
+    ok("the no-signal fallback includes it", "system" in picked)
+    ok("...without dropping the everyday tools",
+       "weather" in picked and "websearch" in picked)
+
+    ok("the extra vocabulary is index-only, not shown to the model",
+       "macos" not in pilot_main.BUILTIN_TOOLS["system"].lower())
+
+
 def test_banner_agrees_with_the_classifier():
     print("\nthe welcome banner names the same machine the classifier does")
-    sys.path.insert(0, os.path.join(ROOT, "pilot"))
-    import main as pilot_main
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
 
     real = sysexec.platform_name
     try:
@@ -686,8 +777,9 @@ def test_banner_agrees_with_the_classifier():
 
 def test_prompt_covers_every_platform():
     print("\nthe prompt tells the model how to write for this machine")
-    sys.path.insert(0, os.path.join(ROOT, "pilot"))
-    import main as pilot_main
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
 
     text = pilot_main._SYSTEM_HELP.format(platform="windows, AMD64",
                                           shell="powershell", state="ENABLED")
@@ -727,10 +819,15 @@ def main():
     test_platform_detection()
     test_summary_names_the_shell()
     test_ios_spawn_failure_is_explained()
+    test_machine_questions_reach_the_system_tool()
     test_banner_agrees_with_the_classifier()
     test_prompt_covers_every_platform()
     print("=" * 60)
-    print(f"{PASS} passed, {FAIL} failed")
+    summary = f"{PASS} passed, {FAIL} failed"
+    if SKIP:
+        summary += (f", {SKIP} skipped (Pilot not importable — the classifier "
+                    "was still tested in full)")
+    print(summary)
     return 1 if FAIL else 0
 
 
