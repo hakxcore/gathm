@@ -683,7 +683,7 @@ there. Gathm says exactly that rather than reporting an unexplained failure.
 `python3 lib/sysexec.py` with no arguments prints the detected platform, the
 shell it would use, and whether the feature is on;
 `python3 lib/sysexec.py <command>` prints how a command would be classified
-without running it. `tests/sysexec_test.py` holds 300 assertions, most of them
+without running it. `tests/sysexec_test.py` holds 311 assertions, most of them
 about exactly which commands land in which tier, on which platform.
 
 ## Security and Reliability Model

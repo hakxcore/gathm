@@ -688,6 +688,46 @@ def test_ios_spawn_failure_is_explained():
     ok("and how to change it", "GATHM_SHELL" in missing)
 
 
+def test_the_command_that_runs_is_the_command_written():
+    print("\nnothing rewrites the command between the model and the shell")
+    pilot_main = pilot_main_module()
+    if pilot_main is None:
+        return
+
+    # tool_node normalises before dispatching, and normalize_tool_command used
+    # to shlex.split/join everything. That turned `system ls -a ~/Desktop` into
+    # `system ls -a '~/Desktop'` — a quoted tilde is a directory literally
+    # named "~" — so Pilot reported an empty Desktop on a real Mac. Testing
+    # the two functions separately missed it; only the pipeline shows it.
+    for raw in [
+        "system ls -a ~/Desktop",
+        "system ls ~",
+        "system df -h | head -3",
+        'system echo "a b"',
+        "system grep -r 'to do' ~/notes",
+        "system cat ~/.gathm/shell.log",
+        "system find ~ -name '*.log'",
+        "system echo $HOME",
+    ]:
+        check(f"unchanged: {raw}", pilot_main.normalize_tool_command(raw), raw)
+
+    # Tools that are not shell commands still get their normalisation.
+    check("a real tool invocation is still normalised",
+          pilot_main.normalize_tool_command("currency 100 USD EUR"),
+          "currency USD EUR 100")
+
+    # End to end, in the order tool_node calls them: if the tilde survives, the
+    # shell expands it, and the output is a path rather than the character.
+    os.environ["GATHM_ALLOW_SHELL"] = "1"
+    try:
+        dispatched = pilot_main.normalize_tool_command("system echo ~")
+        out = pilot_main.run_gathm_tool_raw(dispatched)
+        ok("the tilde reached the shell and expanded", out.strip().startswith("/"))
+        ok("...to the user's home", out.strip() == os.path.expanduser("~"))
+    finally:
+        os.environ.pop("GATHM_ALLOW_SHELL", None)
+
+
 def test_gathm_cannot_enable_itself():
     print("\nGathm cannot switch on its own system control")
     # A real trace: told "switched off, turn it on with:
@@ -893,6 +933,7 @@ def main():
     test_platform_detection()
     test_summary_names_the_shell()
     test_ios_spawn_failure_is_explained()
+    test_the_command_that_runs_is_the_command_written()
     test_gathm_cannot_enable_itself()
     test_the_model_is_not_handed_the_recipe()
     test_machine_questions_reach_the_system_tool()

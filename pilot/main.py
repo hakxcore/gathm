@@ -437,7 +437,27 @@ def _normalize_tool_invocation(parts: List[str]) -> List[str]:
 
     return [tool_name, *args]
 
+def _is_raw_shell_command(text: str) -> bool:
+    """Whether this invocation must reach the shell exactly as written.
+
+    Every path that touches a tool string has to ask this before parsing.
+    Missing one is not cosmetic: normalize_tool_command turned
+    `system ls -a ~/Desktop` into `system ls -a '~/Desktop'`, because
+    shlex.join quotes `~`, and a quoted tilde is a directory named "~" that
+    does not exist. Pilot ran it four times and told the user their Desktop
+    was empty.
+    """
+    stripped = (text or "").strip()
+    return stripped == "system" or stripped.startswith("system ")
+
+
 def normalize_tool_command(command: str) -> str:
+    # A shell command is not a tool invocation with arguments, and there is
+    # nothing here worth normalising in one. Round-tripping it through
+    # shlex.split/join rewrites it — tildes, globs, pipes and quotes all come
+    # back different — so it is returned untouched.
+    if _is_raw_shell_command(command):
+        return (command or "").strip()
     parts = shlex.split(command.strip())
     normalized = _normalize_tool_invocation(parts)
     return shlex.join(normalized)
@@ -450,7 +470,7 @@ def run_gathm_tool_raw(command: str) -> str:
     # them and shlex.join would quote them back into something different, and an
     # unbalanced quote would be rejected here rather than by the shell that has
     # to run it. The string the classifier reads is the string that runs.
-    if text == "system" or text.startswith("system "):
+    if _is_raw_shell_command(text):
         return _run_system_command(text[len("system"):].strip())
 
     try:
