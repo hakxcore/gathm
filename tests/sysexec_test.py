@@ -19,6 +19,12 @@ sys.path.insert(0, ROOT)
 
 from lib import sysexec  # noqa: E402
 
+# No test may ever reach the real terminal. Without this, whether a test
+# passes depends on whether the runner happens to have a tty — which is how
+# the confirmation test came to sit there asking a human on Termux for
+# permission, while passing silently on a machine with no tty.
+os.environ["GATHM_NON_INTERACTIVE"] = "1"
+
 PASS = FAIL = 0
 
 
@@ -316,9 +322,13 @@ def test_pilot_integration():
         out = pilot_main.run_gathm_tool_raw("system echo integration-ok")
         ok("a read-only command runs", "integration-ok" in out)
 
-        # No TTY in a test runner, which is the same position chat_once is in.
+        # chat_once's position: no human reachable. Forced, not assumed — a
+        # test runner may well have a tty, and then this whole section would
+        # be prompting whoever ran it.
         ok("no terminal means no confirmation is invented",
            not pilot_main._can_ask_the_user())
+        ok("...and that state is forced here, not inherited from the runner",
+           os.environ.get("GATHM_NON_INTERACTIVE") == "1")
         out = pilot_main.run_gathm_tool_raw("system mkdir /tmp/gathm-int-nope")
         ok("so a changing command is refused", "needs confirmation" in out)
         ok("and points at where it can be confirmed", "gathm tui" in out)
@@ -343,6 +353,50 @@ def test_pilot_integration():
         os.environ.pop("GATHM_ALLOW_SHELL", None)
         if saved is not None:
             os.environ["GATHM_ALLOW_SHELL"] = saved
+
+
+def test_the_confirmation_prompt_itself():
+    print("\nthe prompt a human actually sees")
+    import builtins
+    sys.path.insert(0, os.path.join(ROOT, "pilot"))
+    import main as pilot_main
+
+    saved_input = builtins.input
+    saved_stop, saved_start = pilot_main.stop_waiting, pilot_main.start_waiting
+    order = []
+
+    def answer(text):
+        """Run _confirm_command against a canned reply, touching no stdin."""
+        del order[:]
+        pilot_main.stop_waiting = lambda: order.append("stop")
+        pilot_main.start_waiting = lambda: order.append("start")
+
+        def fake_input(prompt=""):
+            order.append("ask")
+            if isinstance(text, BaseException):
+                raise text
+            return text
+        builtins.input = fake_input
+        return pilot_main._confirm_command("mkdir /tmp/gathm-prompt", "a reason")
+
+    try:
+        check("y runs it", answer("y"), True)
+        check("yes too", answer("yes"), True)
+        check("Y as well", answer("Y"), True)
+        check("n does not", answer("n"), False)
+        check("and neither does empty — the default is no", answer(""), False)
+        check("nor anything else", answer("maybe"), False)
+        check("Ctrl-C is a no", answer(KeyboardInterrupt()), False)
+        check("so is EOF", answer(EOFError()), False)
+
+        answer("n")
+        check("the shimmer is stopped before asking, and resumed after",
+              order, ["stop", "ask", "start"])
+    finally:
+        builtins.input = saved_input
+        pilot_main.stop_waiting, pilot_main.start_waiting = saved_stop, saved_start
+    ok("nothing was created by any of that",
+       not os.path.exists("/tmp/gathm-prompt"))
 
 
 def test_prompt_tells_the_model_the_platform():
@@ -526,7 +580,14 @@ def test_shell_override():
 def test_platform_detection():
     print("\niOS is recognised rather than mistaken for a Mac")
     real_platform, real_machine = sysexec.sys.platform, sysexec.platform.machine
+    real_isdir, real_prefix = sysexec.os.path.isdir, os.environ.get("PREFIX")
     try:
+        # Termux is checked first, and rightly so — but on a real Termux the
+        # PREFIX variable and /data/data/com.termux both answer yes to
+        # everything below, so they have to be silenced to test the rest.
+        os.environ.pop("PREFIX", None)
+        sysexec.os.path.isdir = lambda p: False
+
         sysexec.sys.platform = "ios"
         check("a Python that says ios", sysexec.platform_name(), "ios")
 
@@ -541,11 +602,24 @@ def test_platform_detection():
 
         sysexec.sys.platform = "win32"
         check("win32", sysexec.platform_name(), "windows")
+
+        # iSH emulates x86 Linux, so only /proc/ish gives it away.
+        sysexec.sys.platform = "linux"
+        check("plain Linux stays Linux", sysexec.platform_name(), "linux")
+        sysexec.os.path.isdir = lambda p: p == "/proc/ish"
+        check("but iSH is iOS", sysexec.platform_name(), "ios")
+
+        # And Termux still wins over all of it, which is the real precedence.
+        sysexec.os.path.isdir = lambda p: p.startswith("/data/data/com.termux")
+        check("Termux outranks everything", sysexec.platform_name(), "termux")
     finally:
         sysexec.sys.platform, sysexec.platform.machine = \
             real_platform, real_machine
-    check("and we are back to normal",
-          sysexec.platform_name(), sysexec.platform_name())
+        sysexec.os.path.isdir = real_isdir
+        if real_prefix is not None:
+            os.environ["PREFIX"] = real_prefix
+    ok("the real platform is detected again afterwards",
+       sysexec.platform_name() in ("termux", "macos", "linux", "windows", "ios"))
 
 
 def test_summary_names_the_shell():
@@ -598,6 +672,7 @@ def main():
     test_wrappers()
     test_junk()
     test_pilot_integration()
+    test_the_confirmation_prompt_itself()
     test_prompt_tells_the_model_the_platform()
     test_windows_safe()
     test_windows_confirm()
