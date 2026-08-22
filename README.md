@@ -609,6 +609,16 @@ Every command is classified before it runs (`lib/sysexec.py`):
 | **confirm** | everything else — writes, installs, `sudo`, unrecognised binaries, and *anything containing a pipe, redirect or `;`* | you are shown the command and the reason, and asked |
 | **blocked** | catastrophic or irreversible — recursive force-deletes, `mkfs`, `dd` to a device, fork bombs, `curl … | sh`, shutdown | never runs, and no confirmation can override it |
 
+**Gathm cannot switch itself on.** Any command touching `~/.gathm/allow_shell`
+or `GATHM_ALLOW_SHELL` is in the blocked tier, and so is any command that would
+edit `~/.gathm/shell.log`. This is not caution for its own sake: told "system
+control is switched off, turn it on with: `touch ~/.gathm/allow_shell`", a model
+reads that as a fix to apply and tries it — which is what happened the first
+time a Mac hit the disabled path. Approved at a confirmation prompt as an
+innocuous `touch`, it would have granted itself the shell permanently. So the
+refusal the model reads no longer contains the recipe; the instructions go to
+the terminal, where only you can see them.
+
 Two rules do most of the work. First, a shell metacharacter demotes anything to
 `confirm`: `ls` is read-only, `ls; rm -rf ~` starts with the same binary and is
 not. Second, the safe list contains only binaries that *cannot write* — anything
@@ -673,7 +683,7 @@ there. Gathm says exactly that rather than reporting an unexplained failure.
 `python3 lib/sysexec.py` with no arguments prints the detected platform, the
 shell it would use, and whether the feature is on;
 `python3 lib/sysexec.py <command>` prints how a command would be classified
-without running it. `tests/sysexec_test.py` holds 233 assertions, most of them
+without running it. `tests/sysexec_test.py` holds 300 assertions, most of them
 about exactly which commands land in which tier, on which platform.
 
 ## Security and Reliability Model

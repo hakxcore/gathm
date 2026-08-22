@@ -193,7 +193,20 @@ def _run_system_command(command: str) -> str:
                 f"This machine is: {_sysexec.platform_summary()}\n"
                 f"Commands run in: {_sysexec.shell_label()}")
 
-    approve = _confirm_command if _can_ask_the_user() else None
+    # How to switch system control on goes to the terminal, not into the tool
+    # result. A model handed those instructions treats them as a fix to apply:
+    # the first Mac to hit this path had Pilot trying to run the `touch`
+    # within one turn. The user reads the console; the model gets told only
+    # that it is off and that it cannot change that.
+    interactive = _can_ask_the_user()
+    if not _sysexec.enabled() and interactive:
+        stop_waiting()
+        console.print()
+        console.print(f"  [color(244)]{_sysexec.disabled_reason()}[/color(244)]")
+        console.print()
+        start_waiting()
+
+    approve = _confirm_command if interactive else None
     ok_flag, output = _sysexec.run(command, approve=approve)
     if ok_flag:
         return output
@@ -893,10 +906,15 @@ _SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool w
       here, so POSIX commands will fail.
     - iOS terminal (iSH/a-Shell): a small POSIX userland — plain `sh`
       commands, no systemd, no package manager worth relying on.
+    Paths: "my Desktop" means ~/Desktop, "my downloads" means ~/Downloads.
+    A bare /Desktop is the filesystem root and will not exist. Use ~ for
+    anything belonging to the user.
     One command per action, and prefer the narrowest one that answers the
     question. Read-only commands run immediately; anything that could change
     the machine asks the user first, so do not try to avoid the prompt by
     chaining commands together.
+    If system control is off, say so and stop. You cannot switch it on, and
+    no command you run will change that.
     Never run a command the user did not ask for, and never one whose purpose
     you cannot state in a sentence."""
 

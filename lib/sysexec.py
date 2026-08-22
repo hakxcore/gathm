@@ -198,6 +198,18 @@ BLOCKED = [
     (re.compile(r"\b(nc|ncat|netcat)\b.*\s-e\s"), "opening a reverse shell"),
     (re.compile(r"/etc/(passwd|shadow|sudoers)\b.*>|>\s*/etc/"),
      "overwriting system configuration"),
+    # Gathm must never grant itself the shell. A model that is told "system
+    # control is switched off, turn it on with: touch ~/.gathm/allow_shell"
+    # will read that as an instruction and try it — this is not hypothetical,
+    # it happened the first time a Mac hit the disabled path. Enabling is a
+    # decision a human makes outside Gathm, so this is never a confirmation
+    # prompt: a prompt to approve a `touch` is exactly how it would succeed.
+    (re.compile(r"allow_shell|GATHM_ALLOW_SHELL", re.IGNORECASE),
+     "Gathm switching on its own system control, which only you can do"),
+    # And it must not be able to edit the record of what it has run.
+    (re.compile(r"(\b(rm|mv|cp|truncate|shred|tee|sed)\b[^|;]*|>\s*\S*)"
+                r"\.gathm/shell\.log"),
+     "tampering with the command audit log"),
 ]
 
 # The Windows half. Checked on every platform — none of these mean anything on
@@ -356,9 +368,24 @@ def enabled() -> bool:
 
 
 def disabled_reason() -> str:
-    return ("running system commands is switched off. Turn it on with "
-            "GATHM_ALLOW_SHELL=1, or permanently with: "
+    """How a human switches system control on. For a human's eyes only.
+
+    Do not put this in anything the model reads. Returned as a tool result, it
+    reads to a model as a fix to apply rather than news to relay, and the
+    first Mac to hit the disabled path had Pilot trying to run the `touch`
+    within one turn.
+    """
+    return ("running system commands is switched off. Turn it on for this "
+            "session with GATHM_ALLOW_SHELL=1, or permanently with: "
             "touch ~/.gathm/allow_shell")
+
+
+def disabled_for_model() -> str:
+    """The same fact, said to the model in a way it cannot act on."""
+    return ("system control is switched off on this machine. Tell the user it "
+            "is off and stop. You cannot switch it on — only they can, from "
+            "outside Gathm — so do not try, and do not suggest commands for "
+            "it.")
 
 
 def _leaf(token: str) -> str:
@@ -494,7 +521,7 @@ def run(command: str, approve=None, timeout: int = DEFAULT_TIMEOUT) -> tuple:
     """
     if not enabled():
         _audit(command, "disabled", "refused")
-        return False, disabled_reason()
+        return False, disabled_for_model()
 
     plat = platform_name()
     argv_prefix, dialect = shell_spec(plat)

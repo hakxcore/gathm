@@ -204,8 +204,12 @@ def test_off_by_default():
         ok("disabled with no env var and no marker file", not sysexec.enabled())
         ok_flag, msg = sysexec.run("uname -a")
         check("even a safe command is refused", ok_flag, False)
-        ok("and the message says how to enable it",
-           "GATHM_ALLOW_SHELL" in msg and "allow_shell" in msg)
+        # The model is told it is off and that it cannot change that. How to
+        # actually enable it goes to the human, on the console — see
+        # test_the_model_is_not_handed_the_recipe.
+        ok("the model is told it is off", "switched off" in msg)
+        ok("and not handed the recipe",
+           "GATHM_ALLOW_SHELL" not in msg and "allow_shell" not in msg)
 
         os.environ["GATHM_ALLOW_SHELL"] = "1"
         ok("the env var switches it on", sysexec.enabled())
@@ -353,7 +357,10 @@ def test_pilot_integration():
         # Off by default, and the refusal says how to turn it on.
         out = pilot_main.run_gathm_tool_raw("system uname -a")
         ok("disabled by default", "switched off" in out)
-        ok("and says how to enable it", "GATHM_ALLOW_SHELL" in out)
+        ok("and the model is told it cannot enable it",
+           "cannot switch it on" in out)
+        ok("and is not handed the command to do it",
+           "allow_shell" not in out)
 
         os.environ["GATHM_ALLOW_SHELL"] = "1"
 
@@ -681,6 +688,73 @@ def test_ios_spawn_failure_is_explained():
     ok("and how to change it", "GATHM_SHELL" in missing)
 
 
+def test_gathm_cannot_enable_itself():
+    print("\nGathm cannot switch on its own system control")
+    # A real trace: told "switched off, turn it on with:
+    # touch ~/.gathm/allow_shell", Pilot tried to run exactly that, one turn
+    # later. It only failed because it dropped the `system` prefix and hit the
+    # tool dispatcher instead. Approved as a `touch`, it would have granted
+    # itself the shell permanently.
+    for cmd in [
+        "touch ~/.gathm/allow_shell",
+        "touch /Users/me/.gathm/allow_shell",
+        "echo 1 > ~/.gathm/allow_shell",
+        "install -m 644 /dev/null ~/.gathm/allow_shell",
+        "export GATHM_ALLOW_SHELL=1",
+        "GATHM_ALLOW_SHELL=1 gathm tui",
+        "env GATHM_ALLOW_SHELL=1 uname -a",
+        "gathm_allow_shell=1",
+    ]:
+        check(f"blocked: {cmd}", tier(cmd), "blocked")
+
+    ok("and no approver can grant it",
+       sysexec.classify("touch ~/.gathm/allow_shell")[0] == "blocked")
+    os.environ["GATHM_ALLOW_SHELL"] = "1"
+    try:
+        ok_flag, msg = sysexec.run("touch ~/.gathm/allow_shell",
+                                   approve=lambda c, r: True)
+        check("even with a yes, it does not run", ok_flag, False)
+        ok("and the refusal explains whose decision it is",
+           "only you can" in msg)
+    finally:
+        os.environ.pop("GATHM_ALLOW_SHELL", None)
+
+    print("\nnor edit the record of what it has run")
+    for cmd in [
+        "rm ~/.gathm/shell.log",
+        "truncate -s 0 ~/.gathm/shell.log",
+        "echo clean > ~/.gathm/shell.log",
+        "sed -i /blocked/d ~/.gathm/shell.log",
+    ]:
+        check(f"blocked: {cmd}", tier(cmd), "blocked")
+    # Reading it is fine — "what have you run" is a fair question.
+    ok("but reading it is allowed", tier("cat ~/.gathm/shell.log") == "safe")
+
+
+def test_the_model_is_not_handed_the_recipe():
+    print("\nthe refusal the model reads does not teach it to escalate")
+    saved = os.environ.pop("GATHM_ALLOW_SHELL", None)
+    real_dir = sysexec.CONFIG_DIR
+    try:
+        sysexec.CONFIG_DIR = sysexec.Path("/nonexistent-gathm-config")
+        _ok, msg = sysexec.run("uname -a")
+        ok("no marker filename in it", "allow_shell" not in msg)
+        ok("no environment variable in it", "GATHM_ALLOW_SHELL" not in msg)
+        ok("no command in it", "touch" not in msg)
+        ok("it says it is off", "switched off" in msg)
+        ok("and that the model cannot change that", "cannot switch it on" in msg)
+        ok("and tells it to tell the user", "tell the user" in msg.lower())
+
+        # The human instructions still exist — for the console, not the model.
+        human = sysexec.disabled_reason()
+        ok("the human is still told how", "touch ~/.gathm/allow_shell" in human)
+        ok("and the two are not the same text", human != msg)
+    finally:
+        sysexec.CONFIG_DIR = real_dir
+        if saved is not None:
+            os.environ["GATHM_ALLOW_SHELL"] = saved
+
+
 def test_machine_questions_reach_the_system_tool():
     print("\na question about this machine is offered the system tool")
     pilot_main = pilot_main_module()
@@ -819,6 +893,8 @@ def main():
     test_platform_detection()
     test_summary_names_the_shell()
     test_ios_spawn_failure_is_explained()
+    test_gathm_cannot_enable_itself()
+    test_the_model_is_not_handed_the_recipe()
     test_machine_questions_reach_the_system_tool()
     test_banner_agrees_with_the_classifier()
     test_prompt_covers_every_platform()
