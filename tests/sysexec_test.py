@@ -641,6 +641,49 @@ def test_ios_spawn_failure_is_explained():
     ok("and how to change it", "GATHM_SHELL" in missing)
 
 
+def test_banner_agrees_with_the_classifier():
+    print("\nthe welcome banner names the same machine the classifier does")
+    sys.path.insert(0, os.path.join(ROOT, "pilot"))
+    import main as pilot_main
+
+    real = sysexec.platform_name
+    try:
+        for name, label in [("termux", "Termux (Android)"), ("macos", "macOS"),
+                            ("linux", "Linux"), ("windows", "Windows"),
+                            ("ios", "iOS")]:
+            sysexec.platform_name = lambda n=name: n
+            check(f"{name} shows as {label}", pilot_main._detect_platform(),
+                  label)
+    finally:
+        sysexec.platform_name = real
+
+    # The regression, through the fallback that is used when sysexec cannot be
+    # imported at all: a current Termux Python answers "Android" to
+    # platform.system(), which the old detector fell straight through, so the
+    # banner printed a bare "android" and its Termux branch was unreachable.
+    real_sysexec, real_which = pilot_main._sysexec, pilot_main.shutil.which
+    try:
+        pilot_main._sysexec = None
+        pilot_main.shutil.which = lambda n: "/usr/bin/" + n
+        import platform as _pl
+        real_pl_system = _pl.system
+        try:
+            _pl.system = lambda: "Android"
+            check("a Python that says Android still shows Termux",
+                  pilot_main._detect_platform(), "Termux (Android)")
+            pilot_main.shutil.which = lambda n: None
+            check("...and plain Linux when Termux is not there",
+                  pilot_main._detect_platform(), "Linux")
+        finally:
+            _pl.system = real_pl_system
+    finally:
+        pilot_main._sysexec, pilot_main.shutil.which = real_sysexec, real_which
+
+    ok("every name the classifier can return has a label",
+       set(pilot_main._PLATFORM_LABELS) >=
+       {"termux", "macos", "linux", "windows", "ios"})
+
+
 def test_prompt_covers_every_platform():
     print("\nthe prompt tells the model how to write for this machine")
     sys.path.insert(0, os.path.join(ROOT, "pilot"))
@@ -684,6 +727,7 @@ def main():
     test_platform_detection()
     test_summary_names_the_shell()
     test_ios_spawn_failure_is_explained()
+    test_banner_agrees_with_the_classifier()
     test_prompt_covers_every_platform()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")

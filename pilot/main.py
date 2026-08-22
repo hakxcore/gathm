@@ -210,15 +210,37 @@ HIGH_RISK_QUERY_PATTERNS = (
 
 # --- 1. Tool Discovery & Execution ---
 
+_PLATFORM_LABELS = {
+    "termux": "Termux (Android)",
+    "macos": "macOS",
+    "linux": "Linux",
+    "windows": "Windows",
+    "ios": "iOS",
+}
+
+
 def _detect_platform() -> str:
-    """Detect platform for the welcome box."""
+    """Detect platform for the welcome box.
+
+    This defers to sysexec.platform_name() rather than detecting anything
+    itself. It used to ask platform.system(), which on a current Termux
+    answers "Android" — so it fell past both branches and printed the raw
+    string, and the termux-setup-storage check that would have said "Termux"
+    could never run. Gathm had four platform detectors with four different
+    vocabularies; disagreements between two of them have now cost a day
+    twice, so this one is no longer a detector.
+    """
+    if _sysexec is not None:
+        name = _sysexec.platform_name()
+        return _PLATFORM_LABELS.get(name, name)
+
     import platform
     system = platform.system().lower()
     if system == "darwin":
         return "macOS"
-    if system == "linux":
+    if system in ("linux", "android"):
         if shutil.which("termux-setup-storage"):
-            return "Termux"
+            return "Termux (Android)"
         return "Linux"
     return system
 
