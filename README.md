@@ -589,7 +589,9 @@ at all.
 Pilot can run shell commands on the machine it is on — to inspect it (disk,
 processes, network) or to change it (install something, move files). It knows
 which platform it is on and writes the command for that platform: `sw_vers`
-rather than `lsb_release` on macOS, `pkg` rather than `apt` on Termux.
+rather than `lsb_release` on macOS, `pkg` rather than `apt` on Termux,
+`Get-ChildItem` rather than `ls` on Windows. Termux, Linux, macOS, Windows and
+iOS-under-iSH are all supported — see [Platforms](#platforms) below.
 
 **It is off until you turn it on**, because a language model with a shell should
 be a decision somebody made:
@@ -626,9 +628,53 @@ ran or not:
 2026-08-21 09:15:07	confirm	declined	brew install ffmpeg
 ```
 
+### Platforms
+
+| Platform | Shell used | Rules applied |
+|---|---|---|
+| Termux (Android) | `bash -lc` | POSIX |
+| Linux | `bash -lc`, or `sh -c` where bash is missing | POSIX |
+| macOS | `bash -lc` | POSIX |
+| Windows | `pwsh` if installed, otherwise `powershell`, `-NoProfile -NonInteractive -Command` | PowerShell |
+| iOS (iSH) | `sh -c` | POSIX |
+
+On Windows the read-only list is a different list — `Get-ChildItem`,
+`Get-Process`, `Get-ComputerInfo`, `systeminfo`, `ipconfig`, `tasklist`,
+`reg query`, `net view`, `sc query` — plus every cmdlet whose verb is read-only
+by PowerShell's own convention (`Get-`, `Test-`, `Measure-`, `Compare-`…).
+`Format-` is deliberately *not* one of them: `Format-Table` is harmless and
+`Format-Volume` erases a disk, and the naming convention cannot tell them apart.
+The blocked list gains the Windows spellings too — `Remove-Item -Recurse -Force`,
+`del /s /q`, `diskpart`, `Format-Volume`, `Stop-Computer`, `iwr … | iex`,
+`Invoke-Expression`, `vssadmin delete shadows`, `Set-MpPreference -Disable…`,
+`wevtutil cl`. Those patterns are checked on every platform, not just Windows,
+because a model that has misread which machine it is on is exactly the case
+worth catching.
+
+One PowerShell difference matters: `$` on its own is not treated as a shell
+metacharacter there, because `Get-ChildItem $env:USERPROFILE` is ordinary and
+read-only. `$( … )` still runs code, and still demotes to `confirm`.
+
+If you have Git Bash or WSL and would rather Gathm use them, say so — the
+classifier follows the shell, not the OS, so POSIX rules come back with it:
+
+```bash
+GATHM_SHELL=bash        # or: sh, zsh, cmd, pwsh, or a full path
+```
+
+**iOS** deserves a straight answer: Gathm cannot run as an iOS app, and this
+feature does not change that. What it can do is run inside a terminal app that
+ships a UNIX userland. [iSH](https://ish.app) (Alpine Linux under emulation)
+works — it is treated as a small Linux, commands run through `sh`, and system
+control behaves as it does anywhere else. **a-Shell does not**: its sandbox
+forbids Python from spawning processes at all, so no command can run from
+there. Gathm says exactly that rather than reporting an unexplained failure.
+
+`python3 lib/sysexec.py` with no arguments prints the detected platform, the
+shell it would use, and whether the feature is on;
 `python3 lib/sysexec.py <command>` prints how a command would be classified
-without running it. `tests/sysexec_test.py` holds 126 assertions, most of them
-about exactly which commands land in which tier.
+without running it. `tests/sysexec_test.py` holds 233 assertions, most of them
+about exactly which commands land in which tier, on which platform.
 
 ## Security and Reliability Model
 

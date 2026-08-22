@@ -184,8 +184,14 @@ def _run_system_command(command: str) -> str:
                 "not be imported.")
     command = (command or "").strip()
     if not command:
-        return ("Usage: system <command>   e.g. system df -h\n"
-                f"This machine is: {_sysexec.platform_summary()}")
+        # The example has to be runnable here, or a small model will copy a
+        # bash command onto a Windows box and then explain the failure to us.
+        example = ("system Get-Volume"
+                   if _sysexec.shell_dialect() == "windows"
+                   else "system df -h")
+        return (f"Usage: system <command>   e.g. {example}\n"
+                f"This machine is: {_sysexec.platform_summary()}\n"
+                f"Commands run in: {_sysexec.shell_label()}")
 
     approve = _confirm_command if _can_ask_the_user() else None
     ok_flag, output = _sysexec.run(command, approve=approve)
@@ -817,9 +823,18 @@ def _shortlist_tools(query: str, tools: list) -> list:
 _SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool with a shell
     command: Action Input: system <command>
     This machine is: {platform}
+    Commands run in: {shell}
     System control is currently: {state}
-    Write the command for THAT platform — `sw_vers` not `lsb_release` on macOS,
-    `pkg` not `apt` on Termux, `vm_stat` not `free` on macOS.
+    Write the command for THAT platform and THAT shell:
+    - macOS: `sw_vers` not `lsb_release`, `vm_stat` not `free`, `brew` for packages
+    - Termux (Android): `pkg` not `apt`, `getprop` for device details
+    - Linux: `lsb_release`, `free`, `apt`/`dpkg`
+    - Windows (powershell/pwsh): `Get-ComputerInfo` not `uname`,
+      `Get-ChildItem` not `ls`, `Get-Process` not `ps`, `ipconfig` not
+      `ifconfig`, `Get-PSDrive` or `Get-Volume` not `df`. There is no bash
+      here, so POSIX commands will fail.
+    - iOS terminal (iSH/a-Shell): a small POSIX userland — plain `sh`
+      commands, no systemd, no package manager worth relying on.
     One command per action, and prefer the narrowest one that answers the
     question. Read-only commands run immediately; anything that could change
     the machine asks the user first, so do not try to avoid the prompt by
@@ -903,6 +918,7 @@ Tools you CAN use offline: {usable}.
     if "system" in available_tools and _sysexec is not None:
         system_help = _SYSTEM_HELP.format(
             platform=_sysexec.platform_summary(),
+            shell=_sysexec.shell_label(),
             state=("ENABLED" if _sysexec.enabled() else
                    "DISABLED — say so and stop; do not retry"),
         )
