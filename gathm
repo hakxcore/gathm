@@ -101,6 +101,273 @@ open_url() {
     esac
 }
 
+# --- Preflight --------------------------------------------------------------
+# Everything below runs before the GUI or Pilot is started, because the
+# alternative is what used to happen: the launcher brings both up, the browser
+# opens on a working page, and then the first thing you type into Pilot comes
+# back "[Errno 111] Connection refused" because Ollama was never running.
+#
+# The rule for each check is whether Gathm can start at all without it:
+#
+#   fatal    no Python, no Pilot, no Pilot dependencies. Nothing to start.
+#   warn     GUI dependencies, jq, the LLM. Pilot still opens and can still
+#            tell you things; you are told what will not work and why.
+#
+# Every network probe is bounded, since a preflight that hangs is worse than
+# the failure it was added to catch.
+
+PREFLIGHT_FAIL=0
+PREFLIGHT_WARN=0
+PREFLIGHT_PY=""
+OLLAMA_AUTOSTART=1
+OLLAMA_PID_FILE="$GATHM_STATE_DIR/ollama.pid"
+OLLAMA_LOG="$GATHM_STATE_DIR/ollama.log"
+
+pf_ok()   { echo -e "  ${GREEN}✓${RESETBG} $1"; }
+pf_warn() {
+    echo -e "  ${ORANGE}!${RESETBG} $1"
+    [[ -n "${2:-}" ]] && echo "      $2"
+    PREFLIGHT_WARN=$((PREFLIGHT_WARN + 1))
+    return 0
+}
+pf_fail() {
+    echo -e "  ${RED}✗${RESETBG} $1"
+    [[ -n "${2:-}" ]] && echo "      $2"
+    PREFLIGHT_FAIL=$((PREFLIGHT_FAIL + 1))
+    return 0
+}
+
+# The LLM endpoint, from the same environment lib/llm.py reads, so the
+# launcher and Pilot can never disagree about where the model is.
+ollama_root() {
+    local base="${OLLAMA_BASE_URL:-http://localhost:11434/v1}"
+    base="${base%/}"
+    base="${base%/v1}"
+    echo "$base"
+}
+
+llm_backend() { echo "${GATHM_LLM_BACKEND:-ollama}"; }
+
+llm_model() {
+    echo "${GATHM_OLLAMA_MODEL:-${OLLAMA_MODEL:-gemma3:12b}}"
+}
+
+ollama_responding() {
+    local seconds="${1:-2}"
+    command -v curl >/dev/null 2>&1 || return 0   # cannot probe; do not cry wolf
+    run_bounded "$seconds" curl -fsS "$(ollama_root)/api/tags" >/dev/null 2>&1
+}
+
+# Start the server ourselves rather than telling the user to open another
+# terminal. Same process-group treatment as the GUI: `set -m` makes it a group
+# leader so Ctrl+C in Pilot cannot reach it.
+start_ollama() {
+    command -v ollama >/dev/null 2>&1 || return 1
+    mkdir -p "$GATHM_STATE_DIR" 2>/dev/null || true
+    (
+        set -m
+        nohup ollama serve </dev/null >>"$OLLAMA_LOG" 2>&1 &
+        echo $! >"$OLLAMA_PID_FILE" 2>/dev/null || true
+    )
+    local waited=0
+    while (( waited < 10 )); do
+        sleep 1
+        waited=$((waited + 1))
+        ollama_responding 2 && return 0
+    done
+    return 1
+}
+
+check_python() {
+    if PREFLIGHT_PY="$(pick_python)"; then
+        pf_ok "Python  $("$PREFLIGHT_PY" -V 2>&1 | tail -1)"
+        return 0
+    fi
+    pf_fail "Python 3 not found" "Install Python 3, then re-run: ./install"
+    return 1
+}
+
+check_pilot() {
+    [[ -n "$PREFLIGHT_PY" ]] || return 1
+    # Mirror launch_pilot: it takes run.sh if there is one, main.py otherwise.
+    # Checking only for main.py would refuse to start an install that launches
+    # perfectly well through run.sh.
+    if [[ ! -f "$INSTALL_DIR/pilot/run.sh" && ! -f "$INSTALL_DIR/pilot/main.py" ]]; then
+        pf_fail "Pilot is missing from $INSTALL_DIR/pilot" "Re-run the installer: ./install"
+        return 1
+    fi
+    # run.sh brings its own environment (the installer's venv), so the module
+    # checks below only speak for a direct main.py launch.
+    if [[ ! -f "$INSTALL_DIR/pilot/main.py" ]]; then
+        pf_ok "Pilot"
+        return 0
+    fi
+    # Two tiers, because they fail differently. Without `rich`, pilot/main.py
+    # raises SystemExit at import and there is nothing to start. Without
+    # langchain/langgraph it starts fine in its degraded mode — the TUI opens,
+    # the tools run, and only the AI answers are unavailable. Calling that
+    # fatal would refuse to launch something that works.
+    local hard soft
+    hard="$("$PREFLIGHT_PY" - <<'PY' 2>/dev/null
+import importlib.util
+missing = []
+for name in ("rich",):
+    try:
+        if importlib.util.find_spec(name) is None:
+            missing.append(name)
+    except Exception:
+        missing.append(name)
+print(" ".join(missing))
+PY
+)"
+    if [[ -n "${hard// }" ]]; then
+        pf_fail "Pilot cannot start — missing: ${hard}" \
+                "Install it with: pip install -r pilot/requirements.txt   (or ./install)"
+        return 1
+    fi
+
+    soft="$("$PREFLIGHT_PY" - <<'PY' 2>/dev/null
+import importlib.util
+missing = []
+for name in ("langchain_core", "langgraph"):
+    try:
+        if importlib.util.find_spec(name) is None:
+            missing.append(name)
+    except Exception:
+        missing.append(name)
+print(" ".join(missing))
+PY
+)"
+    if [[ -n "${soft// }" ]]; then
+        pf_warn "AI runtime missing: ${soft} — Pilot will open but cannot answer" \
+                "Install it with: pip install -r pilot/requirements.txt   (or ./install)"
+        return 0
+    fi
+    pf_ok "Pilot dependencies"
+    return 0
+}
+
+check_gui_deps() {
+    (( START_GUI )) || return 0
+    [[ -n "$PREFLIGHT_PY" ]] || return 0
+    local missing
+    missing="$("$PREFLIGHT_PY" - <<'PY' 2>/dev/null
+import importlib.util
+missing = []
+for name in ("fastapi", "uvicorn"):
+    try:
+        if importlib.util.find_spec(name) is None:
+            missing.append(name)
+    except Exception:
+        missing.append(name)
+print(" ".join(missing))
+PY
+)"
+    if [[ -n "${missing// }" ]]; then
+        pf_warn "GUI dependencies missing: ${missing} — starting Pilot only" \
+                "Install them with: ./install"
+        START_GUI=0
+        return 1
+    fi
+    pf_ok "GUI dependencies"
+    return 0
+}
+
+check_llm() {
+    local backend model
+    backend="$(llm_backend)"
+    model="$(llm_model)"
+
+    if [[ "$backend" != "ollama" ]]; then
+        # A hosted backend needs a key, not a server. Check the key exists;
+        # whether it is valid is not something to spend startup time on.
+        local key="${GATHM_LLM_API_KEY:-${OPENAI_API_KEY:-${GEMINI_API_KEY:-}}}"
+        if [[ -z "$key" ]]; then
+            pf_warn "LLM backend '$backend' has no API key set" \
+                    "Pilot will not be able to answer. Set the key for $backend."
+            return 1
+        fi
+        pf_ok "LLM  $backend ($model)"
+        return 0
+    fi
+
+    if ollama_responding 2; then
+        pf_ok "Ollama  running at $(ollama_root)"
+    elif ! command -v ollama >/dev/null 2>&1; then
+        pf_warn "Ollama is not installed — Pilot cannot answer questions" \
+                "Install it from https://ollama.com, then: ollama pull $model"
+        return 1
+    elif (( OLLAMA_AUTOSTART )); then
+        echo -e "  ${ORANGE}·${RESETBG} Ollama is not running — starting it..."
+        if start_ollama; then
+            pf_ok "Ollama  started at $(ollama_root)"
+        else
+            pf_warn "Ollama would not start — Pilot cannot answer questions" \
+                    "Start it yourself with: ollama serve   (log: $OLLAMA_LOG)"
+            return 1
+        fi
+    else
+        pf_warn "Ollama is not running at $(ollama_root)" \
+                "Start it with: ollama serve"
+        return 1
+    fi
+
+    # The server can be up with the configured model never pulled, which fails
+    # later as a 404 from deep inside LangChain rather than as "pull the model".
+    local tags
+    tags="$(run_bounded 3 curl -fsS "$(ollama_root)/api/tags" 2>/dev/null)" || tags=""
+    if [[ -n "$tags" && -n "$PREFLIGHT_PY" ]]; then
+        local have
+        have="$(GATHM_WANT_MODEL="$model" GATHM_TAGS="$tags" "$PREFLIGHT_PY" - <<'PY' 2>/dev/null
+import json, os
+want = os.environ.get("GATHM_WANT_MODEL", "")
+try:
+    payload = json.loads(os.environ.get("GATHM_TAGS") or "{}")
+    names = [m.get("name", "") for m in payload.get("models", [])]
+except Exception:
+    print("unknown")
+    raise SystemExit
+# `llama3.2:3b` should satisfy a request for `llama3.2`, and vice versa.
+stems = [n.split(":")[0] for n in names]
+if want in names or want.split(":")[0] in stems:
+    print("yes")
+else:
+    print("no " + ", ".join(names[:6]))
+PY
+)"
+        case "$have" in
+            yes)     pf_ok "Model   $model" ;;
+            "no "*)  pf_warn "Model '$model' is not pulled" \
+                             "Pull it with: ollama pull $model   (installed: ${have#no })" ;;
+            *)       : ;;   # could not read the list; not worth a warning
+        esac
+    fi
+    return 0
+}
+
+check_tooling() {
+    command -v jq >/dev/null 2>&1 \
+        || pf_warn "jq is not installed — several tools need it" \
+                   "Install it with your package manager, or re-run: ./install"
+    return 0
+}
+
+# Runs every check. Returns non-zero only when Gathm cannot start at all.
+preflight() {
+    echo -e "${BOLD}Checking your setup...${RESETBG}"
+    check_python
+    check_pilot
+    check_gui_deps
+    check_llm
+    check_tooling
+    echo ""
+    if (( PREFLIGHT_FAIL )); then
+        echo -e "${RED}Gathm cannot start: ${PREFLIGHT_FAIL} problem(s) above.${RESETBG}" >&2
+        return 1
+    fi
+    return 0
+}
+
 # Start api/server.py in the background. Returns 0 when the GUI is serving.
 start_gui() {
     if gui_responding 2; then
@@ -173,6 +440,21 @@ start_gui() {
     fi
     rm -f "$GUI_PID_FILE" 2>/dev/null || true
     return 1
+}
+
+# Stop the Ollama server, but only if this launcher was the one that started
+# it. A server the user runs themselves in another terminal is not ours to
+# take down because they quit Gathm.
+stop_ollama() {
+    local pid=""
+    [[ -f "$OLLAMA_PID_FILE" ]] || return 0
+    pid="$(cat "$OLLAMA_PID_FILE" 2>/dev/null)"
+    rm -f "$OLLAMA_PID_FILE" 2>/dev/null || true
+    [[ -n "$pid" ]] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill "$pid" 2>/dev/null || true
+    echo -e "${GREEN}[+]${RESETBG} Ollama stopped (pid $pid) — Gathm had started it."
+    return 0
 }
 
 stop_gui() {
@@ -251,6 +533,9 @@ cmd_start() {
     echo -e "${BOLD}${GREEN}Gathm v$currentVersion${RESETBG}"
     echo ""
 
+    # Before the browser opens on a page that cannot answer anything.
+    preflight || exit 1
+
     if (( START_GUI )); then
         if start_gui; then
             if (( OPEN_BROWSER )); then
@@ -270,11 +555,30 @@ cmd_start() {
 # `gathm gui`: server + browser, no TUI.
 cmd_gui() {
     parse_launch_flags "$@"
+    preflight || exit 1
     start_gui || exit 1
     if (( OPEN_BROWSER )); then
         open_url "$GUI_URL"
     fi
     echo "    Stop it with: gathm stop"
+}
+
+# `gathm doctor`: the same checks, on their own, starting nothing. Useful when
+# something is broken and you do not want a browser window as well.
+cmd_doctor() {
+    parse_launch_flags "$@"
+    OLLAMA_AUTOSTART=0          # reporting is the job here, not fixing
+    echo ""
+    echo -e "${BOLD}${GREEN}Gathm v$currentVersion${RESETBG}"
+    echo ""
+    preflight
+    local status=$?
+    if (( status == 0 && PREFLIGHT_WARN == 0 )); then
+        echo -e "${GREEN}Everything checks out.${RESETBG}"
+    elif (( status == 0 )); then
+        echo -e "${ORANGE}Gathm will start, with ${PREFLIGHT_WARN} thing(s) not working.${RESETBG}"
+    fi
+    return $status
 }
 
 # Unified command help
@@ -286,6 +590,7 @@ Usage:
   gathm                          Start the web GUI in your browser and Pilot here
   gathm tui                      Pilot only (no GUI server, no browser)
   gathm gui                      GUI server + browser only (no Pilot)
+  gathm doctor                   Check your setup: Python, deps, Ollama, model
   gathm stop                     Stop the GUI server Gathm started
   gathm <agent-command> [...]    Run orchestrator command (run/ask/plan/...)
   gathm <tool> [args...]         Shortcut for: gathm run <tool> [args...]
@@ -353,6 +658,9 @@ main() {
             ;;
         tui|pilot|chat)
             shift
+            START_GUI=0            # no GUI here, so do not check for its deps
+            preflight || exit 1
+            echo ""
             launch_pilot "$@"
             ;;
         gui|web|browser)
@@ -360,9 +668,15 @@ main() {
             cmd_gui "$@"
             return 0
             ;;
+        doctor|check)
+            shift
+            cmd_doctor "$@"
+            return $?
+            ;;
         stop)
             stop_gui
-            return $?
+            stop_ollama
+            return 0
             ;;
         help|-h|--help)
             show_help

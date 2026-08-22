@@ -58,7 +58,14 @@ STUB
 chmod +x "$FIX/gathm" "$FIX/pilot/run.sh" "$FIX/agent/orchestrator.sh" "$FIX/tools/dummy/dummy"
 
 PORT=$(( 8300 + RANDOM % 400 ))
-run() { HOME="$FIX/home" GATHM_GUI_PORT="$PORT" timeout 60 bash "$FIX/gathm" "$@" 2>&1; }
+# A port nothing answers on, so the Ollama probe is deterministic wherever
+# these run. Tests that want a live model server override OLLAMA_BASE_URL.
+DEAD_OLLAMA=$(( 8700 + RANDOM % 200 ))
+run() {
+    HOME="$FIX/home" GATHM_GUI_PORT="$PORT" \
+    OLLAMA_BASE_URL="http://127.0.0.1:$DEAD_OLLAMA/v1" \
+    timeout 60 bash "$FIX/gathm" "$@" 2>&1
+}
 
 echo "== dispatch =="
 out=$(run --version);              check "--version prints version" "$out" "gathm v"
@@ -142,8 +149,59 @@ check "and Pilot still starts"         "$out" "PILOT_STARTED"
 mv "$FIX/api/server.py.off" "$FIX/api/server.py"
 mv "$FIX/pilot/run.sh" "$FIX/pilot/run.sh.off"
 out=$(run tui)
-check "missing Pilot is reported"      "$out" "Pilot not found"
+# Preflight now catches this before anything is started, so the wording is
+# its own rather than launch_pilot's later "Pilot not found".
+check "missing Pilot is reported"      "$out" "Pilot is missing"
+absent "and nothing was started"       "$out" "PILOT_STARTED"
 mv "$FIX/pilot/run.sh.off" "$FIX/pilot/run.sh"
+
+echo "== preflight =="
+out=$(run doctor)
+check "doctor reports Python"          "$out" "Python"
+check "doctor notices Ollama is down"  "$out" "Ollama"
+absent "doctor starts no Pilot"        "$out" "PILOT_STARTED"
+absent "doctor starts no GUI"          "$out" "Starting GUI server"
+
+# A dead model server is a warning, not a refusal: the TUI still opens, the
+# tools still run, and the user is told what will not work.
+out=$(run --no-browser)
+check "a dead Ollama still lets Gathm start" "$out" "PILOT_STARTED"
+check "and says so"                          "$out" "Ollama"
+$(run stop >/dev/null 2>&1)
+
+# With a model server up, the configured model is checked against what is
+# actually pulled — a 404 from inside LangChain later is not a useful error.
+FAKE=$(( 8900 + RANDOM % 200 ))
+python3 - "$FAKE" <<'OLLAMA' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"models": [{"name": "llama3.2:3b"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+OLLAMA
+FAKE_PID=$!
+sleep 1
+doctor_with_model() {
+    HOME="$FIX/home" GATHM_GUI_PORT="$PORT" \
+    OLLAMA_BASE_URL="http://127.0.0.1:$FAKE/v1" GATHM_OLLAMA_MODEL="$1" \
+    timeout 30 bash "$FIX/gathm" doctor 2>&1
+}
+out=$(doctor_with_model llama3.2:3b)
+check "a pulled model passes"          "$out" "Model"
+absent "and is not reported missing"   "$out" "is not pulled"
+out=$(doctor_with_model qwen2.5:72b)
+check "a missing model is reported"    "$out" "is not pulled"
+check "with the pull command"          "$out" "ollama pull qwen2.5:72b"
+check "and what is actually installed" "$out" "llama3.2:3b"
+kill $FAKE_PID 2>/dev/null
 
 echo "== symlinked launcher =="
 ln -s "$FIX/gathm" "$FIX/home/gathm-link"

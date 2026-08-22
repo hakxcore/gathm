@@ -86,6 +86,36 @@ need to install a newer one first.
 ./install --check
 ```
 
+### Before it starts
+
+`gathm` checks the setup before it opens anything, because the alternative is
+a browser window on a working page and a Pilot prompt that answers your first
+question with `[Errno 111] Connection refused`.
+
+| Check | Missing means |
+|---|---|
+| Python 3 | **fatal** — nothing can start |
+| Pilot, and `rich` | **fatal** — `pilot/main.py` exits at import without it |
+| `langchain`/`langgraph` | warning — the TUI opens and tools run, AI answers do not |
+| `fastapi`/`uvicorn` | warning — Pilot starts, the GUI is skipped |
+| Ollama running | warning — **and it is started for you** if `ollama` is installed |
+| The configured model | warning — names what is pulled, and the `ollama pull` to fix it |
+| `jq` | warning — several tools need it |
+
+Only the first two stop the launch. Everything else tells you what will not
+work and starts anyway, since a Pilot that can run tools is more useful than a
+refusal.
+
+An Ollama that Gathm started is stopped by `gathm stop`; one you started
+yourself in another terminal is left alone.
+
+```bash
+gathm doctor
+```
+
+runs exactly the same checks and starts nothing — no server, no browser — and
+does not auto-start Ollama, because reporting is the job there.
+
 ### Uninstall
 
 ```bash
@@ -481,7 +511,8 @@ exits.
 | `gathm tui` | Pilot only (same as `--no-gui`) |
 | `gathm gui` | GUI server + browser, no Pilot |
 | `gathm gui --port 9090` | Pick the port (also `GATHM_GUI_PORT`) |
-| `gathm stop` | Stop the GUI server Gathm started |
+| `gathm doctor` | Check the setup without starting anything |
+| `gathm stop` | Stop the GUI server (and an Ollama Gathm started) |
 
 The server writes to `~/.gathm/gui.log` and records its pid in
 `~/.gathm/gui.pid`. `--host` (or `GATHM_GUI_HOST`) changes the bind address —
