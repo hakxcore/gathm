@@ -263,6 +263,53 @@ def test_speakable_unchanged() -> None:
         os.environ.pop("GATHM_SPEAK_MAX_CHARS", None)
 
 
+def test_unfenced_code_is_not_read_aloud():
+    print("\ncode without a fence is still not spoken")
+    # A real reply: asked for a C++ program, llama3.2:3b wrote one with no
+    # fences at all, and Gathm read it out — `#include` first losing its `#`
+    # to the markdown stripper, so it said "include iostream, using namespace
+    # std, void generateTable int rows int cols".
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "fixtures", "unfenced_cpp.txt")
+    with open(fixture, encoding="utf-8") as handle:
+        reply = handle.read()
+
+    spoken = speech.speakable(reply)
+    ok("the prose before it survives", spoken.startswith("Here is a C++"))
+    ok("the prose after it survives", spoken.endswith("run the result."))
+    ok("and the code is announced, not read",
+       "code block omitted" in spoken)
+    for leaked in ["#include", "iostream", "namespace", "cout", "srand",
+                   "int main", "for (int", "endl", "g++ table.cpp" ]:
+        if leaked == "g++ table.cpp":
+            continue                      # that one is prose, and should stay
+        ok(f"{leaked!r} is not spoken", leaked not in spoken)
+    ok("g++ in the prose is kept", "g++ table.cpp" in spoken)
+    ok("it is said once, not once per run",
+       spoken.count("code block omitted") == 1)
+
+    # Prose must not be mistaken for code. Each of these has a line that could
+    # look code-ish on its own, which is why it takes a run of three.
+    for prose in [
+        "The file is main.cpp; open it in any editor.",
+        "Run it with g++ and then ./a.out;\nit prints a table.",
+        "First install cmake;\nthen run make;\nthat is all.",
+        "Your Desktop has 9 files.\nNone of them are missing.",
+        "I checked the disk: 11 GiB free.\nThat should be enough.",
+    ]:
+        said = speech.speakable(prose)
+        ok(f"prose survives: {prose.splitlines()[0][:34]!r}",
+           "code block omitted" not in said)
+
+    # A fenced block still works, and mixing the two says it once.
+    fenced = "Try this:\n\n```python\nfor i in range(10):\n    print(i)\n```\n\nThat is it."
+    said = speech.speakable(fenced)
+    ok("a fence is still omitted", "code block omitted" in said)
+    ok("and the prose is kept",
+       "Try this" in said and "That is it" in said)
+    ok("range(10) is not spoken", "range" not in said)
+
+
 def main() -> int:
     print("Streaming speech tests")
     print("=" * 60)
@@ -272,6 +319,7 @@ def main() -> int:
     test_cancel()
     test_budget()
     test_speakable_unchanged()
+    test_unfenced_code_is_not_read_aloud()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

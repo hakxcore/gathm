@@ -413,16 +413,83 @@ def find_player() -> list | None:
     return None
 
 
+# A model that is asked for code does not always fence it. gemma and llama at
+# small sizes routinely emit a whole C++ program as plain text, and then
+# _clean_for_speech read it out — including stripping the `#` off `#include`,
+# so it said "include iostream, using namespace std, void generateTable int
+# rows int cols". Nobody wants a program read aloud.
+#
+# Detecting code by line rather than by fence: a line that ends in a semicolon
+# or a brace, opens a block, declares something, or is a comment. Any single
+# one of these can appear in prose ("the file is main.cpp;"), so it takes a RUN
+# of them to count — three consecutive lines is a program, not a sentence.
+_CODE_LINE_RE = re.compile(r"""
+      ^\s*\#\s*(include|define|pragma|ifndef|endif|import)\b
+    | ^\s*(using|namespace|template|typedef|struct|enum|impl|trait)\b
+    | ^\s*(public|private|protected|static|final|async)\s+\S
+    | ^\s*(def|class|import|from|package|func|fn|var|let|const)\s+\S
+    | ^\s*(if|for|while|switch|catch|elif|else\s+if)\s*\(
+    | ^\s*(return|throw|break|continue)\b[^.!?]*;\s*(//[^\n]*)?$
+    | ^\s*[{}\[\]()]+\s*;?\s*$
+    | ;\s*(//[^\n]*)?$
+    | \{\s*(//[^\n]*)?$
+    | ^\s*(//|/\*|\*/|\*\s)
+    | ^\s*<\/?[a-zA-Z][^>]*>\s*$
+    | \w+\s*\([^)]*\)\s*(const\s*)?\{\s*$
+    | ^\s{2,}\S+.*[;{}]\s*(//[^\n]*)?$
+""", re.VERBOSE)
+
+_MIN_CODE_LINES = 3
+
+
+def _strip_unfenced_code(text: str) -> str:
+    """Replace runs of code-looking lines with a note, fences or not."""
+    lines = (text or "").split("\n")
+    out: list = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        if not _CODE_LINE_RE.search(lines[index]):
+            out.append(lines[index])
+            index += 1
+            continue
+        # A candidate run. Blank lines inside it belong to the code — a
+        # program has paragraphs too — but do not count towards the run.
+        scan = index
+        counted = 0
+        last_code = index
+        while scan < total:
+            if _CODE_LINE_RE.search(lines[scan]):
+                counted += 1
+                last_code = scan
+                scan += 1
+            elif not lines[scan].strip():
+                scan += 1
+            else:
+                break
+        if counted >= _MIN_CODE_LINES:
+            out.append(" code block omitted. ")
+        else:
+            out.extend(lines[index:last_code + 1])
+        index = last_code + 1
+    return "\n".join(out)
+
+
 def _clean_for_speech(text: str) -> str:
     """Strip markdown down to prose. No length limit — see speakable()."""
     t = text or ""
     t = re.sub(r"```.*?```", " code block omitted. ", t, flags=re.S)
+    # Before the markdown markers are stripped, or `#include` becomes the word
+    # "include" and the line stops looking like code at all.
+    t = _strip_unfenced_code(t)
     t = re.sub(r"`([^`]*)`", r"\1", t)
     t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)      # links/images -> label
     t = re.sub(r"https?://\S+", " a link ", t)
     t = re.sub(r"^\s*[#>*\-+|]+\s*", "", t, flags=re.M)   # md markers
     t = re.sub(r"[*_~|]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    # "code block omitted. code block omitted." helps nobody.
+    return re.sub(r"(code block omitted\.\s*){2,}", "code block omitted. ", t).strip()
 
 
 def speakable(text: str) -> str:

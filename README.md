@@ -233,6 +233,17 @@ sentence and the rest renders while it plays. It mirrors
 `split_speech_chunks()` in `lib/speech.py`, and `tests/chunker_test.js` asserts
 the two agree.
 
+Code is never read aloud, fenced or not. A fenced block was already replaced
+with "code block omitted", but a small model asked for a program routinely
+emits it as plain text with no fences — and then the markdown stripper took the
+`#` off `#include` and Gathm said *"include iostream, using namespace std, void
+generateTable int rows int cols"*. Runs of code-looking lines are now detected
+by shape: a line ending in a semicolon or brace, opening a block, declaring
+something, or starting a comment. Any one of those can appear in prose ("the
+file is main.cpp;"), so it takes **three consecutive** lines to count.
+`lib/speech.py` and `gui/chunker.js` implement it identically, and
+`tests/chunker_test.js` runs both over the same replies and compares.
+
 The endpointing lives in `gui/vad.js`, deliberately free of DOM and Web Audio so
 it can be tested without a microphone:
 

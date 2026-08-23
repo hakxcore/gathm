@@ -9,6 +9,7 @@
  */
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { splitSpeech, cleanForSpeech } =
@@ -95,6 +96,35 @@ function test_edges() {
     check('markdown that cleans to nothing', splitSpeech('***'), []);
 }
 
+function test_unfenced_code() {
+    console.log('\ncode without a fence is still not spoken');
+    const reply = fs.readFileSync(
+        path.join(__dirname, 'fixtures', 'unfenced_cpp.txt'), 'utf8');
+
+    const spoken = cleanForSpeech(reply);
+    ok('the prose before it survives', spoken.indexOf('Here is a C++') === 0);
+    ok('the prose after it survives', /run the result\.$/.test(spoken));
+    ok('the code is announced, not read',
+       spoken.indexOf('code block omitted') !== -1);
+    ['#include', 'iostream', 'namespace', 'cout', 'srand', 'int main', 'endl']
+        .forEach(function (leaked) {
+            ok(JSON.stringify(leaked) + ' is not spoken',
+               spoken.indexOf(leaked) === -1);
+        });
+    ok('said once, not once per run',
+       spoken.split('code block omitted').length - 1 === 1);
+
+    // Prose with the odd code-ish line is still prose: it takes a run of
+    // three, or "The file is main.cpp;" would be silenced.
+    ['The file is main.cpp; open it in any editor.',
+     'First install cmake;\nthen run make;\nthat is all.',
+     'Your Desktop has 9 files.\nNone of them are missing.'
+    ].forEach(function (prose) {
+        ok('prose survives: ' + JSON.stringify(prose.split('\n')[0].slice(0, 30)),
+           cleanForSpeech(prose).indexOf('code block omitted') === -1);
+    });
+}
+
 function test_agrees_with_python() {
     console.log('\nit agrees with lib/speech.py');
     const cases = [
@@ -102,6 +132,11 @@ function test_agrees_with_python() {
         'Pi is 3.14 and the file is gathm.sh, which matters here.',
         'One sentence that is comfortably past the minimum length. And a second one, also long enough.',
         'Yes. No. Maybe so, on balance, probably not today.',
+        // The C++ reply that got read aloud. Both sides have to strip it the
+        // same way, or the browser and the terminal say different things.
+        fs.readFileSync(path.join(__dirname, 'fixtures', 'unfenced_cpp.txt'),
+                        'utf8'),
+        'The file is main.cpp; open it in any editor.',
     ];
 
     let python;
@@ -135,6 +170,7 @@ test_not_sentence_ends();
 test_markdown();
 test_unpunctuated();
 test_edges();
+test_unfenced_code();
 test_agrees_with_python();
 console.log('='.repeat(60));
 console.log(PASS + ' passed, ' + FAIL + ' failed');

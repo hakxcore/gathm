@@ -26,16 +26,66 @@
     // Requiring what follows is what keeps "3.14" and "gathm.sh" intact.
     var SENTENCE_END = /[.!?…]['")\]]*(?=\s|$)/g;
 
+    // A model asked for code does not always fence it — small models routinely
+    // emit a whole C++ program as plain text, and then it gets read out loud,
+    // `#include` included. Mirrors _CODE_LINE_RE in lib/speech.py; the two are
+    // asserted to agree in tests/chunker_test.js.
+    var CODE_LINE = new RegExp([
+        '^\\s*#\\s*(include|define|pragma|ifndef|endif|import)\\b',
+        '^\\s*(using|namespace|template|typedef|struct|enum|impl|trait)\\b',
+        '^\\s*(public|private|protected|static|final|async)\\s+\\S',
+        '^\\s*(def|class|import|from|package|func|fn|var|let|const)\\s+\\S',
+        '^\\s*(if|for|while|switch|catch|elif)\\s*\\(',
+        '^\\s*(return|throw|break|continue)\\b[^.!?]*;\\s*(//[^\\n]*)?$',
+        '^\\s*[{}\\[\\]()]+\\s*;?\\s*$',
+        ';\\s*(//[^\\n]*)?$',
+        '\\{\\s*(//[^\\n]*)?$',
+        '^\\s*(//|/\\*|\\*/|\\*\\s)',
+        '^\\s*</?[a-zA-Z][^>]*>\\s*$',
+        '\\w+\\s*\\([^)]*\\)\\s*(const\\s*)?\\{\\s*$',
+        '^\\s{2,}\\S+.*[;{}]\\s*(//[^\\n]*)?$'
+    ].join('|'));
+
+    var MIN_CODE_LINES = 3;
+
+    /** Replace runs of code-looking lines with a note, fences or not. */
+    function stripUnfencedCode(text) {
+        var lines = String(text || '').split('\n');
+        var out = [];
+        var i = 0;
+        while (i < lines.length) {
+            if (!CODE_LINE.test(lines[i])) { out.push(lines[i]); i++; continue; }
+            // Blank lines inside a run belong to the code, but do not count
+            // towards it — a program has paragraphs too.
+            var scan = i, counted = 0, lastCode = i;
+            while (scan < lines.length) {
+                if (CODE_LINE.test(lines[scan])) { counted++; lastCode = scan; scan++; }
+                else if (!lines[scan].trim()) { scan++; }
+                else break;
+            }
+            if (counted >= MIN_CODE_LINES) out.push(' code block omitted. ');
+            else out = out.concat(lines.slice(i, lastCode + 1));
+            i = lastCode + 1;
+        }
+        return out.join('\n');
+    }
+
     /** Strip markdown that should not be read out loud. */
     function cleanForSpeech(text) {
-        return String(text || '')
-            .replace(/```[\s\S]*?```/g, ' code block omitted. ')
+        var stripped = String(text || '')
+            .replace(/```[\s\S]*?```/g, ' code block omitted. ');
+        // Before the markdown markers go, or `#include` becomes the word
+        // "include" and stops looking like code at all.
+        return stripUnfencedCode(stripped)
             .replace(/`([^`]*)`/g, '$1')
             .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
             .replace(/https?:\/\/\S+/g, ' a link ')
             .replace(/^\s*[#>*\-+|]+\s*/gm, '')
             .replace(/[*_~|]+/g, ' ')
             .replace(/\s+/g, ' ')
+            .trim()
+            // "code block omitted. code block omitted." helps nobody.
+            .replace(/(code block omitted\.\s*){2,}/g, 'code block omitted. ')
             .trim();
     }
 
@@ -90,6 +140,7 @@
     }
 
     var api = { splitSpeech: splitSpeech, cleanForSpeech: cleanForSpeech,
+                stripUnfencedCode: stripUnfencedCode,
                 DEFAULTS: DEFAULTS };
 
     if (typeof module !== 'undefined' && module.exports) module.exports = api;

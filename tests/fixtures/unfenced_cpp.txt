@@ -1,0 +1,28 @@
+Here is a C++ program that generates a table.
+
+#include <iostream>
+using namespace std;
+
+void generateTable(int rows, int cols) {
+    // Generate the table header
+    cout << " + ";
+    for (int i = 0; i < cols; i++) {
+        cout << "-";
+
+        if (i < cols - 1)
+            cout << " | ";
+
+    }
+    cout << endl;
+}
+
+int main() {
+    srand(time(0)); // Seed the random number generator
+    int rows, cols;
+    cout << "Enter the number of rows: ";
+    cin >> rows;
+    generateTable(rows, cols);
+    return 0;
+}
+
+Compile it with g++ table.cpp and run the result.
