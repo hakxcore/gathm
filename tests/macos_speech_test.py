@@ -334,6 +334,95 @@ def test_installer_gate() -> None:
        "This is Termux-only on purpose" not in src)
 
 
+def test_speaking_a_non_latin_script():
+    print("\nspeaking a language the default voice does not have")
+    # `say` was called with no -v, so it always used the system default voice —
+    # an English one. Handed Devanagari it reads nothing useful, which is why
+    # Gathm could write Hindi and not speak it.
+    check("English is latin", speech.script_of("Hello there"), "latin")
+    check("Hindi is devanagari",
+          speech.script_of("नमस्ते, आप कैसे हैं?"), "devanagari")
+    check("Chinese is han", speech.script_of("这是中文"), "han")
+    check("Japanese kana", speech.script_of("こんにちは"), "kana")
+    check("Korean hangul", speech.script_of("안녕하세요"), "hangul")
+    check("Arabic", speech.script_of("مرحبا بك"), "arabic")
+    check("Cyrillic", speech.script_of("Здравствуйте"), "cyrillic")
+    check("Tamil", speech.script_of("வணக்கம்"), "tamil")
+
+    # Counted, not sniffed from the first character: a Hindi reply carries
+    # Latin punctuation, digits and stray English words.
+    check("mostly Hindi with some English is still devanagari",
+          speech.script_of("मेरे Desktop पर 9 फ़ाइलें हैं, ठीक है"), "devanagari")
+    check("mostly English with one Hindi word stays latin",
+          speech.script_of("Your Desktop has नौ files on it right now"), "latin")
+    check("digits and punctuation alone decide nothing",
+          speech.script_of("123 ... !!! 456"), "latin")
+    check("empty text is latin", speech.script_of(""), "latin")
+
+    # Voice selection, against a known voice list rather than this machine's.
+    saved = speech._VOICE_CACHE.get("voices")
+    try:
+        speech._VOICE_CACHE["voices"] = [
+            ("Alex", "en_US"), ("Samantha", "en_US"), ("Lekha", "hi_IN"),
+            ("Kyoko", "ja_JP"), ("Ting-Ting", "zh_CN"),
+        ]
+        check("Hindi text picks the Hindi voice",
+              speech.voice_for_text("नमस्ते"), "Lekha")
+        check("Japanese picks the Japanese voice",
+              speech.voice_for_text("こんにちは"), "Kyoko")
+        check("Chinese picks the Chinese voice",
+              speech.voice_for_text("这是中文"), "Ting-Ting")
+        check("English picks nothing, so the user's own default is kept",
+              speech.voice_for_text("Hello there"), "")
+        check("a script with no installed voice picks nothing",
+              speech.voice_for_text("வணக்கம்"), "")
+
+        # The command actually changes.
+        argv = speech._with_voice(["say", "नमस्ते"], "नमस्ते")
+        check("say gains -v for Hindi", argv[:3], ["say", "-v", "Lekha"])
+        check("...keeping the text last", argv[-1], "नमस्ते")
+        check("English is left alone",
+              speech._with_voice(["say", "hello"], "hello"), ["say", "hello"])
+        check("a voice the user chose is not overridden",
+              speech._with_voice(["say", "-v", "Daniel", "नमस्ते"], "नमस्ते"),
+              ["say", "-v", "Daniel", "नमस्ते"])
+        check("espeak is untouched — this is a say flag",
+              speech._with_voice(["espeak-ng", "नमस्ते"], "नमस्ते"),
+              ["espeak-ng", "नमस्ते"])
+
+        # The file path is what the GUI uses, so it has to get the same voice
+        # or Hindi is audible in the terminal and silent in the browser.
+        file_argv = ["say", "-o", "/tmp/x.wav", "--data-format=LEI16@22050", "नमस्ते"]
+        check("the GUI's render command gains it too",
+              speech._with_voice(file_argv, "नमस्ते")[:3], ["say", "-v", "Lekha"])
+    finally:
+        if saved is None:
+            speech._VOICE_CACHE.pop("voices", None)
+        else:
+            speech._VOICE_CACHE["voices"] = saved
+
+
+def test_voice_list_parsing():
+    print("\nreading the installed voice list")
+    # Real `say -v ?` output: name, locale, then a sample sentence.
+    sample = (
+        "Alex                en_US    # Most people recognize me by my voice.\n"
+        "Lekha               hi_IN    # नमस्ते, मेरा नाम लेखा है।\n"
+        "Ting-Ting           zh_CN    # 您好，我叫Ting-Ting。\n"
+        "Bad Line Without A Locale\n"
+        "Zosia               pl_PL    # Witaj, mam na imię Zosia.\n"
+    )
+    import re as _re
+    parsed = []
+    for line in sample.splitlines():
+        m = _re.match(r"^(.+?)\s{2,}([a-z]{2}[-_][A-Z]{2})\s", line)
+        if m:
+            parsed.append((m.group(1).strip(), m.group(2)))
+    check("four voices parsed, the junk line skipped", len(parsed), 4)
+    check("names with a hyphen survive", parsed[2], ("Ting-Ting", "zh_CN"))
+    check("the Hindi locale is read", parsed[1], ("Lekha", "hi_IN"))
+
+
 def main() -> int:
     print("macOS speech-path tests")
     print("=" * 60)
@@ -342,6 +431,8 @@ def main() -> int:
     test_recorder_device()
     test_sample_rate_guard()
     test_installer_gate()
+    test_speaking_a_non_latin_script()
+    test_voice_list_parsing()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

@@ -150,6 +150,29 @@ voices from System Settings → Accessibility → Spoken Content).
 
 `python3 lib/speech.py --check` reports which engine is in use.
 
+#### Other languages
+
+**Speaking** works for any script the OS has a voice for. `say` was previously
+called with no `-v`, so it always used the system default — an English voice,
+which reads Devanagari as nothing useful. Gathm now looks at the script the
+reply is written in, and picks an installed voice for a language that uses it
+(Hindi → Lekha, Japanese → Kyoko, and so on). Latin text is left alone, so
+English keeps whatever voice you chose in System Settings. `say -v '?'` lists
+what is installed; more can be added under System Settings → Accessibility →
+Spoken Content → System Voice → Manage Voices.
+
+The script is *counted*, not taken from the first character — a Hindi reply
+carries Latin punctuation, digits and stray English words, and one of those at
+the front should not pick the voice.
+
+**Listening is English-and-neighbours only**, and that is the ASR model, not a
+setting. SenseVoice-Small covers a small set of languages; Hindi is not among
+them, and with automatic detection Hindi speech comes back transcribed as the
+nearest language it does know — usually Chinese. No flag fixes that. Changing
+it means a different ASR model (a Whisper-family one covers Hindi), which is a
+larger swap than a config change.
+
+
 #### Rendered replies
 
 `gui/markdown.js` renders the Markdown a model actually emits — fenced code,

@@ -666,6 +666,11 @@ async function transcribeAndSend() {
 const bars = Array.from(freqBars.querySelectorAll('.fb'));
 
 async function startVoice() {
+    // Re-entry would orphan the previous AudioContext and mic stream: the
+    // globals below are the only handles on them, and starting again
+    // overwrites both.
+    if (voiceActive) return;
+
     stopSpeaking();               // don't record ourselves talking
 
     // navigator.mediaDevices exists only in a secure context. Over plain HTTP
@@ -976,7 +981,12 @@ async function startConversation() {
     preroll = [];
     updateConvoBtn();
 
-    await startVoice();
+    // Only if the mic is not already open. Without this check, pressing the
+    // mic button and then conversation ran startVoice twice: the second
+    // getUserMedia and AudioContext overwrote the globals, so the first pair
+    // was never closed and never disconnected — an orphaned audio graph and a
+    // live microphone with nothing holding a reference to stop them.
+    if (!voiceActive) await startVoice();
     if (!voiceActive) {                  // blocked mic, insecure origin, …
         convoMode = false;
         updateConvoBtn();

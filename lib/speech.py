@@ -141,6 +141,149 @@ _SYSTEM_VOICES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Speaking a language the default voice does not have
+# ---------------------------------------------------------------------------
+# `say` was called with no -v, so it always used the system default voice — an
+# English one. Handed Devanagari, an English voice reads nothing useful, which
+# is why Gathm could write Hindi and not speak it. macOS ships voices for other
+# languages (Lekha for Hindi, and others per locale); the right one just has to
+# be asked for.
+#
+# The script the text is written in is the signal, because that is all we have:
+# there is no language tag on a reply, and guessing from words would need a
+# model. A script maps to the locales that use it, and the first installed
+# voice for one of those locales wins.
+
+_SCRIPT_RANGES = [
+    ("devanagari", 0x0900, 0x097F),
+    ("bengali",    0x0980, 0x09FF),
+    ("gurmukhi",   0x0A00, 0x0A7F),
+    ("gujarati",   0x0A80, 0x0AFF),
+    ("oriya",      0x0B00, 0x0B7F),
+    ("tamil",      0x0B80, 0x0BFF),
+    ("telugu",     0x0C00, 0x0C7F),
+    ("kannada",    0x0C80, 0x0CFF),
+    ("malayalam",  0x0D00, 0x0D7F),
+    ("sinhala",    0x0D80, 0x0DFF),
+    ("thai",       0x0E00, 0x0E7F),
+    ("arabic",     0x0600, 0x06FF),
+    ("hebrew",     0x0590, 0x05FF),
+    ("cyrillic",   0x0400, 0x04FF),
+    ("greek",      0x0370, 0x03FF),
+    ("hangul",     0xAC00, 0xD7AF),
+    ("kana",       0x3040, 0x30FF),
+    ("han",        0x4E00, 0x9FFF),
+]
+
+# Locale prefixes that write each script, best first. Hindi and Marathi both
+# use Devanagari, so a Hindi voice is preferred and a Marathi one will do.
+_SCRIPT_LOCALES = {
+    "devanagari": ("hi", "mr", "ne", "sa"),
+    "bengali":    ("bn",),
+    "gurmukhi":   ("pa",),
+    "gujarati":   ("gu",),
+    "oriya":      ("or",),
+    "tamil":      ("ta",),
+    "telugu":     ("te",),
+    "kannada":    ("kn",),
+    "malayalam":  ("ml",),
+    "sinhala":    ("si",),
+    "thai":       ("th",),
+    "arabic":     ("ar", "fa", "ur"),
+    "hebrew":     ("he",),
+    "cyrillic":   ("ru", "uk", "bg", "sr"),
+    "greek":      ("el",),
+    "hangul":     ("ko",),
+    "kana":       ("ja",),
+    "han":        ("zh",),
+}
+
+
+def script_of(text: str) -> str:
+    """The script most of `text` is written in: "latin" when in doubt.
+
+    Counted rather than sniffed from the first character, because a Hindi
+    reply routinely contains Latin punctuation, digits and the odd English
+    word, and one of those at the front should not decide the voice.
+    """
+    counts: dict = {}
+    for ch in text or "":
+        if not ch.isalpha():
+            continue
+        point = ord(ch)
+        if point < 0x0370:
+            counts["latin"] = counts.get("latin", 0) + 1
+            continue
+        for name, low, high in _SCRIPT_RANGES:
+            if low <= point <= high:
+                counts[name] = counts.get(name, 0) + 1
+                break
+    if not counts:
+        return "latin"
+    return max(counts.items(), key=lambda pair: (pair[1], pair[0] != "latin"))[0]
+
+
+_VOICE_CACHE: dict = {}
+
+
+def list_system_voices(refresh: bool = False) -> list:
+    """[(name, locale)] from `say -v ?`, or [] where that is not available.
+
+    Cached: shelling out per sentence would add a process to every chunk of a
+    spoken reply, and the installed voices do not change mid-conversation.
+    """
+    if not refresh and "voices" in _VOICE_CACHE:
+        return _VOICE_CACHE["voices"]
+    voices: list = []
+    if shutil.which("say"):
+        try:
+            proc = subprocess.run(["say", "-v", "?"], capture_output=True,
+                                  text=True, timeout=10)
+            for line in (proc.stdout or "").splitlines():
+                # "Lekha               hi_IN    # नमस्ते…"  — name, locale, sample
+                match = re.match(r"^(.+?)\s{2,}([a-z]{2}[-_][A-Z]{2})\s", line)
+                if match:
+                    voices.append((match.group(1).strip(), match.group(2)))
+        except Exception:  # noqa: BLE001 - no voice list is not an error
+            voices = []
+    _VOICE_CACHE["voices"] = voices
+    return voices
+
+
+def voice_for_text(text: str) -> str:
+    """An installed `say` voice whose language matches the script, or "".
+
+    Empty for Latin text, so English keeps whatever voice the user chose in
+    System Settings rather than being overridden by our guess.
+    """
+    script = script_of(text)
+    if script == "latin":
+        return ""
+    wanted = _SCRIPT_LOCALES.get(script)
+    if not wanted:
+        return ""
+    voices = list_system_voices()
+    for prefix in wanted:
+        for name, locale in voices:
+            if locale.lower().startswith(prefix + "_") or \
+               locale.lower().startswith(prefix + "-"):
+                return name
+    return ""
+
+
+def _with_voice(argv: list, text: str) -> list:
+    """Insert `-v <voice>` into a `say` command when the script needs one."""
+    if not argv or os.path.basename(argv[0]) != "say":
+        return argv
+    if "-v" in argv:                  # the user picked one; leave it alone
+        return argv
+    name = voice_for_text(text)
+    if not name:
+        return argv
+    return [argv[0], "-v", name] + argv[1:]
+
+
 def find_system_voice() -> list | None:
     """The OS's own text-to-speech command, or None."""
     forced = os.environ.get("GATHM_SPEAK_COMMAND")
@@ -392,6 +535,10 @@ def synthesize_system(text: str, out_path: str) -> tuple[bool, str]:
         text if a == "{t}" else a.replace("{f}", out_path)
         for a in _SYSTEM_VOICE_FILE_ARGS[name]
     ]
+    # The GUI speaks through this path, so it needs the same voice choice the
+    # terminal gets — otherwise Hindi is silent in the browser and audible in
+    # the TUI.
+    argv = _with_voice(argv, text)
     try:
         rc, out, err = _run_tracked(argv, 180)
     except Exception as exc:  # noqa: BLE001
@@ -461,6 +608,7 @@ def _speak_system(text: str, quiet: bool) -> bool:
     if not voice:
         return False
     argv = [text if a == "{t}" else a.replace("{t}", text) for a in voice]
+    argv = _with_voice(argv, text)
     try:
         rc, _out, err = _run_tracked(argv, 300)
     except Exception as exc:  # noqa: BLE001
