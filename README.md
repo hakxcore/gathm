@@ -159,7 +159,15 @@ reply is written in, and picks an installed voice for a language that uses it
 (Hindi → Lekha, Japanese → Kyoko, and so on). Latin text is left alone, so
 English keeps whatever voice you chose in System Settings. `say -v '?'` lists
 what is installed; more can be added under System Settings → Accessibility →
-Spoken Content → System Voice → Manage Voices.
+Spoken Content → System Voice → Manage Voices. If no voice for that language
+is installed, the default is kept rather than a wrong one being forced.
+
+The voice list is parsed from real `say -v ?` output, which is messier than it
+looks: the region is not always two letters (`Majed  ar_001`), and a long name
+leaves only one space before the locale (`Eddy (German (Germany)) de_DE`).
+Apple's per-language character voices are named that way, and they sort early,
+so a plain name is preferred — Japanese gets Kyoko rather than
+`Eddy (Japanese (Japan))`.
 
 The script is *counted*, not taken from the first character — a Hindi reply
 carries Latin punctuation, digits and stray English words, and one of those at

@@ -404,23 +404,90 @@ def test_speaking_a_non_latin_script():
 
 def test_voice_list_parsing():
     print("\nreading the installed voice list")
-    # Real `say -v ?` output: name, locale, then a sample sentence.
-    sample = (
-        "Alex                en_US    # Most people recognize me by my voice.\n"
-        "Lekha               hi_IN    # नमस्ते, मेरा नाम लेखा है।\n"
-        "Ting-Ting           zh_CN    # 您好，我叫Ting-Ting。\n"
-        "Bad Line Without A Locale\n"
-        "Zosia               pl_PL    # Witaj, mam na imię Zosia.\n"
-    )
-    import re as _re
+    # tests/fixtures/say_voices.txt is real `say -v ?` output from a Mac, not a
+    # sample I made up — which matters, because the invented one had none of
+    # the two shapes that broke the parser.
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "fixtures", "say_voices.txt")
+    with open(fixture, encoding="utf-8") as handle:
+        lines = [ln for ln in handle.read().splitlines() if ln.strip()]
+
     parsed = []
-    for line in sample.splitlines():
-        m = _re.match(r"^(.+?)\s{2,}([a-z]{2}[-_][A-Z]{2})\s", line)
-        if m:
-            parsed.append((m.group(1).strip(), m.group(2)))
-    check("four voices parsed, the junk line skipped", len(parsed), 4)
-    check("names with a hyphen survive", parsed[2], ("Ting-Ting", "zh_CN"))
-    check("the Hindi locale is read", parsed[1], ("Lekha", "hi_IN"))
+    for line in lines:
+        match = speech.re.match(
+            r"^(.+?)\s+([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,4})?)\s+#", line)
+        if match:
+            parsed.append((match.group(1).strip(), match.group(2)))
+
+    check("every line parses", len(parsed), len(lines))
+    found = dict(parsed)
+
+    # ar_001 is a real macOS locale: the region is not always two letters, and
+    # a [A-Z]{2} region pattern dropped every Arabic voice.
+    check("a numeric region is read", found.get("Majed"), "ar_001")
+    # A long name leaves only ONE space before the locale, so requiring two
+    # dropped these entirely.
+    check("a long parenthesised name is read",
+          found.get("Eddy (German (Germany))"), "de_DE")
+    check("a name with a space in it survives", found.get("Bad News"), "en_US")
+    check("...and one with brackets and two spaces",
+          found.get("Flo (English (UK))"), "en_GB")
+    check("the Hindi voice is there", found.get("Lekha"), "hi_IN")
+    check("a three-letter region is not required", found.get("Sinji"), "zh_HK")
+
+    # And the selection works against that real list.
+    saved = speech._VOICE_CACHE.get("voices")
+    try:
+        speech._VOICE_CACHE["voices"] = parsed
+        for text, want in [
+            ("नमस्ते, आप कैसे हैं?", "Lekha"),      # Hindi
+            ("வணக்கம்", "Vani"),                    # Tamil
+            ("নমস্কার", "Piya"),                     # Bengali
+            ("ನಮಸ್ಕಾರ", "Soumya"),                  # Kannada
+            ("నమస్కారం", "Geeta"),                   # Telugu
+            ("مرحبا بك", "Majed"),                  # Arabic, the ar_001 one
+            ("Здравствуйте", "Milena"),             # Russian
+            ("Χαίρετε", "Melina"),                  # Greek
+            ("שלום", "Carmit"),                     # Hebrew
+            ("สวัสดี", "Kanya"),                     # Thai
+            ("안녕하세요", "Yuna"),                   # Korean
+            ("Hello there", ""),                    # English keeps the default
+        ]:
+            check(f"{text[:14]!r} -> {want or '(default)'}",
+                  speech.voice_for_text(text), want)
+
+        # Japanese and Chinese both have several installed, including Apple's
+        # character voices named "Eddy (Japanese (Japan))". Those sort early,
+        # so a plain alphabetical pick handed Japanese to a novelty voice.
+        by_name = dict(parsed)
+        for text, prefix in [("こんにちは", "ja"), ("你好", "zh")]:
+            picked = speech.voice_for_text(text)
+            ok(f"{text} picks a {prefix} voice ({picked})",
+               picked and by_name.get(picked, "").lower().startswith(prefix))
+            ok(f"...and a real one, not a character voice ({picked})",
+               "(" not in picked)
+        check("Japanese gets Kyoko, not Eddy",
+              speech.voice_for_text("こんにちは"), "Kyoko")
+
+        # If brackets are all that is installed for a language, use them
+        # rather than falling back to an English voice.
+        speech._VOICE_CACHE["voices"] = [("Samantha", "en_US"),
+                                         ("Eddy (Japanese (Japan))", "ja_JP")]
+        check("a character voice is better than the wrong language",
+              speech.voice_for_text("こんにちは"), "Eddy (Japanese (Japan))")
+        speech._VOICE_CACHE["voices"] = parsed
+
+        # No Gujarati, Punjabi or Malayalam voice is installed on that Mac, so
+        # nothing is picked and the default is kept rather than a wrong one.
+        for text, script in [("ગુજરાતી", "gujarati"), ("ਪੰਜਾਬੀ", "gurmukhi"),
+                             ("മലയാളം", "malayalam")]:
+            check(f"no {script} voice installed -> default",
+                  speech.voice_for_text(text), "")
+    finally:
+        if saved is None:
+            speech._VOICE_CACHE.pop("voices", None)
+        else:
+            speech._VOICE_CACHE["voices"] = saved
 
 
 def main() -> int:

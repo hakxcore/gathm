@@ -1,0 +1,26 @@
+Albert              en_US    # Hello! My name is Albert.
+Alice               it_IT    # Ciao! Mi chiamo Alice.
+Soumya              kn_IN    # Hello! My name is Soumya.
+Aman                en_IN    # Hello! My name is Aman.
+Amélie              fr_CA    # Bonjour! Je m’appelle Amélie.
+Bad News            en_US    # Hello! My name is Bad News.
+Carmit              he_IL    # שלום, שמי כרמית.
+Daniel              en_GB    # Hello! My name is Daniel.
+Eddy (German (Germany)) de_DE    # Hallo! Ich heiße Eddy.
+Eddy (Japanese (Japan)) ja_JP    # こんにちは! 私の名前はEddyです。
+Flo (English (UK))  en_GB    # Hello! My name is Flo.
+Geeta               te_IN    # Hello! My name is Geeta.
+Kanya               th_TH    # สวัสดี! ฉันชื่อกันยา
+Kyoko               ja_JP    # こんにちは! 私の名前はKyokoです。
+Lekha               hi_IN    # नमस्ते, मेरा नाम लेखा है।
+Lesya               uk_UA    # Привіт! Мене звуть Леся.
+Majed               ar_001   # مرحبًا! اسمي ماجد.
+Meijia              zh_TW    # 你好，我叫美佳。
+Melina              el_GR    # Χαίρετε! Το όνομά μου είναι «Μελίνα».
+Milena              ru_RU    # Здравствуйте! Меня зовут Милена.
+Piya                bn_IN    # Hello! My name is Piya.
+Samantha            en_US    # Hello! My name is Samantha.
+Sinji               zh_HK    # 你好！我叫善怡。
+Tingting            zh_CN    # 你好！我叫婷婷。
+Vani                ta_IN    # Hello! My name is Vani.
+Yuna                ko_KR    # 안녕하세요. 제 이름은 유나입니다.

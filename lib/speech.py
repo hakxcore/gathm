@@ -241,8 +241,20 @@ def list_system_voices(refresh: bool = False) -> list:
             proc = subprocess.run(["say", "-v", "?"], capture_output=True,
                                   text=True, timeout=10)
             for line in (proc.stdout or "").splitlines():
-                # "Lekha               hi_IN    # नमस्ते…"  — name, locale, sample
-                match = re.match(r"^(.+?)\s{2,}([a-z]{2}[-_][A-Z]{2})\s", line)
+                # Real `say -v ?` lines, which are messier than they look:
+                #
+                #   Lekha               hi_IN    # नमस्ते, मेरा नाम लेखा है।
+                #   Majed               ar_001   # مرحبًا! اسمي ماجد.
+                #   Eddy (German (Germany)) de_DE    # Hallo! Ich heiße Eddy.
+                #
+                # So the region is not always two letters (ar_001), and the gap
+                # before the locale is not always two spaces — a long name
+                # leaves only one. Anchoring on the `#` that starts the sample
+                # is what makes both parse; requiring two spaces and [A-Z]{2}
+                # silently dropped every Arabic voice and every long-named one.
+                match = re.match(
+                    r"^(.+?)\s+([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,4})?)\s+#",
+                    line)
                 if match:
                     voices.append((match.group(1).strip(), match.group(2)))
         except Exception:  # noqa: BLE001 - no voice list is not an error
@@ -265,10 +277,18 @@ def voice_for_text(text: str) -> str:
         return ""
     voices = list_system_voices()
     for prefix in wanted:
-        for name, locale in voices:
-            if locale.lower().startswith(prefix + "_") or \
-               locale.lower().startswith(prefix + "-"):
-                return name
+        matches = [name for name, locale in voices
+                   if locale.lower().startswith((prefix + "_", prefix + "-"))]
+        if not matches:
+            continue
+        # macOS names its character voices per language as
+        # "Eddy (Japanese (Japan))", "Grandma (Chinese (Taiwan))" and so on.
+        # They sort early, so a plain alphabetical pick handed Japanese to a
+        # novelty voice instead of Kyoko. A name with no bracket is a real
+        # voice for that language; prefer one, and fall back to whatever
+        # exists if brackets are all there is.
+        plain = [name for name in matches if "(" not in name]
+        return (plain or matches)[0]
     return ""
 
 
