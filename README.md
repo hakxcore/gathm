@@ -150,6 +150,28 @@ voices from System Settings → Accessibility → Spoken Content).
 
 `python3 lib/speech.py --check` reports which engine is in use.
 
+#### Rendered replies
+
+`gui/markdown.js` renders the Markdown a model actually emits — fenced code,
+headings, lists, tables, quotes, rules, and inline code/bold/italic/links.
+Before it, the GUI did `p.textContent = reply`, so every numbered list and code
+fence arrived as one flat paragraph.
+
+It builds DOM **nodes** and never assembles an HTML string. That is a security
+decision: replies carry tool output, and `browser fetch <url>` puts arbitrary
+web-page text into a reply — on a page whose API can run shell commands. A
+renderer that concatenated HTML would turn any fetched page into script
+execution. Text only reaches the document through `createTextNode`/
+`textContent`, so a `<script>` in a reply is characters on screen and can never
+be an element. Link hrefs are the one place a string becomes a live attribute,
+so the scheme is allowlisted to http/https/mailto; `javascript:` and `data:`
+render as plain text rather than being silently dropped.
+
+`tests/markdown_test.js` holds 104 assertions, including a fake document with
+no `innerHTML` — if the renderer ever reaches for one, the tests fail rather
+than a browser. No dependencies and no CDN: the page has to work offline, on a
+phone.
+
 #### Hands-free conversation (browser)
 
 The GUI has a conversation button next to the mic. Turn it on and there is

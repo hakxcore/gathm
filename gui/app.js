@@ -129,9 +129,23 @@ function renderMessage(m) {
     const msg = document.createElement('div');
     msg.className = 'message ' + (m.cssClass || m.sender + '-text');
 
-    const p = document.createElement('p');
-    p.textContent = m.text;
-    msg.appendChild(p);
+    // Only replies get Markdown. What the user typed is shown exactly as they
+    // typed it — nobody wants their asterisks silently turned into italics.
+    if (m.sender === 'bot' && window.GathmMarkdown) {
+        const body = document.createElement('div');
+        body.className = 'md';
+        try {
+            body.appendChild(GathmMarkdown.render(m.text, document));
+        } catch (err) {
+            // A renderer bug must not cost the user their reply.
+            body.textContent = m.text;
+        }
+        msg.appendChild(body);
+    } else {
+        const p = document.createElement('p');
+        p.textContent = m.text;
+        msg.appendChild(p);
+    }
     wrapper.appendChild(msg);
 
     const time = document.createElement('div');

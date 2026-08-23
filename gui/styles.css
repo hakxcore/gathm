@@ -595,3 +595,135 @@ body {
     height: 18px;
     color: #fff;
 }
+
+/* ── Rendered Markdown in replies ──────────────────────────────────────────
+   Replies used to be one <p> with white-space:pre-wrap doing the work of a
+   renderer. Now they are real blocks, so the spacing lives here.
+   `.message p` keeps pre-wrap for user messages and for the fallback path. */
+.md {
+    font-size: 14px;
+    line-height: 1.6;
+    word-break: break-word;
+}
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child  { margin-bottom: 0; }
+
+.md .md-p {
+    white-space: pre-wrap;      /* a soft-wrapped line still breaks where written */
+    margin: 0 0 10px;
+}
+.md .md-h {
+    margin: 14px 0 6px;
+    line-height: 1.3;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.md h1.md-h { font-size: 18px; }
+.md h2.md-h { font-size: 16px; }
+.md h3.md-h,
+.md h4.md-h,
+.md h5.md-h,
+.md h6.md-h { font-size: 14px; }
+
+.md .md-list {
+    margin: 0 0 10px;
+    padding-left: 22px;
+}
+.md .md-list li { margin: 3px 0; }
+
+.md .md-quote {
+    margin: 0 0 10px;
+    padding: 2px 0 2px 12px;
+    border-left: 3px solid var(--accent-purple);
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
+.md .md-hr {
+    margin: 14px 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+}
+
+.md .md-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid var(--border);
+}
+
+/* Code blocks scroll inside themselves; the chat column must never scroll
+   sideways because a model printed a long line. */
+.md .md-pre-wrap {
+    position: relative;
+    margin: 0 0 10px;
+}
+.md .md-pre {
+    overflow-x: auto;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid var(--border);
+}
+.md .md-pre code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+    background: none;
+    border: 0;
+    padding: 0;
+}
+.md .md-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    color: var(--text-secondary);
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+.md .md-pre-wrap:hover .md-copy,
+.md .md-copy:focus { opacity: 1; }
+.md .md-copy:hover { color: var(--text-primary); }
+
+/* Touch has no hover, and a phone is a first-class target here. */
+@media (hover: none) {
+    .md .md-copy { opacity: 1; }
+}
+
+.md .md-table-wrap {
+    overflow-x: auto;
+    margin: 0 0 10px;
+}
+.md .md-table {
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 100%;
+}
+.md .md-table th,
+.md .md-table td {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+}
+.md .md-table th {
+    background: rgba(255,255,255,0.05);
+    font-weight: 600;
+}
+
+.md a {
+    color: var(--accent-blue);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.md a:hover { color: var(--accent-pink); }
