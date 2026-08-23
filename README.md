@@ -173,6 +173,16 @@ The script is *counted*, not taken from the first character — a Hindi reply
 carries Latin punctuation, digits and stray English words, and one of those at
 the front should not pick the voice.
 
+The browser gets the same treatment as the terminal. `synthesize_bytes()` (the
+`/api/v1/speech` path) used to choose audio.cpp whenever audio.cpp existed —
+which on a Mac it always does, since it is installed there for *listening* — so
+the GUI spoke through the English-only PocketTTS voice while the TUI spoke
+through `say`. It now follows `engine()` like everything else, and a script the
+bundled voice cannot say overrides even an explicit
+`GATHM_SPEAK_ENGINE=audio.cpp`: an English voice handed Devanagari is not a
+choice between two engines. Where there is no OS voice at all — Termux —
+audio.cpp is still used, because failing is worse than a wrong-sounding voice.
+
 **Listening is English-and-neighbours only**, and that is the ASR model, not a
 setting. SenseVoice-Small covers a small set of languages; Hindi is not among
 them, and with automatic detection Hindi speech comes back transcribed as the

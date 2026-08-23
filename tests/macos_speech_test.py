@@ -490,6 +490,96 @@ def test_voice_list_parsing():
             speech._VOICE_CACHE["voices"] = saved
 
 
+def test_the_gui_speaks_the_same_language_as_the_tui():
+    print("\nthe GUI picks the same engine the TUI does")
+    # synthesize_bytes chose audio.cpp whenever audio.cpp existed. On a Mac it
+    # always exists — it is installed there for LISTENING — so the GUI spoke
+    # through PocketTTS while the TUI spoke through `say`. PocketTTS here is an
+    # English-only voice, so Hindi was audible in the terminal and silent in
+    # the browser.
+    calls = []
+    real = {
+        "resolve": speech.resolve,
+        "engine": speech.engine,
+        "sysfile": speech.system_voice_to_file,
+        "voice_for": speech.voice_for_text,
+        "synth": speech.synthesize,
+        "synth_sys": speech.synthesize_system,
+    }
+    try:
+        speech.synthesize = lambda body, out: (calls.append("cpp"), (True, out))[1]
+        speech.synthesize_system = lambda body, out: (calls.append("system"), (True, out))[1]
+
+        def route(text, *, cpp_installed, system_installed, engine_says,
+                  voice_hit=""):
+            del calls[:]
+            speech.resolve = lambda: {
+                "bin": "/x/audiocpp_cli" if cpp_installed else "",
+                "model": "/x/model" if cpp_installed else "",
+                "family": "pocket_tts", "voice": "alba", "src": "",
+            }
+            speech.system_voice_to_file = lambda: "say" if system_installed else ""
+            speech.engine = lambda: engine_says
+            speech.voice_for_text = lambda t: voice_hit
+            speech.synthesize_bytes(text)
+            return calls[0] if calls else "none"
+
+        # A Mac: both installed, engine() says system. The TUI's choice.
+        check("English on a Mac uses the OS voice",
+              route("hello", cpp_installed=True, system_installed=True,
+                    engine_says="system"), "system")
+        check("Hindi on a Mac uses the OS voice too",
+              route("नमस्ते", cpp_installed=True, system_installed=True,
+                    engine_says="system", voice_hit="Lekha"), "system")
+
+        # Someone forcing audio.cpp still cannot make it say Devanagari, so a
+        # matching OS voice overrides even an explicit preference.
+        check("forced audio.cpp still yields for a script it cannot say",
+              route("नमस्ते", cpp_installed=True, system_installed=True,
+                    engine_says="audio.cpp", voice_hit="Lekha"), "system")
+        check("...but keeps audio.cpp for English",
+              route("hello", cpp_installed=True, system_installed=True,
+                    engine_says="audio.cpp"), "cpp")
+        check("...and for a script with no OS voice installed",
+              route("ગુજરાતી", cpp_installed=True, system_installed=True,
+                    engine_says="audio.cpp", voice_hit=""), "cpp")
+
+        # Termux: audio.cpp only. Hindi has nowhere else to go, and failing
+        # would be worse than a wrong-sounding voice.
+        check("Termux uses audio.cpp for English",
+              route("hello", cpp_installed=True, system_installed=False,
+                    engine_says="audio.cpp"), "cpp")
+        check("Termux uses audio.cpp for Hindi as well",
+              route("नमस्ते", cpp_installed=True, system_installed=False,
+                    engine_says="audio.cpp"), "cpp")
+
+        # A machine with no audio.cpp at all.
+        check("no audio.cpp means the OS voice",
+              route("hello", cpp_installed=False, system_installed=True,
+                    engine_says="system"), "system")
+
+        # The other engine is tried when the first fails, rather than a silent
+        # browser.
+        del calls[:]
+        speech.synthesize = lambda b, o: (calls.append("cpp"), (False, "boom"))[1]
+        speech.synthesize_system = lambda b, o: (calls.append("system"), (True, o))[1]
+        speech.resolve = lambda: {"bin": "/x/cli", "model": "/x/m",
+                                  "family": "pocket_tts", "voice": "alba", "src": ""}
+        speech.system_voice_to_file = lambda: "say"
+        speech.engine = lambda: "audio.cpp"
+        speech.voice_for_text = lambda t: ""
+        ok_flag, _payload = speech.synthesize_bytes("hello")
+        check("a failed engine falls back to the other", calls, ["cpp", "system"])
+        ok("and the caller gets audio", ok_flag)
+    finally:
+        speech.resolve = real["resolve"]
+        speech.engine = real["engine"]
+        speech.system_voice_to_file = real["sysfile"]
+        speech.voice_for_text = real["voice_for"]
+        speech.synthesize = real["synth"]
+        speech.synthesize_system = real["synth_sys"]
+
+
 def main() -> int:
     print("macOS speech-path tests")
     print("=" * 60)
@@ -500,6 +590,7 @@ def main() -> int:
     test_installer_gate()
     test_speaking_a_non_latin_script()
     test_voice_list_parsing()
+    test_the_gui_speaks_the_same_language_as_the_tui()
     print("=" * 60)
     print(f"{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

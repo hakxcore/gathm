@@ -292,6 +292,19 @@ def voice_for_text(text: str) -> str:
     return ""
 
 
+def _needs_system_voice(text: str) -> bool:
+    """Whether this text needs the OS voice because audio.cpp cannot say it.
+
+    The bundled PocketTTS voice is English. Devanagari, kana, Arabic and the
+    rest are not something it renders badly — it renders nothing useful at all.
+    True only when the OS actually has a voice for that script, so Termux
+    (where there is no OS voice) still uses audio.cpp rather than failing.
+    """
+    if script_of(text) == "latin":
+        return False
+    return bool(voice_for_text(text))
+
+
 def _with_voice(argv: list, text: str) -> list:
     """Insert `-v <voice>` into a `say` command when the script needs one."""
     if not argv or os.path.basename(argv[0]) != "say":
@@ -574,10 +587,18 @@ def synthesize_system(text: str, out_path: str) -> tuple[bool, str]:
 def synthesize_bytes(text: str) -> tuple[bool, bytes | str]:
     """Render text and return the wav bytes — used by the API/GUI path.
 
-    The browser does the playing there, so no local player is required. Uses
-    audio.cpp when installed and the OS voice otherwise, so the GUI speaks on
-    macOS as well — the browser would otherwise be the one interface left silent
-    on a platform where Pilot itself talks.
+    The browser does the playing there, so no local player is required.
+
+    Which engine speaks is engine()'s decision, not this function's. It used to
+    pick audio.cpp whenever audio.cpp existed, which on a Mac it always does —
+    it is installed there for LISTENING. So the GUI spoke through PocketTTS
+    while the TUI spoke through `say`, and since PocketTTS here is an
+    English-only voice, a Hindi reply was audible in the terminal and silent in
+    the browser.
+
+    A script the model cannot say overrides even that. An English-only voice
+    handed Devanagari is not a choice between two engines; it is one engine and
+    one failure, so a matching OS voice wins when there is one.
     """
     body = speakable(text)
     if not body:
@@ -587,10 +608,22 @@ def synthesize_bytes(text: str) -> tuple[bool, bytes | str]:
         fd, tmp = tempfile.mkstemp(prefix="gathm-tts-", suffix=".wav")
         os.close(fd)
         cfg = resolve()
-        if cfg["bin"] and cfg["model"]:
-            ok, msg = synthesize(body, tmp)
-        else:
-            ok, msg = synthesize_system(body, tmp)
+        have_cpp = bool(cfg["bin"] and cfg["model"])
+        have_system = bool(system_voice_to_file())
+
+        use_cpp = have_cpp
+        if have_system and engine() == "system":
+            use_cpp = False                      # the same choice the TUI makes
+        if use_cpp and have_system and _needs_system_voice(body):
+            use_cpp = False                      # a script audio.cpp cannot say
+
+        ok, msg = (synthesize(body, tmp) if use_cpp
+                   else synthesize_system(body, tmp))
+        # One retry on the other engine rather than a silent browser: whichever
+        # was skipped is still installed, and a wrong-sounding voice beats none.
+        if not ok and have_cpp and have_system:
+            ok, msg = (synthesize_system(body, tmp) if use_cpp
+                       else synthesize(body, tmp))
         if not ok:
             return False, msg
         with open(tmp, "rb") as fh:
