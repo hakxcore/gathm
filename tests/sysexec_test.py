@@ -731,12 +731,25 @@ def test_a_missing_system_prefix_is_recovered():
                   "Action: gathm\nAction Input: df -h", tools),
               "system df -h")
 
-        # Recovery stops at the safe tier. Guessing that the user wanted a
-        # write, an install or a root command is not ours to do.
-        for attempt in ["rm ~/notes.txt", "brew install ffmpeg",
-                        "sudo ls /var", "mkdir ~/newdir", "rm -rf /",
-                        "touch ~/.gathm/allow_shell", "ls | rm -r x"]:
-            check(f"not recovered: {attempt}",
+        # Recovery fixes the syntax, not the authority: a recovered `mkdir`
+        # still lands in the confirm tier and still stops to ask. Restricting
+        # it to `safe` turned a fixable typo into a dead end — asked twice to
+        # make a folder, Pilot said "I got the call wrong" twice and the user
+        # had nowhere to go.
+        for attempt in ["mkdir ~/gathm-demo", "rm ~/notes.txt",
+                        "pkg install ffmpeg", "sudo ls /var", "ls | rm -r x"]:
+            check(f"recovered, and the human still decides: {attempt}",
+                  pilot_main._recover_bare_shell_command(
+                      f"Action Input: {attempt}", tools), f"system {attempt}")
+            # The point of recovering it: it must NOT be safe, so the prompt
+            # is what actually runs it.
+            ok(f"...and it is not safe-tier: {attempt}",
+               sysexec.classify(attempt)[0] == "confirm")
+
+        # Blocked is never recovered, because no prompt can approve it.
+        for attempt in ["rm -rf /", "touch ~/.gathm/allow_shell",
+                        "shutdown -h now", "mkfs.ext4 /dev/sda1"]:
+            check(f"not recovered, and never runnable: {attempt}",
                   pilot_main._recover_bare_shell_command(
                       f"Action Input: {attempt}", tools), "")
 
@@ -773,6 +786,11 @@ def test_the_prompt_says_to_act_not_explain():
     src = pilot_main._SYSTEM_HELP + open(
         os.path.join(ROOT, "pilot", "main.py")).read()
     ok("there is a do-not-describe rule", "DO IT, DO NOT DESCRIBE IT" in src)
+    # gemma3:1b answered "33%" for free disk, "1" for cpu cores, and "the file
+    # was created" for a mkdir it never ran — with an empty audit log proving
+    # nothing executed. A fabricated result is worse than no answer.
+    ok("and a rule against claiming to have run things",
+       "NEVER CLAIM YOU RAN SOMETHING YOU DID NOT RUN" in src)
     ok("with the failing example in it", "ls ~/Desktop" in src)
     ok("and a rule against arithmetic on command output",
        "do not do arithmetic on it" in pilot_main._SYSTEM_HELP)

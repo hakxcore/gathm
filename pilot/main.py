@@ -754,11 +754,20 @@ def _recover_bare_shell_command(content: str, tools) -> str:
     this: llama3.2:3b emitted exactly that, it failed to route as a tool named
     `ls`, and the scaffolding was shown to the user instead of their files.
 
-    Recovery is limited to the `safe` tier on purpose. Those commands cannot
-    change anything and run without a confirmation prompt anyway, so this
-    grants nothing that the correctly-written call would not have had. A
-    command that writes, or that is unrecognised, is NOT recovered — guessing
-    that the user wanted it run is not ours to do.
+    Recovery fixes the SYNTAX, not the authority. The classifier still grades
+    the command and the `confirm` tier still stops to ask, so a recovered
+    `mkdir` prompts exactly as a correctly-written one would — the human makes
+    the same decision either way.
+
+    That is a deliberate widening. This was limited to the `safe` tier at
+    first, on the reasoning that guessing the user wanted a write is not ours
+    to do. Real use showed the reasoning was wrong: asked twice to make a
+    folder, Pilot emitted an unroutable call twice and the user got "I meant
+    to run a command but got the call wrong" both times, with no way forward.
+    The confirmation prompt IS how the user decides; refusing to reach it just
+    turns a fixable typo into a dead end.
+
+    `blocked` is still never recovered, because no prompt can approve it.
     """
     if "system" not in (tools or ()) or _sysexec is None:
         return ""
@@ -771,7 +780,7 @@ def _recover_bare_shell_command(content: str, tools) -> str:
     if not head or head in (tools or ()):
         return ""      # a real tool name; not ours to rewrite
     try:
-        if _sysexec.classify(attempt)[0] != "safe":
+        if _sysexec.classify(attempt)[0] == "blocked":
             return ""
     except Exception:  # noqa: BLE001 - an unclassifiable string is not recovered
         return ""
@@ -1095,6 +1104,7 @@ CRITICAL RULES:
 0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
 0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
 0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
+0bb. NEVER CLAIM YOU RAN SOMETHING YOU DID NOT RUN. You only know a command's result if an Observation gave it to you. If you did not call the tool, say what you would run and that you have not run it — do not report output, numbers, or "the file was created". An invented result is worse than no answer, because the user cannot tell the difference.
 0c. DO IT, DO NOT DESCRIBE IT. If the user asks for something you have a tool for, call the tool. Never answer with the command they could type themselves — "you can list them with ls ~/Desktop" is a failure, running it and showing the result is the answer. They are talking to you because they do not want to type it.
 1. To use a tool, you MUST use the exact format:
 Thought: [your reasoning]
