@@ -1117,10 +1117,101 @@ def resolve_asr() -> dict:
     }
 
 
-def asr_enabled() -> bool:
-    """Whether transcription can run at all (runtime + ASR weights present)."""
+# ---------------------------------------------------------------------------
+# Android's own recogniser
+# ---------------------------------------------------------------------------
+# The reason Gboard's mic feels instant and Gathm's did not is architecture,
+# not model quality. Gboard runs a STREAMING recogniser resident in a system
+# service, on the NPU. Gathm recorded a whole utterance, waited for silence,
+# wrote a WAV, then started a process and loaded a 250 MB model — so the
+# latency was the length of the sentence plus a cold start, every time.
+#
+# On Android there is no need to compete with that: termux-speech-to-text
+# (termux-api, the same package already used for recording) hands the job to
+# Android's SpeechRecognizer, which IS the service behind the Gboard mic. It
+# does its own capture and its own endpointing, works offline once the language
+# pack is downloaded, and covers the languages the phone covers — including
+# Hindi, which SenseVoice does not.
+#
+# It cannot transcribe a file, only the microphone in front of it, so the GUI's
+# upload path still goes through audio.cpp. This is for `listen()`.
+
+_ANDROID_ASR = "termux-speech-to-text"
+
+
+def android_asr_available() -> bool:
+    """Whether Android's recogniser can be used for listening."""
+    if not _is_termux():
+        return False
+    return bool(shutil.which(_ANDROID_ASR))
+
+
+def asr_engine() -> str:
+    """Which engine `listen()` would use: "android", "audio.cpp", or "".
+
+    GATHM_ASR_ENGINE=android|audio.cpp overrides, falling back to whatever is
+    actually present — a preference for something uninstalled should not mean
+    silence.
+    """
+    have_android = android_asr_available()
+    have_cpp = _audiocpp_asr_enabled()
+
+    forced = (os.environ.get("GATHM_ASR_ENGINE") or "").strip().lower()
+    if forced in ("android", "termux") and have_android:
+        return "android"
+    if forced in ("audio.cpp", "audiocpp", "sense", "sensevoice") and have_cpp:
+        return "audio.cpp"
+
+    # Android first where it exists: it is faster, it needs no model, and it
+    # speaks whatever the phone speaks.
+    if have_android:
+        return "android"
+    return "audio.cpp" if have_cpp else ""
+
+
+def listen_android(timeout: int = 60) -> tuple:
+    """Listen through Android's recogniser. Returns (ok, text).
+
+    No recording step, no WAV, no conversion, no model: the command captures
+    and transcribes, and prints the text.
+    """
+    stop()  # never listen to ourselves talking
+    try:
+        rc, out, err = _run_tracked([_ANDROID_ASR], timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"speech recognition timed out after {timeout}s"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+    text = (out or "").strip()
+    if rc != 0 and not text:
+        # Whatever it said, plus what to do about it. The bare stderr line is
+        # usually something like "no such method", which tells nobody anything;
+        # the two things that actually go wrong here are the missing companion
+        # app and a denied microphone.
+        tail = (err or "").strip().splitlines()
+        detail = tail[-1] if tail else f"exited {rc}"
+        return False, (f"{_ANDROID_ASR}: {detail} — check that the Termux:API "
+                       "app is installed (F-Droid, separate from the "
+                       "termux-api package) and has microphone permission")
+    if not text:
+        return False, "nothing was recognised"
+    return True, clean_transcript(text)
+
+
+def _audiocpp_asr_enabled() -> bool:
+    """Whether audio.cpp can transcribe (runtime + ASR weights present)."""
     cfg = resolve_asr()
     return bool(cfg["bin"]) and bool(cfg["model"]) and os.path.isdir(cfg["model"])
+
+
+def asr_enabled() -> bool:
+    """Whether listening can run at all, by any engine.
+
+    This used to ask only about audio.cpp, so a Termux phone with Android's
+    recogniser installed but no SenseVoice weights reported "no voice input"
+    while the microphone worked perfectly.
+    """
+    return bool(asr_engine())
 
 
 def _is_termux() -> bool:
@@ -1146,6 +1237,12 @@ def asr_unavailable_reason() -> str:
         return ""
     cfg = resolve_asr()
     buildable = _is_termux() or _is_darwin()
+    if _is_termux() and not shutil.which(_ANDROID_ASR):
+        # The fastest fix on Android is not a rebuild — it is one package.
+        return ("no speech-to-text. The quickest route on Android is the "
+                "system recogniser: pkg install termux-api, plus the "
+                "Termux:API app from F-Droid. Or run ./install to build "
+                "audio.cpp's own model.")
     if not cfg["bin"]:
         if buildable:
             return "audiocpp_cli is not installed — run ./install"
@@ -1464,9 +1561,27 @@ def record(seconds: int, out_path: str) -> tuple[bool, str]:
 
 
 def listen(seconds: int | None = None) -> tuple[bool, str]:
-    """Record, convert, transcribe. Returns (ok, text) or (False, reason)."""
+    """Listen and return what was said. Returns (ok, text) or (False, reason).
+
+    Android's recogniser does the whole job itself — capture, endpointing and
+    transcription — so none of the record/convert/transcribe machinery below
+    runs there. That is the entire speed difference: no fixed recording
+    window, no WAV on disk, no 250 MB model loaded per utterance.
+    """
     if not asr_enabled():
         return False, asr_unavailable_reason()
+
+    if asr_engine() == "android":
+        try:
+            timeout = int(os.environ.get("GATHM_LISTEN_TIMEOUT", "60"))
+        except ValueError:
+            timeout = 60
+        ok, text = listen_android(timeout)
+        if ok or not _audiocpp_asr_enabled():
+            return ok, text
+        # Android refused (no Termux:API app, mic denied). audio.cpp is
+        # installed, so try it rather than giving up on voice entirely.
+
     if seconds is None:
         try:
             seconds = int(os.environ.get("GATHM_LISTEN_SECONDS", "8"))
@@ -1524,7 +1639,11 @@ def diagnose() -> int:
     print("converter    : %s" % (shutil.which("ffmpeg") or
                                  "NONE (pkg install ffmpeg)"))
     print("record dir   : %s" % record_dir())
-    print("listening    : %s" % asr_enabled())
+    engine_name = asr_engine() or "NONE"
+    print("listening    : %s (%s)" % (asr_enabled(), engine_name))
+    if engine_name == "android":
+        print("             : Android's own recogniser — no model, no "
+              "recording window")
     if engine() == "system":
         return 0 if enabled() else 1   # the OS voice does its own playback
     return 0 if (enabled() and player) else 1

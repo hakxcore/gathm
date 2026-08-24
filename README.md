@@ -136,7 +136,7 @@ Why those two platforms, and what each uses it for:
 
 | Platform | Speaking | Listening |
 |---|---|---|
-| Termux | audio.cpp (nothing else works on Android) | audio.cpp |
+| Termux | audio.cpp (nothing else works on Android) | **Android's own recogniser**, audio.cpp as fallback |
 | macOS | `say` — a resident OS service, far faster than any model | audio.cpp (macOS has no CLI for dictation) |
 | Linux | `spd-say` / `espeak-ng`, or audio.cpp if you build it | audio.cpp if you build it |
 | Windows | — | — |
@@ -149,6 +149,41 @@ the system command (`GATHM_SPEAK_COMMAND="say -v Ava"` for one of the premium
 voices from System Settings → Accessibility → Spoken Content).
 
 `python3 lib/speech.py --check` reports which engine is in use.
+
+#### Listening on Android: the phone's own recogniser
+
+Gboard's microphone feels instant and Gathm's did not, and the reason is
+architecture rather than model quality. Gboard runs a *streaming* recogniser,
+resident in a system service, on the NPU — words appear a few hundred
+milliseconds behind your mouth. Gathm recorded a whole utterance, waited for
+silence, wrote a WAV, started a process and loaded a 250 MB model. The latency
+was the length of your sentence plus a cold start, every single time.
+
+On Android there is no need to compete with that. `termux-speech-to-text` —
+from the `termux-api` package Gathm already uses for recording — hands the job
+to Android's `SpeechRecognizer`, which *is* the service behind the Gboard mic.
+It does its own capture and endpointing, works offline once the language pack
+is downloaded, and covers whatever languages the phone covers, **Hindi
+included**.
+
+So on Termux, listening now needs no model, no recording window and no
+conversion:
+
+```bash
+pkg install termux-api
+```
+
+plus the Termux:API app from F-Droid, which is separate from the package and is
+what actually holds the microphone permission.
+
+`GATHM_ASR_ENGINE=audio.cpp` forces SenseVoice instead; the override is ignored
+when the engine it names is not installed, since a preference should not mean
+silence. If Android's recogniser fails at runtime — no companion app, denied
+microphone — audio.cpp is tried before giving up.
+
+One limit: it transcribes the microphone in front of it, not a file. The GUI
+uploads a recorded blob, so the browser path still goes through audio.cpp.
+`python3 lib/speech.py --check` reports which engine listening will use.
 
 #### Other languages
 

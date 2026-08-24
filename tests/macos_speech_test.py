@@ -580,11 +580,93 @@ def test_the_gui_speaks_the_same_language_as_the_tui():
         speech.synthesize_system = real["synth_sys"]
 
 
+def test_android_recogniser():
+    print("\nAndroid's own recogniser is preferred for listening")
+    import shutil as _shutil
+    real = {"termux": speech._is_termux, "darwin": speech._is_darwin,
+            "which": _shutil.which, "cpp": speech._audiocpp_asr_enabled,
+            "run": speech._run_tracked, "stop": speech.stop}
+
+    def on_phone(has_api, has_cpp):
+        speech._is_termux = lambda: True
+        speech._is_darwin = lambda: False
+        _shutil.which = lambda n: ("/usr/bin/" + n
+                                   if n == "termux-speech-to-text" and has_api
+                                   else None)
+        speech._audiocpp_asr_enabled = lambda: has_cpp
+
+    try:
+        # Why this matters: termux-api gives Android's SpeechRecognizer, the
+        # service behind the Gboard mic. It needs no model and no recording
+        # window, which is the whole latency difference.
+        on_phone(has_api=True, has_cpp=False)
+        ok("it is available", speech.android_asr_available())
+        check("and is the engine", speech.asr_engine(), "android")
+        ok("so listening works even with no SenseVoice model",
+           speech.asr_enabled())
+        check("with nothing to complain about",
+              speech.asr_unavailable_reason(), "")
+
+        # It wins even when audio.cpp is also installed.
+        on_phone(has_api=True, has_cpp=True)
+        check("preferred over audio.cpp", speech.asr_engine(), "android")
+
+        # ...unless the user says otherwise, and the override only counts when
+        # the thing it names is actually there.
+        os.environ["GATHM_ASR_ENGINE"] = "audio.cpp"
+        check("an override is honoured", speech.asr_engine(), "audio.cpp")
+        on_phone(has_api=True, has_cpp=False)
+        check("but not into something uninstalled",
+              speech.asr_engine(), "android")
+        os.environ["GATHM_ASR_ENGINE"] = "android"
+        on_phone(has_api=False, has_cpp=True)
+        check("nor the other way", speech.asr_engine(), "audio.cpp")
+        os.environ.pop("GATHM_ASR_ENGINE", None)
+
+        # Without termux-api the advice is the one-package fix, not a rebuild:
+        # telling someone to recompile audio.cpp on a phone when `pkg install
+        # termux-api` would do is an hour of their life.
+        on_phone(has_api=False, has_cpp=False)
+        check("no engine", speech.asr_engine(), "")
+        reason = speech.asr_unavailable_reason()
+        ok("the advice names the package", "termux-api" in reason)
+        ok("and the app it needs", "Termux:API" in reason)
+
+        # Not Termux: nothing changes.
+        speech._is_termux = lambda: False
+        _shutil.which = lambda n: "/usr/bin/" + n
+        ok("a desktop with that binary on PATH is still not Android",
+           not speech.android_asr_available())
+
+        # The transcript comes back cleaned, and a failure explains itself.
+        on_phone(has_api=True, has_cpp=False)
+        speech.stop = lambda *a, **k: None
+        speech._run_tracked = lambda argv, t, **kw: (0, "  hello hello  \n", "")
+        check("what it heard", speech.listen_android(), (True, "hello hello"))
+        speech._run_tracked = lambda argv, t, **kw: (0, "", "")
+        ok_flag, msg = speech.listen_android()
+        check("silence is not a crash", ok_flag, False)
+        ok("and says so", "nothing was recognised" in msg)
+        speech._run_tracked = lambda argv, t, **kw: (1, "", "no such method")
+        ok_flag, msg = speech.listen_android()
+        check("a failure is reported", ok_flag, False)
+        ok("pointing at the app that provides it", "Termux:API" in msg)
+    finally:
+        speech._is_termux = real["termux"]
+        speech._is_darwin = real["darwin"]
+        _shutil.which = real["which"]
+        speech._audiocpp_asr_enabled = real["cpp"]
+        speech._run_tracked = real["run"]
+        speech.stop = real["stop"]
+        os.environ.pop("GATHM_ASR_ENGINE", None)
+
+
 def main() -> int:
     print("macOS speech-path tests")
     print("=" * 60)
     test_engine_choice()
     test_asr_reason()
+    test_android_recogniser()
     test_recorder_device()
     test_sample_rate_guard()
     test_installer_gate()

@@ -2823,6 +2823,15 @@ _audiocpp_install_recorder() {
     command -v ffmpeg &>/dev/null || pkg install -y ffmpeg 2>/dev/null || true
 
     local rc=0
+    # termux-api brings Android's own speech recogniser as well as the mic —
+    # the service behind the Gboard microphone. It needs no model and no
+    # recording window, so Gathm prefers it over SenseVoice for listening on a
+    # phone. Worth saying out loud: it is the difference between "wait, then
+    # transcribe" and "it just types what you say".
+    if command -v termux-speech-to-text &>/dev/null; then
+        ok "Speech-to-text (Android's own recogniser — instant, no model)"
+        info "Speaks whatever languages your phone speaks, Hindi included."
+    fi
     if command -v termux-microphone-record &>/dev/null; then
         ok "Microphone capture (termux-microphone-record)"
         info "Voice input also needs the Termux:API app from F-Droid, and mic permission."
