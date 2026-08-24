@@ -235,6 +235,24 @@ def list_system_voices(refresh: bool = False) -> list:
     """
     if not refresh and "voices" in _VOICE_CACHE:
         return _VOICE_CACHE["voices"]
+
+    # On disk as well as in memory: `say -v ?` enumerates ~180 voices, and an
+    # in-process cache is paid again by every new process. Pilot is one
+    # process, but the GUI starts a fresh chat_once.py per turn, so "once per
+    # process" is closer to "every time" than it sounds.
+    cache_file = CONFIG_DIR / "say_voices.tsv"
+    if not refresh:
+        try:
+            if cache_file.exists():
+                cached = [tuple(line.split("\t"))
+                          for line in cache_file.read_text().splitlines()
+                          if "\t" in line]
+                if cached:
+                    _VOICE_CACHE["voices"] = cached
+                    return cached
+        except Exception:  # noqa: BLE001 - a bad cache is not an error
+            pass
+
     voices: list = []
     if shutil.which("say"):
         try:
@@ -260,6 +278,13 @@ def list_system_voices(refresh: bool = False) -> list:
         except Exception:  # noqa: BLE001 - no voice list is not an error
             voices = []
     _VOICE_CACHE["voices"] = voices
+    if voices:
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                "\n".join(f"{name}\t{locale}" for name, locale in voices))
+        except Exception:  # noqa: BLE001 - failing to cache is not failing
+            pass
     return voices
 
 
@@ -473,6 +498,25 @@ def _strip_unfenced_code(text: str) -> str:
             out.extend(lines[index:last_code + 1])
         index = last_code + 1
     return "\n".join(out)
+
+
+# Guessing at speech latency wastes everyone's time: the text work measures in
+# microseconds, so anything slow is a process being started. GATHM_SPEECH_TIMING=1
+# prints how long each stage took, to stderr, and costs nothing when unset.
+def _timing_on() -> bool:
+    return (os.environ.get("GATHM_SPEECH_TIMING") or "").strip() in ("1", "true", "yes")
+
+
+def _timed(label: str, fn):
+    """Run fn(), and report how long it took when timing is switched on."""
+    if not _timing_on():
+        return fn()
+    start = time.monotonic()
+    try:
+        return fn()
+    finally:
+        print("[speech] %-22s %6.1f ms" % (label, (time.monotonic() - start) * 1000),
+              file=sys.stderr)
 
 
 def _clean_for_speech(text: str) -> str:
@@ -728,9 +772,9 @@ def _speak_system(text: str, quiet: bool) -> bool:
     if not voice:
         return False
     argv = [text if a == "{t}" else a.replace("{t}", text) for a in voice]
-    argv = _with_voice(argv, text)
+    argv = _timed("pick voice", lambda: _with_voice(argv, text))
     try:
-        rc, _out, err = _run_tracked(argv, 300)
+        rc, _out, err = _timed("say", lambda: _run_tracked(argv, 300))
     except Exception as exc:  # noqa: BLE001
         if not quiet:
             print(f"[speech] {argv[0]}: {exc}", file=sys.stderr)
