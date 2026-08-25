@@ -1,0 +1,189 @@
+name: Release to PyPI
+
+# Publishing is irreversible: a version number on PyPI can be yanked but never
+# reused. So nothing here trusts the tag alone — the suite runs, the wheel is
+# built, the wheel is *installed and executed*, and only then is it uploaded.
+#
+# The install check is the one that matters. Every other test in this repo runs
+# against the checkout, where every file is on disk whether or not it was
+# packaged; only installing the artefact proves the artefact is complete.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual runs go to TestPyPI, so the real index is only ever reached by a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The JS suites (markdown renderer, VAD, speech chunker) are not optional
+      # extras — the chunker test is what keeps lib/speech.py and
+      # gui/chunker.js from drifting apart.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Gathm's dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[all]'
+
+      - name: Python suites
+        run: |
+          set -e
+          python3 tests/packaging_test.py
+          python3 tests/sysexec_test.py
+          python3 tests/macos_speech_test.py
+          python3 tests/speech_stream_test.py
+          python3 tests/reply_stream_test.py
+
+      - name: JavaScript suites
+        run: |
+          set -e
+          node tests/markdown_test.js
+          node tests/chunker_test.js
+          node tests/vad_test.js
+
+      - name: Launcher suite
+        run: bash tests/launcher_test.sh
+
+  build:
+    name: Build and verify the wheel
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Refuse a tag that disagrees with pyproject
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          declared=$(python3 -c "
+          import tomllib
+          with open('pyproject.toml','rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "tag: $tag    pyproject: $declared"
+          if [ "$tag" != "$declared" ]; then
+            echo "::error::Tag v$tag does not match pyproject version $declared."
+            echo "Publishing the wrong version is not undoable — bump one to match."
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # Installing into a bare venv is the only way to catch a runtime
+      # directory that was never added to force-include: from a checkout it
+      # would be right there on disk and every other check would pass.
+      - name: Install the wheel and run it
+        run: |
+          set -e
+          python3 -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet dist/*.whl
+          echo "--- gathm --version ---"
+          /tmp/verify/bin/gathm --version
+          echo "--- gathm help ---"
+          /tmp/verify/bin/gathm help | head -5
+          echo "--- gathm doctor ---"
+          /tmp/verify/bin/gathm doctor || true
+
+      - name: The bundle has to be complete
+        run: |
+          set -e
+          bundle=$(/tmp/verify/bin/gathm --where)
+          echo "bundle at: $bundle"
+          for needed in gathm install lib pilot api gui agent tools config; do
+            if [ ! -e "$bundle/$needed" ]; then
+              echo "::error::$needed is missing from the installed bundle"
+              exit 1
+            fi
+            echo "  ok  $needed"
+          done
+          tools=$(ls "$bundle/tools" | wc -l)
+          echo "tool entries: $tools"
+          if [ "$tools" -lt 50 ]; then
+            echo "::error::only $tools entries under tools/ — expected the full catalogue"
+            exit 1
+          fi
+
+      - name: Pilot has to import from the installed package
+        run: |
+          bundle=$(/tmp/verify/bin/gathm --where)
+          /tmp/verify/bin/python -c "
+          import sys
+          sys.path.insert(0, '$bundle')
+          sys.path.insert(0, '$bundle/pilot')
+          import main
+          assert main.LANGCHAIN_AVAILABLE, 'langchain did not install'
+          tools = main.discover_tools()
+          assert len(tools) >= 50, f'only {len(tools)} tools discovered'
+          from lib import sysexec
+          assert sysexec.classify('rm -rf /')[0] == 'blocked'
+          print(f'ok: {len(tools)} tools, classifier live, platform {sysexec.platform_name()}')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    # A manual run is a rehearsal. TestPyPI takes the upload without spending a
+    # real version number.
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/gathm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gathm
+    # Trusted publishing: PyPI verifies this workflow's OIDC identity, so no
+    # API token exists to be leaked, rotated, or committed by accident.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

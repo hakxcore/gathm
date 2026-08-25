@@ -1,0 +1,99 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is here because it is not a variation on Linux for this
+        # codebase: bash 3.2, no GNU timeout, no setsid, BSD readlink, and a
+        # different speech engine. Every one of those has broken something in
+        # this repo before.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11"]
+        include:
+          - os: ubuntu-latest
+            python: "3.9"      # the floor declared in pyproject
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[all]'
+
+      # GATHM_NON_INTERACTIVE is belt and braces: the suite sets it itself, but
+      # a runner with a tty once turned the confirmation test into a prompt
+      # waiting for a human who was never coming.
+      - name: Python suites
+        env:
+          GATHM_NON_INTERACTIVE: "1"
+        run: |
+          set -e
+          python3 tests/packaging_test.py
+          python3 tests/sysexec_test.py
+          python3 tests/macos_speech_test.py
+          python3 tests/speech_stream_test.py
+          python3 tests/reply_stream_test.py
+
+      - name: JavaScript suites
+        run: |
+          set -e
+          node tests/markdown_test.js
+          node tests/chunker_test.js
+          node tests/vad_test.js
+
+      - name: Launcher suite
+        run: bash tests/launcher_test.sh
+
+      - name: Installer self-check
+        run: ./install --check
+
+  package:
+    name: The wheel installs and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # The check no other test can make: from a checkout every file is on disk
+      # whether or not it was packaged, so only an install proves the package
+      # is whole.
+      - name: Install it somewhere clean and use it
+        run: |
+          set -e
+          python3 -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet dist/*.whl
+          /tmp/verify/bin/gathm --version
+          bundle=$(/tmp/verify/bin/gathm --where)
+          for needed in gathm install lib pilot api gui agent tools config; do
+            test -e "$bundle/$needed" || { echo "::error::$needed missing"; exit 1; }
+          done
+          test "$(ls "$bundle/tools" | wc -l)" -ge 50
+          echo "the installed package is complete"

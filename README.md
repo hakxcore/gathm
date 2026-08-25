@@ -68,6 +68,31 @@ pipx install 'gathm[browser]'  # adds Playwright for page automation
 pipx install 'gathm[all]'      # both
 ```
 
+### With pip
+
+Plain `pip` works too — it is an ordinary wheel:
+
+```bash
+pip install gathm
+pip install 'gathm[all]'
+```
+
+pipx is only the recommendation because it isolates Gathm's dependencies in
+their own environment. `pip install` puts langchain, rich and prompt_toolkit
+alongside everything else in whatever Python you point it at, which is fine
+until something else wants a different langchain.
+
+On a system Python that Debian, Ubuntu or Homebrew manages, `pip install`
+refuses with *externally-managed-environment* (PEP 668). That is the packaging
+system protecting itself, and the right answer is pipx — or, if you would
+rather not:
+
+```bash
+pip install --user gathm
+```
+
+On Termux the system Python is yours, so plain `pip install gathm` is fine.
+
 `fastapi`, `uvicorn` and `pydantic` are deliberately **not** in the base
 install: `pydantic-core` is compiled, and a phone should not have to build it
 to get a working assistant. Without them `gathm` starts Pilot alone and says so.
