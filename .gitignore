@@ -28,3 +28,8 @@ Thumbs.db
 *.DS_Store
 gathm.pen
 *.pen
+
+# Build artefacts from `python -m build`
+dist/
+build/
+*.egg-info/

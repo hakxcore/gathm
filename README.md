@@ -51,7 +51,55 @@ gathm/
 
 ## Installation
 
-Installation is intentionally unified. `./install` detects the environment and applies the correct setup internally.
+### With pipx (recommended)
+
+```bash
+pipx install gathm
+gathm
+```
+
+pipx builds the virtualenv and installs the Python dependencies into it, which
+is most of what the shell installer used to do by hand. The base install is
+deliberately light — Pilot, the 56 tools, and system control:
+
+```bash
+pipx install 'gathm[gui]'      # adds the browser GUI and REST API
+pipx install 'gathm[browser]'  # adds Playwright for page automation
+pipx install 'gathm[all]'      # both
+```
+
+`fastapi`, `uvicorn` and `pydantic` are deliberately **not** in the base
+install: `pydantic-core` is compiled, and a phone should not have to build it
+to get a working assistant. Without them `gathm` starts Pilot alone and says so.
+
+Two things pipx cannot do — the native speech runtime, and OS packages like
+`jq` and `ffmpeg`:
+
+```bash
+gathm setup
+```
+
+### How long it takes
+
+`gathm setup` prints this for your platform before it starts, because a silent
+compile reads as a hang:
+
+| | Termux (Android) | macOS | Linux |
+|---|---|---|---|
+| Python dependencies (pipx) | 2–5 min | 1–2 min | 1–2 min |
+| OS packages (jq, ffmpeg, cmake) | 1–3 min | 1–5 min | 1–3 min |
+| audio.cpp speech runtime, compiled | **20–60 min, once** | 2–6 min, once | not built |
+| Speech models, downloaded | 3–10 min | 1–3 min | — |
+| An Ollama model | depends on the model and your connection | | |
+
+The compile is the long one, it happens once, and it is optional — skip it and
+Gathm works without voice. On Windows the launcher needs a POSIX shell, so
+install Git for Windows or WSL and run `gathm` from there; the Python half
+installs normally either way.
+
+### From a checkout
+
+`./install` detects the environment and applies the correct setup internally.
 
 ```bash
 git clone https://github.com/hakxcore/gathm.git

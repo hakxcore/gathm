@@ -58,6 +58,14 @@ trap _gathm_cleanup INT TERM
 # prefer that over whatever python3 happens to be on PATH.
 pick_python() {
     local candidate
+    # GATHM_PYTHON wins. A pipx install has no pilot/venv — the dependencies
+    # live in pipx's own venv, and its interpreter is the only one that can see
+    # langchain and rich. The console script sets this; without it the search
+    # below would fall through to a bare `python3` that has none of them.
+    if [[ -n "${GATHM_PYTHON:-}" && -x "${GATHM_PYTHON}" ]]; then
+        echo "$GATHM_PYTHON"
+        return 0
+    fi
     for candidate in \
         "$INSTALL_DIR/pilot/venv/bin/python3" \
         "$INSTALL_DIR/pilot/venv/bin/python"; do
@@ -123,6 +131,25 @@ OLLAMA_AUTOSTART=1
 OLLAMA_PID_FILE="$GATHM_STATE_DIR/ollama.pid"
 OLLAMA_LOG="$GATHM_STATE_DIR/ollama.log"
 
+# Advice has to match how Gathm got here. Telling a pipx user to run
+# `pip install -r pilot/requirements.txt` points them at a requirements file
+# inside site-packages and a venv they do not manage.
+deps_advice() {
+    if [[ "${GATHM_INSTALL_KIND:-}" == "pipx" ]]; then
+        echo "pipx install --force 'gathm[all]'   (or: pipx reinstall gathm)"
+    else
+        echo "pip install -r pilot/requirements.txt   (or ./install)"
+    fi
+}
+
+setup_advice() {
+    if [[ "${GATHM_INSTALL_KIND:-}" == "pipx" ]]; then
+        echo "gathm setup"
+    else
+        echo "./install"
+    fi
+}
+
 pf_ok()   { echo -e "  ${GREEN}✓${RESETBG} $1"; }
 pf_warn() {
     echo -e "  ${ORANGE}!${RESETBG} $1"
@@ -183,7 +210,7 @@ check_python() {
         pf_ok "Python  $("$PREFLIGHT_PY" -V 2>&1 | tail -1)"
         return 0
     fi
-    pf_fail "Python 3 not found" "Install Python 3, then re-run: ./install"
+    pf_fail "Python 3 not found" "Install Python 3, then run: $(setup_advice)"
     return 1
 }
 
@@ -193,7 +220,7 @@ check_pilot() {
     # Checking only for main.py would refuse to start an install that launches
     # perfectly well through run.sh.
     if [[ ! -f "$INSTALL_DIR/pilot/run.sh" && ! -f "$INSTALL_DIR/pilot/main.py" ]]; then
-        pf_fail "Pilot is missing from $INSTALL_DIR/pilot" "Re-run the installer: ./install"
+        pf_fail "Pilot is missing from $INSTALL_DIR/pilot" "Re-run the installer: $(setup_advice)"
         return 1
     fi
     # run.sh brings its own environment (the installer's venv), so the module
@@ -222,7 +249,7 @@ PY
 )"
     if [[ -n "${hard// }" ]]; then
         pf_fail "Pilot cannot start — missing: ${hard}" \
-                "Install it with: pip install -r pilot/requirements.txt   (or ./install)"
+                "Install it with: $(deps_advice)"
         return 1
     fi
 
@@ -240,7 +267,7 @@ PY
 )"
     if [[ -n "${soft// }" ]]; then
         pf_warn "AI runtime missing: ${soft} — Pilot will open but cannot answer" \
-                "Install it with: pip install -r pilot/requirements.txt   (or ./install)"
+                "Install it with: $(deps_advice)"
         return 0
     fi
     pf_ok "Pilot dependencies"
@@ -265,7 +292,7 @@ PY
 )"
     if [[ -n "${missing// }" ]]; then
         pf_warn "GUI dependencies missing: ${missing} — starting Pilot only" \
-                "Install them with: ./install"
+                "Install them with: $(if [[ "${GATHM_INSTALL_KIND:-}" == "pipx" ]]; then echo "pipx install --force 'gathm[gui]'"; else echo "./install"; fi)"
         START_GUI=0
         return 1
     fi
@@ -348,7 +375,7 @@ PY
 check_tooling() {
     command -v jq >/dev/null 2>&1 \
         || pf_warn "jq is not installed — several tools need it" \
-                   "Install it with your package manager, or re-run: ./install"
+                   "Install it with your package manager, or run: $(setup_advice)"
     return 0
 }
 
