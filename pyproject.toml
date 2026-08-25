@@ -1,0 +1,123 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gathm"
+version = "3.0.0"
+description = "Local-first command intelligence for security, networking and operator workflows"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hakxcore" }]
+keywords = ["cli", "security", "networking", "llm", "ollama", "termux", "agent"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
+
+# What `pipx install gathm` gets: the TUI, the 56 tools, and system control.
+# Deliberately not fastapi/uvicorn — those are what the web GUI needs, they pull
+# a compiled pydantic-core, and a phone should not have to build that to get a
+# working assistant. `gathm` degrades to Pilot-only when they are absent, and
+# preflight says so rather than failing.
+dependencies = [
+    "langchain-core",
+    "langchain-ollama",
+    "langgraph",
+    "python-dotenv",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+    "requests",
+    "beautifulsoup4",
+]
+
+[project.optional-dependencies]
+# The browser GUI and the REST API.
+gui = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+]
+# Page automation for the `browser` tool. A large download, and useless on a
+# phone, so it is never implied.
+browser = ["playwright"]
+all = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "playwright",
+]
+
+[project.scripts]
+gathm = "gathmcli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hakxcore/gathm"
+Repository = "https://github.com/hakxcore/gathm"
+Issues = "https://github.com/hakxcore/gathm/issues"
+
+# ---------------------------------------------------------------------------
+# Packaging without moving anything
+# ---------------------------------------------------------------------------
+# Gathm is mostly bash: one launcher, 16 library scripts, an orchestrator and
+# 56 tool directories. Restructuring that into src/ layout to satisfy a build
+# backend would rewrite every path in a codebase that works, so instead the
+# tree is force-included verbatim under gathmcli/_bundle/ and the console
+# script execs the launcher out of there.
+#
+# The alternative — declaring `lib`, `api` and `agent` as top-level packages —
+# would put directories called `lib` and `api` into site-packages, where they
+# would collide with anything else claiming those names. Not worth it.
+
+[tool.hatch.build.targets.wheel]
+packages = ["gathmcli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"gathm" = "gathmcli/_bundle/gathm"
+"install" = "gathmcli/_bundle/install"
+"lib" = "gathmcli/_bundle/lib"
+"pilot" = "gathmcli/_bundle/pilot"
+"api" = "gathmcli/_bundle/api"
+"gui" = "gathmcli/_bundle/gui"
+"agent" = "gathmcli/_bundle/agent"
+"tools" = "gathmcli/_bundle/tools"
+"config" = "gathmcli/_bundle/config"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "gathmcli",
+    "gathm",
+    "install",
+    "lib",
+    "pilot",
+    "api",
+    "gui",
+    "agent",
+    "tools",
+    "config",
+    "tests",
+    "README.md",
+    "pyproject.toml",
+]
+
+[tool.hatch.build]
+# A virtualenv from a checkout, caches, and compiled leftovers have no business
+# in a wheel — and pilot/venv in particular would be a second interpreter
+# shipped inside the first.
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "pilot/venv",
+    "**/.DS_Store",
+    "**/node_modules",
+]
