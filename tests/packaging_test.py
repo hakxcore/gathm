@@ -123,6 +123,60 @@ def test_every_runtime_directory_is_packaged():
         ok(f"directory {entry!r} is accounted for", entry in mapped)
 
 
+def test_the_sdist_is_whole_too():
+    print("\nthe sdist carries the same tree as the wheel")
+    cfg = load_pyproject()
+    if cfg is None:
+        print("  SKIP no tomllib/tomli on this Python")
+        return
+
+    wheel = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    sdist = cfg["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+
+    # This is not belt and braces. `python -m build` writes the sdist and then
+    # builds the wheel *from that sdist*, so a directory left out here vanishes
+    # from the wheel too — and the force-include list above would still look
+    # perfectly correct while it happened.
+    for needed in sorted(wheel):
+        ok(f"{needed} is in the sdist as well", needed in sdist)
+
+    ok("the shim itself ships in the sdist", "gathmcli" in sdist)
+    ok("...and pyproject, or it cannot be rebuilt",
+       "pyproject.toml" in sdist)
+
+
+def test_only_one_workflow_publishes():
+    print("\nexactly one workflow talks to PyPI")
+    flows = os.path.join(ROOT, ".github", "workflows")
+    if not os.path.isdir(flows):
+        print("  SKIP no workflows directory")
+        return
+
+    names = sorted(os.listdir(flows))
+    publishers = []
+    for name in names:
+        with open(os.path.join(flows, name)) as handle:
+            body = handle.read()
+        if "gh-action-pypi-publish" in body:
+            publishers.append(name)
+
+    check("one workflow uploads to PyPI", len(publishers), 1)
+
+    # A repo that already had release.yaml and then gained release.yml would
+    # have two tag-triggered releases a single dot apart, and the trusted
+    # publisher can only name one of them.
+    stems = {}
+    for name in names:
+        stem = name.rsplit(".", 1)[0]
+        stems.setdefault(stem, []).append(name)
+    for stem, group in sorted(stems.items()):
+        ok(f"no .yml/.yaml twins named {stem!r}", len(group) == 1)
+
+    if publishers:
+        ok("the publisher is not named release.*",
+           not publishers[0].startswith("release."))
+
+
 def test_the_shim():
     print("\nthe console script")
     from gathmcli import cli
@@ -226,6 +280,8 @@ def main():
     test_metadata()
     test_the_termux_install_stays_light()
     test_every_runtime_directory_is_packaged()
+    test_the_sdist_is_whole_too()
+    test_only_one_workflow_publishes()
     test_the_shim()
     test_exec_bits_are_restored()
     test_the_launcher_uses_the_venv_python()

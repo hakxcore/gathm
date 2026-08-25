@@ -1,4 +1,4 @@
-name: Release to PyPI
+name: Publish to PyPI
 
 # Publishing is irreversible: a version number on PyPI can be yanked but never
 # reused. So nothing here trusts the tag alone — the suite runs, the wheel is
@@ -7,6 +7,12 @@ name: Release to PyPI
 # The install check is the one that matters. Every other test in this repo runs
 # against the checkout, where every file is on disk whether or not it was
 # packaged; only installing the artefact proves the artefact is complete.
+#
+# This file is deliberately NOT called release.yml: .github/workflows/release.yaml
+# already exists and also fires on `v*` tags (changelog, Docker image, GitHub
+# release). Both run on a tag push, which is fine — they do different jobs — but
+# two files a dot apart would be a trap. The trusted publisher on PyPI must name
+# THIS file, publish-pypi.yml; naming release.yaml would fail the OIDC exchange.
 
 on:
   push:
@@ -87,10 +93,16 @@ jobs:
             exit 1
           fi
 
+      # `python -m build` writes the sdist first and then builds the wheel *from
+      # that sdist*, so a directory missing from the sdist include list silently
+      # disappears from the wheel as well. Both artefacts get uploaded.
       - name: Build
         run: |
           python -m pip install --upgrade pip build
           python -m build
+          ls -la dist/
+          test -f dist/gathm-*.tar.gz
+          test -f dist/gathm-*.whl
 
       # Installing into a bare venv is the only way to catch a runtime
       # directory that was never added to force-include: from a checkout it
