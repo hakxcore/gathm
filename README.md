@@ -115,7 +115,8 @@ compile reads as a hang:
 | OS packages (jq, ffmpeg, cmake) | 1–3 min | 1–5 min | 1–3 min |
 | audio.cpp speech runtime, compiled | **20–60 min, once** | 2–6 min, once | not built |
 | Speech models, downloaded | 3–10 min | 1–3 min | — |
-| An Ollama model | depends on the model and your connection | | |
+| llama.cpp runtime | under a minute | under a minute | under a minute |
+| A local model (GGUF) | depends on the model and your connection | | |
 
 The compile is the long one, it happens once, and it is optional — skip it and
 Gathm works without voice. On Windows the launcher needs a POSIX shell, so
@@ -171,15 +172,15 @@ question with `[Errno 111] Connection refused`.
 | Pilot, and `rich` | **fatal** — `pilot/main.py` exits at import without it |
 | `langchain`/`langgraph` | warning — the TUI opens and tools run, AI answers do not |
 | `fastapi`/`uvicorn` | warning — Pilot starts, the GUI is skipped |
-| Ollama running | warning — **and it is started for you** if `ollama` is installed |
-| The configured model | warning — names what is pulled, and the `ollama pull` to fix it |
+| The model server | warning — **and it is started for you**: `llama-server` on macOS/Linux/Windows, `ollama serve` on Termux |
+| The model itself | warning — names what is missing and the command that fixes it |
 | `jq` | warning — several tools need it |
 
 Only the first two stop the launch. Everything else tells you what will not
 work and starts anyway, since a Pilot that can run tools is more useful than a
 refusal.
 
-An Ollama that Gathm started is stopped by `gathm stop`; one you started
+A model server Gathm started is stopped by `gathm stop`; one you started
 yourself in another terminal is left alone.
 
 ```bash
@@ -187,7 +188,8 @@ gathm doctor
 ```
 
 runs exactly the same checks and starts nothing — no server, no browser — and
-does not auto-start Ollama, because reporting is the job there.
+does not auto-start the model, because reporting is the job there. Loading
+several gigabytes of weights is not something a status command should do.
 
 ### Uninstall
 
@@ -575,10 +577,79 @@ The resolved binary, model directory, family, and voice are written to
 `~/.gathm/audiocpp_*` and to `.env` as `GATHM_AUDIOCPP_BIN`,
 `GATHM_AUDIOCPP_MODEL`, `GATHM_AUDIOCPP_FAMILY`, and `GATHM_AUDIOCPP_VOICE`.
 
-### LLM model on Termux
+## The local model runtime
 
-Termux uses its own two-step ladder instead of the desktop RAM tiers, because
-on Android inference is pure CPU, thermal throttling starts within a minute, and
+Gathm runs the model itself, on your machine, with no account and no request
+leaving the box. On macOS, Linux and Windows that is **llama.cpp** —
+specifically its `llama-server`, which speaks the OpenAI chat API on
+`127.0.0.1:8081`. Termux keeps Ollama, which is the path verified on Android.
+
+### Why llama.cpp rather than Ollama
+
+Ollama is a supervisor wrapped around llama.cpp. Gathm used to talk to the
+supervisor; now it talks to the engine, and the difference shows up in three
+places:
+
+- **The model stays loaded.** Ollama unloads an idle model after five minutes,
+  so the first question after a break paid a full reload — seconds of dead air.
+  `llama-server` holds the weights for as long as it runs.
+- **The settings are yours.** Threads, context window and GPU offload are
+  arguments Gathm sets from what it finds on the machine: physical cores rather
+  than hyper-threads (token generation is memory-bandwidth bound, so
+  oversubscribing is slower, not faster), and full GPU offload where there is a
+  GPU to offload to.
+- **One less hop.** Requests go straight to the process holding the weights
+  instead of through a client, a supervisor and a runner.
+
+The engine is the same one either way, so this is not a claim about tokens per
+second on identical settings — it is about the overhead around them, which is
+where Gathm's wait actually was.
+
+### What the installer does
+
+| Platform | Runtime | Where it comes from |
+|---|---|---|
+| macOS | llama.cpp | Homebrew (`brew install llama.cpp`), else the official prebuilt release |
+| Linux / WSL | llama.cpp | the official prebuilt release, else a CMake build from source |
+| Windows | llama.cpp | the official prebuilt CPU release (Git Bash or WSL runs the installer) |
+| Termux | Ollama | `pkg install ollama` — unchanged |
+
+The binary lands in `~/.gathm/llamacpp/bin`, the weights in `~/.gathm/models`,
+and both paths are written to `~/.gathm/llamacpp_bin` and
+`~/.gathm/llamacpp_model` so the launcher, Pilot and `--check` agree on them.
+Ollama is no longer downloaded on a machine where llama.cpp works — set
+`GATHM_INSTALL_OLLAMA=1` if you want it as well.
+
+An existing `llama-server` on your `PATH` is used as-is; Gathm does not install
+a second copy.
+
+### The model
+
+llama.cpp loads a GGUF file from disk — there is no registry and no `pull`, so
+the installer picks one by RAM and downloads it from Hugging Face:
+
+| System RAM | Model | Download |
+|---|---|---|
+| under 4 GB | Llama 3.2 1B Instruct | ~0.8 GB |
+| 4–8 GB | Llama 3.2 3B Instruct | ~2 GB |
+| 8–16 GB | Llama 3.1 8B Instruct | ~5 GB |
+| 16–32 GB | Qwen 2.5 14B Instruct | ~9 GB |
+| 32 GB and up | Qwen 2.5 32B Instruct | ~20 GB |
+
+All Q4_K_M — the size/quality knee for these models. If the disk cannot hold
+the choice, the installer steps down the ladder rather than starting a download
+that cannot finish; an interrupted download resumes on the next `./install`;
+and what arrives is checked for the GGUF magic bytes, because a moved or gated
+repository answers with an HTML page that `curl` will happily save under a
+`.gguf` name.
+
+Point Gathm at your own weights instead with `GATHM_LLAMACPP_MODEL=/path/to.gguf`,
+or at a different Hugging Face repo with `GATHM_LLAMACPP_MODEL_REPO=owner/repo`.
+
+### The model on Termux
+
+Termux stays on Ollama, and on its own two-step ladder instead of the desktop
+RAM tiers, because on Android inference is pure CPU, thermal throttling starts within a minute, and
 the low-memory killer reaps the Ollama server mid-response:
 
 | Phone RAM (`MemTotal`) | Model |
@@ -598,11 +669,57 @@ falls to `gemma3:1b`.
 Override with `GATHM_OLLAMA_MODEL` for a specific model, or
 `GATHM_TERMUX_LARGE_MIN_RAM_MB` to move the 4b threshold.
 
+### Driving it by hand
+
+```bash
+gathm llm status      # is it up, and what is it serving
+gathm llm start       # load the model now, so the first question is fast
+gathm llm stop        # stop the server Gathm started
+gathm llm doctor      # binary, weights, URL, threads, context, GPU layers
+gathm llm log         # the last 40 lines of ~/.gathm/llamacpp.log
+```
+
+`gathm` starts the server itself during preflight, and `gathm stop` stops the
+one it started. Pilot also starts it on the first question, so running Pilot
+directly (outside the launcher) works too.
+
+### Settings
+
+| Variable | Purpose |
+|---|---|
+| `GATHM_LLM_BACKEND` | `llamacpp`, `ollama`, `gemini` or `anthropic` |
+| `GATHM_LLAMACPP_BIN` | path to `llama-server` |
+| `GATHM_LLAMACPP_MODEL` | path to a `.gguf` (or a directory holding one) |
+| `GATHM_LLAMACPP_MODEL_DIR` | where GGUF weights live (default `~/.gathm/models`) |
+| `GATHM_LLAMACPP_PORT` | port (default `8081` — 8080 belongs to the GUI) |
+| `GATHM_LLAMACPP_HOST` | bind address (default `127.0.0.1`) |
+| `GATHM_LLAMACPP_CTX` | context window in tokens (default `4096`) |
+| `GATHM_LLAMACPP_NGL` | layers offloaded to the GPU (default: all, if there is a GPU) |
+| `GATHM_LLAMACPP_THREADS` | generation threads (default: physical cores) |
+| `GATHM_LLAMACPP_ARGS` | extra `llama-server` flags |
+| `GATHM_LLAMACPP_AUTOSTART` | `0` never starts the server implicitly |
+| `GATHM_LLAMACPP_START_TIMEOUT` | seconds to wait for the model to load (default 180) |
+| `GATHM_LLAMACPP_VARIANT` | release flavour to prefer at install: `cpu`, `vulkan`, `cuda` |
+| `GATHM_INSTALL_LLAMACPP` | `0` skips llama.cpp and keeps Ollama |
+| `GATHM_INSTALL_OLLAMA` | `1` installs Ollama as well |
+
+A flag `llama-server` does not recognise is not fatal: Gathm retries once
+without its tuning flags, so a distro build a year behind still starts.
+
+### Still on Ollama?
+
+Nothing was taken away. Set `GATHM_LLM_BACKEND=ollama` (or write `ollama` into
+`~/.gathm/llm_backend`) and everything works as it did — the launcher still
+starts `ollama serve`, still checks the tag is pulled, and still stops what it
+started.
+
 ## Response Speed
 
 Gathm is slower per answer than talking to the model directly with
 `ollama run gemma3:1b`, and most of the gap is prompt size rather than the model:
-the agent has to describe its tools before the model can choose one.
+the agent has to describe its tools before the model can choose one. (Moving to
+llama.cpp removed the runtime overhead around the model; the numbers below are
+about what Gathm sends it, which is a separate cost.)
 
 | | tool text sent to the model |
 |---|---|
@@ -619,10 +736,11 @@ On CPU-only hardware that prefill is the wait. Three things reduce it:
   "derivative" still finds `newton` and "registered" still finds `whois`. Asking
   what Gathm can do still lists everything. `GATHM_TOOL_SHORTLIST=0` restores the
   old behaviour; the default is 10 tools.
-- **The model stays loaded.** Ollama unloads an idle model after 5 minutes by
-  default, so the next question paid a full reload. Gathm now asks for
-  `keep_alive=30m` — tune with `GATHM_OLLAMA_KEEP_ALIVE` (`-1` never unloads,
-  `0` unloads immediately, at the cost of RAM).
+- **The model stays loaded.** On llama.cpp this is free: `llama-server` holds
+  the weights until it is stopped. On Ollama, which unloads an idle model after
+  5 minutes, Gathm asks for `keep_alive=30m` — tune with
+  `GATHM_OLLAMA_KEEP_ALIVE` (`-1` never unloads, `0` unloads immediately, at
+  the cost of RAM).
 - **Small talk skips tools entirely.** A greeting is answered from a short
   prompt with no tool list at all.
 - **Tool output is stripped before the model reads it.** `weather` alone returns
@@ -694,7 +812,8 @@ exits.
 | `gathm gui` | GUI server + browser, no Pilot |
 | `gathm gui --port 9090` | Pick the port (also `GATHM_GUI_PORT`) |
 | `gathm doctor` | Check the setup without starting anything |
-| `gathm stop` | Stop the GUI server (and an Ollama Gathm started) |
+| `gathm stop` | Stop the GUI server (and the model server Gathm started) |
+| `gathm llm <cmd>` | Manage the local llama.cpp server (status/start/stop/doctor/log) |
 
 The server writes to `~/.gathm/gui.log` and records its pid in
 `~/.gathm/gui.pid`. `--host` (or `GATHM_GUI_HOST`) changes the bind address —
@@ -711,7 +830,7 @@ python3 pilot/main.py
 
 Notes:
 
-- Uses Ollama-compatible model runtime.
+- Uses llama.cpp's OpenAI-compatible `llama-server` (Ollama also supported).
 - Model resolution order: `GATHM_OLLAMA_MODEL` -> `OLLAMA_MODEL` -> `~/.gathm/model` -> default.
 
 ### 4) REST API
@@ -934,7 +1053,10 @@ Key environment variables:
 - `GATHM_CACHE_ENABLED`
 - `GATHM_CACHE_DEFAULT_TTL`
 - `GATHM_API_KEY` (API bearer auth)
-- `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection)
+- `GATHM_LLM_BACKEND` (`llamacpp|ollama|gemini|anthropic`)
+- `GATHM_LLAMACPP_MODEL` / `GATHM_LLAMACPP_BIN` / `GATHM_LLAMACPP_PORT`
+  (the llama.cpp runtime; see [The local model runtime](#the-local-model-runtime))
+- `GATHM_OLLAMA_MODEL` / `OLLAMA_MODEL` (Pilot/Engineer model selection on Ollama)
 - `GATHM_AUDIOCPP_BIN` / `GATHM_AUDIOCPP_MODEL` / `GATHM_AUDIOCPP_FAMILY` / `GATHM_AUDIOCPP_VOICE`
   (audio.cpp speech runtime on Termux and macOS; see [Voice](#voice-pilot-speech))
 - `GATHM_SPEAK` / `GATHM_SPEAK_MAX_CHARS` / `GATHM_SPEAK_TIMEOUT` / `GATHM_AUDIO_PLAYER`
@@ -970,8 +1092,8 @@ python3 -m pip install pytest pyyaml
 python3 -m pytest tests -v
 ```
 
-The speech and conversation work has its own suites, which run standalone —
-no microphone, no speakers, no Ollama, no audio.cpp:
+The speech, conversation and model-runtime work have their own suites, which
+run standalone — no microphone, no speakers, no model server, no audio.cpp:
 
 ```bash
 python3 tests/speech_stream_test.py       # sentence chunking and pipelining
@@ -981,7 +1103,14 @@ node     tests/vad_test.js                # conversation endpointing
 node     tests/chunker_test.js            # sentence splitting, and that it
                                           # matches the Python chunker
 bash     tests/launcher_test.sh           # the gathm launcher
+python3  tests/llamacpp_test.py           # the llama.cpp runtime manager
+bash     tests/llamacpp_install_test.sh   # what the installer downloads and picks
 ```
+
+The two llama.cpp suites need neither a llama-server nor a network: the first
+runs against a stub that answers `/health` and `/v1/models` the way llama.cpp
+does, the second against `file://` fixtures of a GitHub release and a Hugging
+Face repo.
 
 The browser end of conversation mode is tested in an actual browser, with the
 microphone synthesised inside the page and the API stubbed:

@@ -4,7 +4,8 @@
 Single-shot, non-interactive entry point to the Pilot LLM agent.
 
 Used by the API server (POST /api/v1/agent/chat) so the GUI can talk to the
-real LangGraph + Ollama/Gemini agent instead of the bash keyword router.
+real LangGraph agent — on whichever backend lib/llm.py resolves (llama.cpp,
+Ollama, Gemini, Anthropic) — instead of the bash keyword router.
 
 Protocol:
   stdin  : JSON {"query": "...", "history": [{"role": "user"|"assistant",

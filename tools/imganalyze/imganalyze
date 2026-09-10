@@ -115,6 +115,17 @@ PY
   local exit_code=$?
   if [[ $exit_code -ne 0 ]]; then
     echo "Error: failed to call local Ollama API at http://127.0.0.1:11434" >&2
+    # Since Gathm moved its LLM to llama.cpp, Ollama is no longer installed by
+    # default — and this command is the one place that still needs it, because
+    # vision through llama-server needs a separate projector model this tool
+    # does not manage. Say so, rather than leaving a bare connection error.
+    if ! command -v ollama >/dev/null 2>&1; then
+      echo "The 'objects' command needs Ollama with a vision model." >&2
+      echo "Install it from https://ollama.com, then: ollama pull $model" >&2
+      echo "('metadata' and 'ocr' work without it.)" >&2
+    else
+      echo "Start it with: ollama serve   (then: ollama pull $model)" >&2
+    fi
     echo "$response" >&2
     return 1
   fi

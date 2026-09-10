@@ -52,19 +52,22 @@ SETUP_ESTIMATES = {
         ("Homebrew packages (jq, cmake, ninja)", "1-5 minutes"),
         ("audio.cpp speech runtime, compiled", "2-6 minutes, once"),
         ("Speech models, downloaded", "1-3 minutes"),
-        ("An Ollama model", "depends on the model and your connection"),
+        ("llama.cpp, the local model runtime", "under a minute"),
+        ("A local model (GGUF)", "depends on the model and your connection"),
     ],
     "linux": [
         ("Python dependencies (pipx does this)", "1-2 minutes"),
         ("Distro packages (jq, ffmpeg)", "1-3 minutes"),
         ("audio.cpp speech runtime", "not built here — voice is optional"),
-        ("An Ollama model", "depends on the model and your connection"),
+        ("llama.cpp, the local model runtime", "under a minute"),
+        ("A local model (GGUF)", "depends on the model and your connection"),
     ],
     "windows": [
         ("Python dependencies (pipx does this)", "1-2 minutes"),
         ("A POSIX shell (Git Bash or WSL)", "required — see below"),
         ("audio.cpp speech runtime", "not built here — voice is unavailable"),
-        ("An Ollama model", "depends on the model and your connection"),
+        ("llama.cpp, the local model runtime", "under a minute"),
+        ("A local model (GGUF)", "depends on the model and your connection"),
     ],
 }
 

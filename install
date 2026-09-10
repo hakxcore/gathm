@@ -973,6 +973,597 @@ setup_termux_storage() {
     fi
 }
 
+# ── llama.cpp — the fast local LLM runtime ────────────────────────────────
+#
+# What changed and why:
+#   Gathm used to reach the local model only through Ollama. Ollama is a
+#   supervisor around llama.cpp, and the supervisor is what costs the time —
+#   it unloads an idle model after five minutes and reloads it on the next
+#   question, it picks context and offload settings for you, and every token
+#   crosses an extra process boundary on the way out. llama.cpp's own
+#   `llama-server` is the engine underneath, speaks the same
+#   OpenAI-compatible API, and hands us the knobs that matter: threads,
+#   context size and GPU layers.
+#
+# What this installs, in order of preference:
+#   1. a llama-server already on PATH (nothing to do)
+#   2. Homebrew's llama.cpp on macOS — Metal-enabled, signed, and updatable
+#      with the rest of the user's packages
+#   3. the official prebuilt release binaries from GitHub (macOS, Linux,
+#      Windows), unpacked into ~/.gathm/llamacpp/bin
+#   4. a source build with CMake, when there is a toolchain and no binary
+#      matches this machine
+#
+# Termux is deliberately NOT in that list. The Android path is verified
+# end-to-end on Ollama, on-device compiles cost the better part of an hour,
+# and none of the prebuilt archives target Bionic — so phones keep the path
+# that works. Everything else gets llama.cpp.
+#
+# Knobs:
+#   GATHM_INSTALL_LLAMACPP=0     skip llama.cpp entirely (keeps Ollama)
+#   GATHM_INSTALL_OLLAMA=1       install Ollama too, even when llama.cpp works
+#   GATHM_LLAMACPP_DIR=DIR       where the runtime lives (default ~/.gathm/llamacpp)
+#   GATHM_LLAMACPP_MODEL_DIR=DIR where GGUF weights live (default ~/.gathm/models)
+#   GATHM_LLAMACPP_VARIANT=NAME  release flavour to prefer: cpu | vulkan | cuda
+#   GATHM_LLAMACPP_MODEL_REPO=R  Hugging Face repo to take the model from
+#   GATHM_LLAMACPP_BUILD=1       build from source even if a binary is available
+LLAMACPP_RELEASES_API="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+# Endpoints as variables, not literals: tests point them at file:// fixtures so
+# the asset picker and the GGUF picker can be exercised without a network.
+LLAMACPP_HF_API="${GATHM_HF_API:-https://huggingface.co/api/models}"
+LLAMACPP_HF_RESOLVE="${GATHM_HF_RESOLVE:-https://huggingface.co}"
+LLAMACPP_GIT="https://github.com/ggml-org/llama.cpp.git"
+LLAMACPP_DIR="${GATHM_LLAMACPP_DIR:-$HOME/.gathm/llamacpp}"
+LLAMACPP_BIN_DIR="$LLAMACPP_DIR/bin"
+LLAMACPP_MODELS_DIR="${GATHM_LLAMACPP_MODEL_DIR:-$HOME/.gathm/models}"
+
+# Set once install_llamacpp succeeds, so the model step and the Ollama step
+# both know whether the fast path is live.
+_GATHM_LLAMACPP_BIN=""
+
+# Platforms we install llama.cpp on. See the Termux note above.
+_llamacpp_supported() {
+    local p="${_GATHM_PLATFORM:-$(detect_platform)}"
+    case "$p" in
+        macos|darwin|linux|wsl|windows) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# An existing llama-server, wherever it is. Checked before anything is
+# downloaded: a user who already runs llama.cpp should not get a second copy.
+_llamacpp_existing_bin() {
+    local candidate
+    if [[ -n "${GATHM_LLAMACPP_BIN:-}" && -x "${GATHM_LLAMACPP_BIN}" ]]; then
+        echo "$GATHM_LLAMACPP_BIN"; return 0
+    fi
+    for candidate in "$LLAMACPP_BIN_DIR/llama-server" "$LLAMACPP_BIN_DIR/llama-server.exe"; do
+        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+    done
+    if command -v llama-server &>/dev/null; then
+        command -v llama-server; return 0
+    fi
+    return 1
+}
+
+# x64 or arm64, in the words the release assets use.
+_llamacpp_arch() {
+    local machine; machine=$(uname -m 2>/dev/null || echo x86_64)
+    case "$machine" in
+        arm64|aarch64) echo "arm64" ;;
+        x86_64|amd64)  echo "x64" ;;
+        *)             echo "$machine" ;;
+    esac
+}
+
+# Ordered asset patterns for this machine. Each pattern is a comma-separated
+# list of substrings that must ALL appear in the asset name; the first pattern
+# that matches an asset wins.
+#
+# The order encodes a judgement: correctness first, speed second. A CUDA build
+# on a machine without the runtime DLLs starts and then dies at the first
+# token, which is a far worse outcome than a CPU build that is merely slower —
+# so GPU flavours are only preferred when GATHM_LLAMACPP_VARIANT asks for them.
+_llamacpp_asset_patterns() {
+    local platform="$1" arch; arch=$(_llamacpp_arch)
+    local variant="${GATHM_LLAMACPP_VARIANT:-}"
+    local patterns=()
+
+    case "$platform" in
+        macos|darwin)
+            # macOS binaries ship with Metal, so there is no CPU/GPU split.
+            patterns=("bin-macos-${arch}" "bin-macos")
+            ;;
+        windows)
+            [[ -n "$variant" ]] && patterns+=("bin-win-${variant},${arch}")
+            patterns+=("bin-win-cpu-${arch}" "bin-win-avx2-${arch}" "bin-win-${arch}")
+            ;;
+        *)
+            [[ -n "$variant" ]] && patterns+=("bin-ubuntu-${variant},${arch}")
+            patterns+=("bin-ubuntu-${arch}" "bin-ubuntu-vulkan-${arch}" "bin-ubuntu")
+            ;;
+    esac
+    printf '%s\n' "${patterns[@]}"
+}
+
+# Resolve a download URL from the latest release. Prints "URL<TAB>TAG".
+#
+# Asking the GitHub API rather than building a URL from a version number is
+# deliberate: llama.cpp tags a new build several times a day and has renamed
+# its asset scheme more than once (win-avx2 → win-cpu, the arm64 Linux
+# archives arriving in 2025). A constructed URL would rot; a pattern match
+# against the real asset list does not.
+_llamacpp_release_asset() {
+    local platform="$1" json patterns
+    json=$(_bounded 60 curl -fsSL \
+        -H "Accept: application/vnd.github+json" \
+        "$LLAMACPP_RELEASES_API" 2>/dev/null) || return 1
+    [[ -n "$json" ]] || return 1
+
+    patterns=$(_llamacpp_asset_patterns "$platform" | tr '\n' ' ')
+    printf '%s' "$json" | GATHM_ASSET_PATTERNS="$patterns" python3 -c '
+import json, os, sys
+
+try:
+    release = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(1)
+
+assets = [(a.get("name", ""), a.get("browser_download_url", ""))
+          for a in release.get("assets", [])]
+tag = release.get("tag_name", "")
+
+for pattern in os.environ.get("GATHM_ASSET_PATTERNS", "").split():
+    needles = pattern.split(",")
+    for name, url in assets:
+        if not name.endswith(".zip"):
+            continue
+        if all(needle in name for needle in needles):
+            print("%s\t%s" % (url, tag))
+            raise SystemExit(0)
+raise SystemExit(1)
+' 2>/dev/null
+}
+
+# Unpack a release zip into $LLAMACPP_BIN_DIR.
+#
+# The whole directory holding llama-server is copied, not just the binary:
+# the release archives put libllama/libggml next to it and the executable
+# finds them through a relative rpath. Copying the binary alone produces
+# something that runs on the build machine and nowhere else.
+_llamacpp_unpack() {
+    local zip_path="$1" workdir="$2"
+    python3 - "$zip_path" "$workdir" <<'PY' || return 1
+import sys, zipfile
+zip_path, dest = sys.argv[1], sys.argv[2]
+try:
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(dest)
+except (zipfile.BadZipFile, OSError) as exc:
+    sys.stderr.write("could not unpack: %s\n" % exc)
+    raise SystemExit(1)
+PY
+
+    local found
+    found=$(find "$workdir" -type f \( -name 'llama-server' -o -name 'llama-server.exe' \) \
+        2>/dev/null | head -1)
+    [[ -n "$found" ]] || { warn "The archive contained no llama-server"; return 1; }
+
+    mkdir -p "$LLAMACPP_BIN_DIR" 2>/dev/null || true
+    cp -R "$(dirname "$found")"/. "$LLAMACPP_BIN_DIR"/ 2>/dev/null || return 1
+    chmod +x "$LLAMACPP_BIN_DIR"/llama-* 2>/dev/null || true
+    return 0
+}
+
+# Download and unpack the official prebuilt binaries.
+_llamacpp_install_prebuilt() {
+    local platform="$1" resolved url tag
+    resolved=$(_llamacpp_release_asset "$platform") || {
+        warn "Could not find a llama.cpp release build for this machine"
+        return 1
+    }
+    url="${resolved%%$'\t'*}"
+    tag="${resolved##*$'\t'}"
+    [[ -n "$url" ]] || return 1
+
+    info "Downloading llama.cpp ${BOLD}${tag}${RESET} (about 20-60 MB)."
+    info "Live progress follows. This is a download, not a hang."
+    echo ""
+
+    local tmpdir; tmpdir=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/gathm-llamacpp-$$")
+    mkdir -p "$tmpdir" 2>/dev/null || true
+    local zip_path="$tmpdir/llamacpp.zip"
+
+    if ! curl -fL --progress-bar -o "$zip_path" "$url"; then
+        rm -rf "$tmpdir" 2>/dev/null || true
+        warn "Download failed: $url"
+        return 1
+    fi
+    echo ""
+
+    if ! _llamacpp_unpack "$zip_path" "$tmpdir/unpacked"; then
+        rm -rf "$tmpdir" 2>/dev/null || true
+        return 1
+    fi
+    rm -rf "$tmpdir" 2>/dev/null || true
+    return 0
+}
+
+# Build llama-server from source. The last resort, and the only path that can
+# produce a CUDA/ROCm build for a machine no release archive covers.
+_llamacpp_build_from_source() {
+    command -v git &>/dev/null   || { warn "git is needed to build llama.cpp"; return 1; }
+    command -v cmake &>/dev/null || { warn "cmake is needed to build llama.cpp"; return 1; }
+
+    local src="$LLAMACPP_DIR/src"
+    if [[ -d "$src/.git" ]]; then
+        info "Updating the llama.cpp checkout..."
+        _bounded 600 git -C "$src" pull --ff-only &>/dev/null \
+            || warn "Could not update — building the checkout as it is"
+    else
+        info "Cloning llama.cpp (shallow)..."
+        mkdir -p "$(dirname "$src")" 2>/dev/null || true
+        _bounded 900 git clone --depth 1 "$LLAMACPP_GIT" "$src" || {
+            warn "Could not clone llama.cpp"
+            return 1
+        }
+    fi
+
+    local cmake_flags=(-B "$src/build" -DCMAKE_BUILD_TYPE=Release
+                       -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+                       -DLLAMA_CURL=OFF)
+    # An NVIDIA machine with a toolchain is exactly the case where a source
+    # build beats every prebuilt archive, so take the offer when it is there.
+    if command -v nvcc &>/dev/null && command -v nvidia-smi &>/dev/null; then
+        info "CUDA toolkit found — building with GPU support"
+        cmake_flags+=(-DGGML_CUDA=ON)
+    fi
+
+    # Shared with the audio.cpp build: same question (how many compile jobs
+    # will this machine survive), same RAM-aware answer.
+    local jobs; jobs=$(_audiocpp_jobs)
+    info "Configuring the build (this takes a minute)..."
+    _bounded 900 cmake "${cmake_flags[@]}" -S "$src" &>/dev/null || {
+        warn "CMake configuration failed"
+        return 1
+    }
+    info "Compiling llama-server with ${jobs} job(s). Expect 3-15 minutes."
+    _bounded 3600 cmake --build "$src/build" --config Release -j "$jobs" --target llama-server || {
+        warn "The llama.cpp build failed"
+        return 1
+    }
+
+    local built
+    built=$(find "$src/build" -type f -name 'llama-server' 2>/dev/null | head -1)
+    [[ -n "$built" ]] || { warn "The build produced no llama-server"; return 1; }
+    mkdir -p "$LLAMACPP_BIN_DIR" 2>/dev/null || true
+    cp -R "$(dirname "$built")"/. "$LLAMACPP_BIN_DIR"/ 2>/dev/null || true
+    chmod +x "$LLAMACPP_BIN_DIR"/llama-* 2>/dev/null || true
+    return 0
+}
+
+# Record where the runtime and the weights are, so the launcher, Pilot and
+# `--check` all find them without re-deriving any of this.
+# Mirrors _save_model_config's ~/.gathm + .env split.
+_llamacpp_save_config() {
+    local bin="${1:-}" model="${2:-}"
+    local config_dir="$HOME/.gathm"
+    mkdir -p "$config_dir" 2>/dev/null || true
+    if [[ -n "$bin" ]]; then
+        echo "$bin" > "$config_dir/llamacpp_bin" 2>/dev/null || true
+        _audiocpp_write_env GATHM_LLAMACPP_BIN "$bin"
+    fi
+    if [[ -n "$model" ]]; then
+        echo "$model" > "$config_dir/llamacpp_model" 2>/dev/null || true
+        _audiocpp_write_env GATHM_LLAMACPP_MODEL "$model"
+    fi
+}
+
+install_llamacpp() {
+    local platform="$1"
+
+    if [[ "${GATHM_INSTALL_LLAMACPP:-1}" == "0" ]]; then
+        step_skip "llama.cpp skipped (GATHM_INSTALL_LLAMACPP=0)"
+        return 1
+    fi
+    if ! _llamacpp_supported; then
+        step_skip "llama.cpp is not built on ${platform} — using Ollama instead"
+        return 1
+    fi
+
+    local existing
+    if existing=$(_llamacpp_existing_bin) && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]]; then
+        _GATHM_LLAMACPP_BIN="$existing"
+        _llamacpp_save_config "$existing"
+        step_done "llama.cpp already installed ($existing)"
+        return 0
+    fi
+
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        step_skip "llama.cpp install skipped (offline)"
+        return 1
+    fi
+
+    local t0=$SECONDS installed=1
+
+    # Homebrew first on macOS: it is Metal-enabled, it is signed, and it
+    # updates with everything else the user has. The prebuilt archives are the
+    # fallback for a Mac without brew.
+    if [[ "$platform" == "macos" || "$platform" == "darwin" ]] \
+            && command -v brew &>/dev/null \
+            && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]]; then
+        run_with_spinner "Installing llama.cpp via Homebrew" -- \
+            _brew_install llama.cpp && installed=0
+    fi
+
+    if (( installed != 0 )) && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]]; then
+        _llamacpp_install_prebuilt "$platform" && installed=0
+    fi
+
+    if (( installed != 0 )); then
+        info "No prebuilt llama.cpp fits this machine — building from source."
+        _llamacpp_build_from_source && installed=0
+    fi
+
+    local elapsed=$(( SECONDS - t0 ))
+    local bin
+    if (( installed == 0 )) && bin=$(_llamacpp_existing_bin); then
+        _GATHM_LLAMACPP_BIN="$bin"
+        _llamacpp_save_config "$bin"
+        step_done "llama.cpp installed in $(_format_elapsed $elapsed)"
+        return 0
+    fi
+
+    step_fail "llama.cpp could not be installed after $(_format_elapsed $elapsed) — falling back to Ollama"
+    return 1
+}
+
+# ── The weights ───────────────────────────────────────────────────────────
+#
+# llama.cpp loads a GGUF file off disk; there is no model registry and no
+# `pull`. So Gathm picks one by RAM the same way the Ollama ladder does, and
+# downloads it from Hugging Face.
+#
+# The quantisation is Q4_K_M throughout. It is the size/quality knee for every
+# model in this ladder — roughly 4.8 bits per weight, within a point or two of
+# the fp16 model on instruction following, and small enough that the whole
+# thing fits in RAM alongside a browser.
+#
+# Each row: RAM ceiling in MB | Hugging Face repo | approximate MB on disk.
+_llamacpp_model_ladder() {
+    cat <<'LADDER'
+4096|bartowski/Llama-3.2-1B-Instruct-GGUF|850
+8192|bartowski/Llama-3.2-3B-Instruct-GGUF|2100
+16384|bartowski/Meta-Llama-3.1-8B-Instruct-GGUF|5000
+32768|bartowski/Qwen2.5-14B-Instruct-GGUF|9100
+999999|bartowski/Qwen2.5-32B-Instruct-GGUF|20000
+LADDER
+}
+
+# The repo this machine should run, by RAM.
+_llamacpp_recommend_repo() {
+    if [[ -n "${GATHM_LLAMACPP_MODEL_REPO:-}" ]]; then
+        echo "$GATHM_LLAMACPP_MODEL_REPO"; return 0
+    fi
+    local ram_mb; ram_mb=$(_detect_total_ram_mb) || true
+    [[ "$ram_mb" =~ ^[0-9]+$ ]] || ram_mb=0
+    # Unknown RAM takes the 3B row, not the 32B one: guessing small costs
+    # quality, guessing large costs a 20 GB download the machine cannot run.
+    (( ram_mb < 1 )) && ram_mb=6000
+    local line ceiling repo
+    while IFS='|' read -r ceiling repo _; do
+        [[ -n "$ceiling" ]] || continue
+        if (( ram_mb < ceiling )); then echo "$repo"; return 0; fi
+    done < <(_llamacpp_model_ladder)
+    echo "bartowski/Llama-3.2-3B-Instruct-GGUF"
+}
+
+# Approximate download size (MB) for a repo in the ladder. A repo we do not
+# know (one the user named) gets a deliberately generous guess: this number
+# gates the storage check, where over-estimating costs a downgrade and
+# under-estimating costs a download that dies at 98%.
+_llamacpp_repo_size_mb() {
+    local want="$1" ceiling repo size
+    while IFS='|' read -r ceiling repo size; do
+        [[ "$repo" == "$want" ]] && { echo "$size"; return 0; }
+    done < <(_llamacpp_model_ladder)
+    echo 5000
+}
+
+# True when the repo is one of ours, so we can quote its size honestly.
+_llamacpp_repo_known() {
+    local want="$1" ceiling repo size
+    while IFS='|' read -r ceiling repo size; do
+        [[ "$repo" == "$want" ]] && return 0
+    done < <(_llamacpp_model_ladder)
+    return 1
+}
+
+# The largest ladder entry that fits in the free space we have.
+_llamacpp_repo_that_fits() {
+    local preferred="$1" free_mb="$2" headroom=1024
+    if (( free_mb >= $(_llamacpp_repo_size_mb "$preferred") + headroom )); then
+        echo "$preferred"; return 0
+    fi
+    local repos=() ceiling repo size
+    while IFS='|' read -r ceiling repo size; do
+        repos=("$repo" "${repos[@]}")     # biggest first
+    done < <(_llamacpp_model_ladder)
+    for repo in "${repos[@]}"; do
+        if (( free_mb >= $(_llamacpp_repo_size_mb "$repo") + headroom )); then
+            echo "$repo"; return 0
+        fi
+    done
+    echo ""; return 1
+}
+
+# The exact Q4_K_M file name inside a Hugging Face repo.
+#
+# Asked of the API rather than assembled from the repo name: uploaders are not
+# consistent about capitalisation or about which prefix survives (Meta-Llama
+# vs Llama), and a guessed name is a 404 after the user has already waited.
+_llamacpp_model_filename() {
+    local repo="$1" json
+    json=$(_bounded 45 curl -fsSL "${LLAMACPP_HF_API}/${repo}" 2>/dev/null) || return 1
+    printf '%s' "$json" | python3 -c '
+import json, sys
+
+try:
+    payload = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(1)
+
+names = [s.get("rfilename", "") for s in payload.get("siblings", [])]
+# Single-file GGUFs only: a name with a directory component is a split model
+# in these repos, and llama.cpp wants shard 1 of a set we did not download.
+names = [n for n in names if n.lower().endswith(".gguf") and "/" not in n]
+
+for wanted in ("q4_k_m", "q4_k_s", "q4_0"):
+    for name in sorted(names):
+        if wanted in name.lower():
+            print(name)
+            raise SystemExit(0)
+raise SystemExit(1)
+' 2>/dev/null
+}
+
+# Download one GGUF, resumably, with its progress visible.
+#
+# The path comes back in a global rather than on stdout: everything this
+# function says — the size, the "this is a download, not a hang" — would
+# otherwise be captured by the command substitution reading its output, and
+# the user would watch a silent screen for twenty minutes.
+_GATHM_LLAMACPP_MODEL_PATH=""
+_llamacpp_download_model() {
+    local repo="$1" filename dest url est_mb
+    _GATHM_LLAMACPP_MODEL_PATH=""
+    filename=$(_llamacpp_model_filename "$repo") || {
+        warn "Could not list the GGUF files in $repo"
+        return 1
+    }
+    mkdir -p "$LLAMACPP_MODELS_DIR" 2>/dev/null || true
+    dest="$LLAMACPP_MODELS_DIR/$filename"
+
+    if [[ -s "$dest" ]] && _llamacpp_is_gguf "$dest"; then
+        ok "Model already downloaded: $filename"
+        _GATHM_LLAMACPP_MODEL_PATH="$dest"
+        return 0
+    fi
+
+    url="${LLAMACPP_HF_RESOLVE}/${repo}/resolve/main/${filename}?download=true"
+    if _llamacpp_repo_known "$repo"; then
+        est_mb=$(_llamacpp_repo_size_mb "$repo")
+        info "Downloading ${BOLD}${filename}${RESET} — roughly ${est_mb} MB."
+    else
+        info "Downloading ${BOLD}${filename}${RESET} from ${repo}."
+    fi
+    info "Live progress follows. This is a download, not a hang."
+    echo ""
+
+    local t0=$SECONDS rc=0
+    # -C - resumes a part file: a dropped connection five gigabytes in should
+    # cost the remainder, not the whole thing.
+    curl -fL --progress-bar -C - -o "${dest}.part" "$url" || rc=$?
+    echo ""
+    if (( rc != 0 )); then
+        warn "Download failed after $(_format_elapsed $(( SECONDS - t0 ))) (exit $rc)"
+        warn "Resume it later by re-running ./install — the partial file is kept."
+        return 1
+    fi
+
+    # A gated or moved repo answers 200 with an HTML page, and curl saves it
+    # happily. The magic bytes are the only thing that tells them apart before
+    # llama-server fails with a parse error hours later.
+    if ! _llamacpp_is_gguf "${dest}.part"; then
+        warn "What downloaded is not a GGUF file — discarding it."
+        rm -f "${dest}.part" 2>/dev/null || true
+        return 1
+    fi
+
+    mv -f "${dest}.part" "$dest" 2>/dev/null || return 1
+    ok "Downloaded $filename in $(_format_elapsed $(( SECONDS - t0 )))"
+    _GATHM_LLAMACPP_MODEL_PATH="$dest"
+    return 0
+}
+
+# Every GGUF starts with the four bytes "GGUF".
+_llamacpp_is_gguf() {
+    local path="$1" magic
+    [[ -s "$path" ]] || return 1
+    magic=$(head -c 4 "$path" 2>/dev/null) || return 1
+    [[ "$magic" == "GGUF" ]]
+}
+
+# Any GGUF already on this machine, so a re-install never re-downloads.
+_llamacpp_existing_model() {
+    local candidate
+    for candidate in "$LLAMACPP_MODELS_DIR"/*.gguf; do
+        [[ -f "$candidate" ]] && _llamacpp_is_gguf "$candidate" && { echo "$candidate"; return 0; }
+    done
+    return 1
+}
+
+# Pick a model, make sure it fits, download it, and record the choice.
+select_and_download_llamacpp_model() {
+    local existing
+    if existing=$(_llamacpp_existing_model); then
+        ok "Using the model already on disk: $(basename "$existing")"
+        _llamacpp_save_config "$_GATHM_LLAMACPP_BIN" "$existing"
+        _save_model_config "$(_llamacpp_label_for "$existing")" "llamacpp"
+        return 0
+    fi
+
+    if [[ "$GATHM_ONLINE" != "true" ]]; then
+        warn "Offline and no GGUF on disk — Pilot will have no model to answer with."
+        note_missing "A local model (GGUF)" "re-run ./install while online"
+        return 1
+    fi
+
+    local repo; repo=$(_llamacpp_recommend_repo)
+    local ram_mb; ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] && (( ram_mb > 0 )); then
+        info "Hardware: ${ram_mb} MB RAM → ${repo}"
+    else
+        info "Could not detect RAM — defaulting to ${repo}"
+    fi
+
+    # Storage gate, same shape as the Ollama one: downgrade to what fits
+    # rather than starting a download that cannot finish.
+    # `|| true` on both: each reports "cannot tell" with a non-zero exit, and
+    # under `set -e` a bare assignment from one would abort the installer
+    # rather than fall through to the sensible default.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$LLAMACPP_MODELS_DIR") || true
+    if (( free_mb > 0 )); then
+        local fitted; fitted=$(_llamacpp_repo_that_fits "$repo" "$free_mb") || true
+        if [[ -z "$fitted" ]]; then
+            warn "Only ${free_mb} MB free — not enough for any model."
+            note_missing "A local model (GGUF)" "free up space, then re-run ./install"
+            return 1
+        fi
+        if [[ "$fitted" != "$repo" ]]; then
+            warn "Only ${free_mb} MB free — choosing ${fitted} instead of ${repo}"
+            repo="$fitted"
+        fi
+    fi
+
+    _llamacpp_download_model "$repo" || {
+        note_missing "A local model (GGUF)" "re-run ./install to resume the download"
+        return 1
+    }
+    local model="$_GATHM_LLAMACPP_MODEL_PATH"
+    [[ -n "$model" && -f "$model" ]] || return 1
+
+    _llamacpp_save_config "$_GATHM_LLAMACPP_BIN" "$model"
+    _save_model_config "$(_llamacpp_label_for "$model")" "llamacpp"
+    return 0
+}
+
+# The name a GGUF answers to: the file, without the extension.
+_llamacpp_label_for() {
+    local base; base=$(basename "$1")
+    echo "${base%.gguf}"
+}
+
 # --- Install Ollama (local LLM runtime) ---
 install_ollama() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
@@ -1456,6 +2047,16 @@ _pull_ollama_model() {
 #   3. $HOME/.gathm/model        (sticky choice from a previous run)
 #   4. _recommend_model_for_hardware (RAM-tier heuristic)
 select_and_pull_llm_model() {
+    # When llama.cpp is the runtime, the model is a GGUF file on disk rather
+    # than an Ollama tag, and the two ladders have nothing to say to each
+    # other. Only fall through to Ollama if the download could not happen.
+    if [[ -n "$_GATHM_LLAMACPP_BIN" ]]; then
+        if select_and_download_llamacpp_model; then
+            return 0
+        fi
+        warn "No GGUF model available — trying Ollama for the model instead"
+    fi
+
     if [[ "$GATHM_ONLINE" != "true" ]]; then
         warn "Offline — checking for already-pulled local models"
         _pull_ollama_model ""
@@ -3410,6 +4011,26 @@ verify() {
     local llm_backend="ollama"
     [[ -f "$HOME/.gathm/llm_backend" ]] && llm_backend=$(cat "$HOME/.gathm/llm_backend")
     case "$llm_backend" in
+        llamacpp)
+            local lc_bin=""
+            [[ -f "$HOME/.gathm/llamacpp_bin" ]] && lc_bin=$(cat "$HOME/.gathm/llamacpp_bin" 2>/dev/null)
+            if [[ -n "$lc_bin" && -x "$lc_bin" ]]; then
+                ok "LLM backend: llama.cpp ($lc_bin)"
+            else
+                warn "LLM backend: llama.cpp binary missing (optional — needed for Pilot AI)"
+                note_missing "llama.cpp runtime" "re-run ./install, or install llama.cpp and set GATHM_LLAMACPP_BIN"
+            fi
+            # The weights are the other half, and the one that takes an hour to
+            # replace — check the file is really there and really a GGUF.
+            local lc_model=""
+            [[ -f "$HOME/.gathm/llamacpp_model" ]] && lc_model=$(cat "$HOME/.gathm/llamacpp_model" 2>/dev/null)
+            if [[ -n "$lc_model" ]] && _llamacpp_is_gguf "$lc_model"; then
+                ok "LLM model: $(basename "$lc_model")"
+            else
+                warn "LLM model: no GGUF weights found"
+                note_missing "A local model (GGUF)" "re-run ./install to download one"
+            fi
+            ;;
         gemini)
             ok "LLM backend: Google Gemini (free tier)"
             if [[ -f "$HOME/.gathm/model" ]]; then
@@ -3738,12 +4359,12 @@ main() {
 
     # Visible step count. Termux has one extra step (storage permission),
     # which runs first so a permission-grant restart costs no real work.
-    # Steps: [storage] connectivity, python, deps, files, ollama, llm-model,
-    # pilot-deps, playwright, audio.cpp, shortcuts, verify.
+    # Steps: [storage] connectivity, python, deps, files, llama.cpp, ollama,
+    # llm-model, pilot-deps, playwright, audio.cpp, shortcuts, verify.
     if [[ "$platform" == "termux" ]]; then
-        _GATHM_TOTAL_STEPS=12
+        _GATHM_TOTAL_STEPS=13
     else
-        _GATHM_TOTAL_STEPS=11
+        _GATHM_TOTAL_STEPS=12
     fi
 
     # Termux storage permission FIRST: granting it can restart Termux, so we
@@ -3777,14 +4398,28 @@ main() {
     setup_files
     step_done "Files staged"
 
-    # Install Ollama + pull the best available model first.
-    # Pilot needs a running LLM to function, so we set up the AI runtime
-    # before installing Python deps — this also means the model is ready
-    # by the time Pilot starts for the first time.
-    # If Ollama cannot be installed, falls back to Google Gemini free tier.
+    # Set up the AI runtime before the Python dependencies: Pilot needs a
+    # model to function, and doing it here means the weights are on disk by
+    # the time Pilot starts for the first time.
+    #
+    # llama.cpp first. It is the engine Ollama wraps, and running it directly
+    # drops the wrapper's unload-on-idle (which makes every question after a
+    # break pay a full model load) and its fixed context/offload defaults.
+    step_begin "Installing llama.cpp (fast local LLM runtime)"
+    install_llamacpp "$platform" || true
+    # install_llamacpp emits step_done / step_skip / step_fail itself.
+
+    # Ollama remains the fallback: it is the verified path on Termux, and the
+    # answer when llama.cpp could not be installed. Downloading it as well on
+    # a machine where llama.cpp works costs the user ~700 MB for a second copy
+    # of the same engine, so that only happens when asked.
     step_begin "Installing Ollama (local LLM runtime)"
-    install_ollama "$platform"
-    # install_ollama emits step_done / step_skip / step_fail itself.
+    if [[ -n "$_GATHM_LLAMACPP_BIN" && "${GATHM_INSTALL_OLLAMA:-0}" != "1" ]]; then
+        step_skip "Ollama not needed — llama.cpp is the runtime (GATHM_INSTALL_OLLAMA=1 installs it anyway)"
+    else
+        install_ollama "$platform"
+        # install_ollama emits step_done / step_skip / step_fail itself.
+    fi
 
     step_begin "Selecting LLM model"
     select_and_pull_llm_model
@@ -3848,4 +4483,9 @@ main() {
     launch_post_install "$platform"
 }
 
-main "$@"
+# Sourcing this file to exercise one function should not run an install.
+# tests/llamacpp_install_test.sh sets GATHM_INSTALL_SOURCE_ONLY=1 and then calls
+# the model/asset resolvers directly.
+if [[ "${GATHM_INSTALL_SOURCE_ONLY:-0}" != "1" ]]; then
+    main "$@"
+fi

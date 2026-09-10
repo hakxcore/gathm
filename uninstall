@@ -78,6 +78,29 @@ done
 [[ -d "$PILOT_VENV"  ]] && echo "    • $PILOT_VENV  (Python venv)"  || echo "    • $PILOT_VENV  (not found — skip)"
 echo "    • PATH entry from shell RC files"
 
+# Call out the llama.cpp runtime and the model weights for the same reason as
+# audio.cpp below: both live inside DATA_DIR, and a GGUF can be twenty
+# gigabytes that took an hour to download. Nobody should discover that after
+# answering "y".
+LLAMACPP_DIR="${GATHM_LLAMACPP_DIR:-$DATA_DIR/llamacpp}"
+MODELS_DIR="${GATHM_LLAMACPP_MODEL_DIR:-$DATA_DIR/models}"
+_dir_size() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
+if [[ -d "$MODELS_DIR" ]]; then
+    if [[ "$MODELS_DIR" == "$DATA_DIR/"* ]]; then
+        echo -e "    • $MODELS_DIR  ${YELLOW}(model weights, $(_dir_size "$MODELS_DIR") — goes with $DATA_DIR)${RESET}"
+    else
+        echo -e "    ${GREEN}Kept:${RESET} $MODELS_DIR  (your own model directory)"
+    fi
+fi
+if [[ -d "$LLAMACPP_DIR" && "$LLAMACPP_DIR" == "$DATA_DIR/"* ]]; then
+    echo -e "    • $LLAMACPP_DIR  ${YELLOW}(llama.cpp runtime — goes with $DATA_DIR)${RESET}"
+fi
+# A llama.cpp installed by Homebrew or a package manager is the system's, not
+# ours; say so rather than leaving the user to wonder.
+if command -v llama-server &>/dev/null; then
+    echo -e "    ${GREEN}Kept:${RESET} $(command -v llama-server)  (installed outside Gathm)"
+fi
+
 # Call out the audio.cpp build explicitly: it is removed only as part of
 # DATA_DIR, and rebuilding it costs 20-60 min on a phone.
 if [[ -d "$AUDIOCPP_SRC" ]]; then
@@ -105,6 +128,14 @@ for s in "${SHORTCUTS[@]}"; do
         info "Skipping $s (not found)"
     fi
 done
+
+# ── Stop the model server before its weights disappear ────────────────
+# Deleting the GGUF out from under a running llama-server leaves a process
+# holding a deleted file and a port nothing explains.
+if [[ -f "$SCRIPT_DIR/lib/llamacpp.py" ]] && command -v python3 &>/dev/null; then
+    python3 "$SCRIPT_DIR/lib/llamacpp.py" stop >/dev/null 2>&1 \
+        && info "Stopped the llama.cpp server" || true
+fi
 
 # ── Remove data directory ─────────────────────────────────────────────
 if [[ -d "$DATA_DIR" ]]; then

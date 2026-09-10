@@ -54,6 +54,7 @@ jobs:
           python3 tests/macos_speech_test.py
           python3 tests/speech_stream_test.py
           python3 tests/reply_stream_test.py
+          python3 tests/llamacpp_test.py
 
       - name: JavaScript suites
         run: |
@@ -64,6 +65,12 @@ jobs:
 
       - name: Launcher suite
         run: bash tests/launcher_test.sh
+
+      # The llama.cpp half of the installer: which release archive it picks,
+      # which GGUF it picks, and what it does with what arrives. Runs against
+      # file:// fixtures, so it needs no network and downloads nothing.
+      - name: Installer llama.cpp suite
+        run: bash tests/llamacpp_install_test.sh
 
       - name: Installer self-check
         run: ./install --check

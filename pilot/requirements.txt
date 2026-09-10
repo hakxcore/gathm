@@ -5,6 +5,11 @@
 # have no prebuilt Android wheels and try to compile from source on Termux
 # (the numpy build hangs for a long time / never finishes). Keeping this
 # list minimal keeps the install fast and Termux-friendly.
+# langchain-openai is deliberately absent as well: the llama.cpp backend uses
+# it when it is there and falls back to lib/chat_openai_compat.py (standard
+# library + langchain-core) when it is not, and `openai`/`tiktoken` are Rust
+# extensions with the same Android wheel problem. `pip install gathm[openai]`
+# adds it on a machine that wants it.
 langchain-core
 langchain-ollama
 langgraph

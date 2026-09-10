@@ -55,10 +55,20 @@ except Exception:
     OLLAMA_MODEL = os.getenv("GATHM_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "gemma3:12b"))
     _llm_config = None
 
+# The name to show for the model, whichever backend answers. OLLAMA_MODEL kept
+# its name because it is read from several other modules; this is what new code
+# should use.
+LLM_MODEL = OLLAMA_MODEL
+
 PILOT_MAX_HISTORY = int(os.getenv("PILOT_MAX_HISTORY", "12"))
 
 def _build_llm():
-    """Instantiate the LangChain chat model via the unified LLM provider."""
+    """Instantiate the LangChain chat model via the unified LLM provider.
+
+    On the llama.cpp backend this also starts the server if it is not already
+    up — the provider does it, because the first question after a cold boot
+    should load the model rather than fail with a refused connection.
+    """
     if _llm_config is not None:
         return LLMProvider(_llm_config).langchain_chat_model()
     # Fallback if lib.llm failed to import
@@ -261,7 +271,9 @@ def print_tricolor_banner():
     """Print the full tricolor TUI welcome screen."""
     tool_count = len(discover_tools())
     plat = _detect_platform()
-    model_label = f"{OLLAMA_MODEL} [{LLM_BACKEND.upper()}]"
+    # "LLAMACPP" is not what anyone calls it.
+    backend_label = {"llamacpp": "LLAMA.CPP"}.get(LLM_BACKEND, LLM_BACKEND.upper())
+    model_label = f"{OLLAMA_MODEL} [{backend_label}]"
     connectivity = check_connectivity()
     # render_welcome handles os.system("clear") internally
     render_welcome(model_label, tool_count, plat, connectivity=connectivity)
@@ -295,7 +307,17 @@ def describe_agent_failure(exc: BaseException) -> str:
     if not refused:
         return "agent error: %s" % exc
 
-    backend = os.environ.get("GATHM_LLM_BACKEND", "ollama")
+    backend = LLM_BACKEND
+    if backend == "llamacpp":
+        url = (getattr(_llm_config, "base_url", None)
+               or os.environ.get("GATHM_LLAMACPP_BASE_URL")
+               or "http://127.0.0.1:8081/v1")
+        host = url.split("/v1")[0]
+        return (
+            "cannot reach the llama.cpp server at %s — it is not running, or the "
+            "model failed to load. Start it with:  gathm llm start  "
+            "(the log is in ~/.gathm/llamacpp.log)" % host
+        )
     if backend == "ollama":
         url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         host = url.split("/v1")[0]

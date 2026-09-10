@@ -43,5 +43,7 @@ Pilot resolves model in this order:
 ## Troubleshooting
 
 - Missing runtime libs: install `pilot/requirements.txt`
-- Model/API issues: confirm Ollama model is available locally
+- Model/API issues: check the local model server with `gathm llm status`
+  (`gathm llm start` loads it; `gathm llm log` says why it would not),
+  or confirm the Ollama model is pulled when that is the backend
 - Tool execution failures: check stderr and tool dependencies

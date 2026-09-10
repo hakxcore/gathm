@@ -130,6 +130,10 @@ PREFLIGHT_PY=""
 OLLAMA_AUTOSTART=1
 OLLAMA_PID_FILE="$GATHM_STATE_DIR/ollama.pid"
 OLLAMA_LOG="$GATHM_STATE_DIR/ollama.log"
+# Same switch, for the llama.cpp server. `gathm doctor` turns both off: its job
+# is to report, not to start half a gigabyte of weights loading.
+LLAMACPP_AUTOSTART=1
+LLAMACPP_LOG="$GATHM_STATE_DIR/llamacpp.log"
 
 # Advice has to match how Gathm got here. Telling a pipx user to run
 # `pip install -r pilot/requirements.txt` points them at a requirements file
@@ -173,9 +177,66 @@ ollama_root() {
     echo "$base"
 }
 
-llm_backend() { echo "${GATHM_LLM_BACKEND:-ollama}"; }
+# lib/llamacpp.py is the authority on where the llama.cpp server is, what it
+# would load and whether it is up. Shelling out to it — rather than
+# reimplementing the search in bash — is what keeps the launcher and Pilot from
+# ever disagreeing about the model, which is a class of bug this repo has
+# already paid for once with Ollama.
+#
+# Exit codes from `status`: 0 running, 1 installed but down, 2 not usable.
+llamacpp_cli() {
+    local py
+    py="${PREFLIGHT_PY:-}"
+    [[ -n "$py" ]] || py="$(pick_python)" || return 2
+    [[ -f "$INSTALL_DIR/lib/llamacpp.py" ]] || return 2
+    run_bounded "${GATHM_LLAMACPP_CLI_TIMEOUT:-20}" \
+        "$py" "$INSTALL_DIR/lib/llamacpp.py" "$@"
+}
+
+# The configured backend, from the same places lib/llm.py reads: the
+# environment, then the file the installer wrote, then whichever local runtime
+# is actually usable. Resolved once — the last step spawns Python, and
+# preflight asks three separate times.
+_LLM_BACKEND_CACHE=""
+llm_backend() {
+    [[ -n "$_LLM_BACKEND_CACHE" ]] && { echo "$_LLM_BACKEND_CACHE"; return 0; }
+
+    local resolved=""
+    case "${GATHM_LLM_BACKEND:-}" in
+        llamacpp|llama.cpp|llama-cpp) resolved="llamacpp" ;;
+        ollama|gemini|anthropic)      resolved="${GATHM_LLM_BACKEND}" ;;
+    esac
+
+    if [[ -z "$resolved" && -r "$GATHM_STATE_DIR/llm_backend" ]]; then
+        local stored
+        stored="$(tr -d '\r\n[:space:]' <"$GATHM_STATE_DIR/llm_backend" 2>/dev/null)"
+        case "$stored" in
+            llamacpp|ollama|gemini|anthropic) resolved="$stored" ;;
+        esac
+    fi
+
+    if [[ -z "$resolved" ]]; then
+        # Nothing configured: llama.cpp when it is installed with weights
+        # (status 0 = running, 1 = down but usable), Ollama otherwise.
+        local rc=0
+        llamacpp_cli status >/dev/null 2>&1 || rc=$?
+        if (( rc == 0 || rc == 1 )); then
+            resolved="llamacpp"
+        else
+            resolved="ollama"
+        fi
+    fi
+
+    _LLM_BACKEND_CACHE="$resolved"
+    echo "$resolved"
+}
 
 llm_model() {
+    if [[ "$(llm_backend)" == "llamacpp" ]]; then
+        local name
+        name="$(llamacpp_cli model 2>/dev/null | tail -1)"
+        [[ -n "$name" ]] && { echo "$name"; return 0; }
+    fi
     echo "${GATHM_OLLAMA_MODEL:-${OLLAMA_MODEL:-gemma3:12b}}"
 }
 
@@ -203,6 +264,30 @@ start_ollama() {
         ollama_responding 2 && return 0
     done
     return 1
+}
+
+# Starting the model server is a foreground wait on purpose: loading several
+# gigabytes takes as long as it takes, and a launcher that returned early would
+# hand Pilot a server that 503s on the first question.
+start_llamacpp() {
+    mkdir -p "$GATHM_STATE_DIR" 2>/dev/null || true
+    local py
+    py="${PREFLIGHT_PY:-}"
+    [[ -n "$py" ]] || py="$(pick_python)" || return 1
+    "$py" "$INSTALL_DIR/lib/llamacpp.py" start >>"$LLAMACPP_LOG" 2>&1
+}
+
+# Only ever stops a server Gathm started — lib/llamacpp.py checks its own pid
+# file, so one you started by hand in another terminal is left alone.
+stop_llamacpp() {
+    [[ -f "$INSTALL_DIR/lib/llamacpp.py" ]] || return 0
+    [[ -f "$GATHM_STATE_DIR/llamacpp.pid" ]] || return 0
+    local out
+    out="$(llamacpp_cli stop 2>/dev/null | tail -1)"
+    case "$out" in
+        stopped*) echo -e "${GREEN}[+]${RESETBG} llama.cpp server ${out} — Gathm had started it." ;;
+    esac
+    return 0
 }
 
 check_python() {
@@ -300,9 +385,68 @@ PY
     return 0
 }
 
+# llama.cpp: the fast local path. Everything the check needs is one call to
+# lib/llamacpp.py, which reports through its exit code:
+#   0  a server is up and answering
+#   1  installed, with weights, but nothing listening
+#   2  no binary or no model — nothing to start
+check_llamacpp() {
+    local out rc=0
+    # No pipeline around the call: a `| tail -1` would hand back tail's exit
+    # status, and the status code IS the answer here — that is how "not
+    # installed" first got reported as a tick.
+    out="$(llamacpp_cli status 2>/dev/null)" || rc=$?
+    out="${out##*$'\n'}"
+
+    if (( rc == 0 )); then
+        pf_ok "llama.cpp  ${out#running }"
+        return 0
+    fi
+
+    if (( rc >= 2 )); then
+        # Distinguish "no runtime" from "no weights": the fixes are different
+        # and the message is the only thing the user has to go on.
+        case "$out" in
+            *"not installed"*)
+                pf_warn "llama.cpp is not installed — Pilot cannot answer questions" \
+                        "Install it with: $(setup_advice)" ;;
+            *"no GGUF"*)
+                pf_warn "No local model found — Pilot cannot answer questions" \
+                        "Download one with: $(setup_advice)" ;;
+            *)
+                pf_warn "llama.cpp is not usable — Pilot cannot answer questions" \
+                        "${out:-Run: $(setup_advice)}" ;;
+        esac
+        return 1
+    fi
+
+    if (( LLAMACPP_AUTOSTART )); then
+        echo -e "  ${ORANGE}·${RESETBG} llama.cpp is not running — starting it (the model has to load)..."
+        if start_llamacpp; then
+            pf_ok "llama.cpp  started at $(llamacpp_cli url 2>/dev/null | tail -1)"
+            return 0
+        fi
+        pf_warn "llama.cpp would not start — Pilot cannot answer questions" \
+                "Start it yourself with: gathm llm start   (log: $GATHM_STATE_DIR/llamacpp.log)"
+        return 1
+    fi
+
+    pf_warn "llama.cpp is not running at $(llamacpp_cli url 2>/dev/null | tail -1)" \
+            "Start it with: gathm llm start"
+    return 1
+}
+
 check_llm() {
     local backend model
     backend="$(llm_backend)"
+
+    # Before llm_model: on llama.cpp the name comes from lib/llamacpp.py, which
+    # check_llamacpp is about to ask anyway.
+    if [[ "$backend" == "llamacpp" ]]; then
+        check_llamacpp
+        return $?
+    fi
+
     model="$(llm_model)"
 
     if [[ "$backend" != "ollama" ]]; then
@@ -595,6 +739,7 @@ cmd_gui() {
 cmd_doctor() {
     parse_launch_flags "$@"
     OLLAMA_AUTOSTART=0          # reporting is the job here, not fixing
+    LLAMACPP_AUTOSTART=0
     echo ""
     echo -e "${BOLD}${GREEN}Gathm v$currentVersion${RESETBG}"
     echo ""
@@ -608,6 +753,58 @@ cmd_doctor() {
     return $status
 }
 
+# `gathm llm ...`: drive the local model server by hand. Useful when you want
+# the weights loaded before you need them (the first question after a cold
+# start is the slow one), or when something is wrong and you want the log.
+cmd_llm() {
+    local sub="${1:-status}"
+    shift || true
+
+    local backend; backend="$(llm_backend)"
+    if [[ "$backend" != "llamacpp" ]]; then
+        case "$sub" in
+            status)
+                echo "LLM backend: $backend (model: $(llm_model))"
+                echo "'gathm llm' manages the llama.cpp server; this install uses $backend."
+                return 0
+                ;;
+            *)
+                echo "This install uses the '$backend' backend, which Gathm does not start." >&2
+                echo "Switch with: echo llamacpp > $GATHM_STATE_DIR/llm_backend" >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    if [[ ! -f "$INSTALL_DIR/lib/llamacpp.py" ]]; then
+        echo -e "${RED}lib/llamacpp.py is missing — re-run the installer: $(setup_advice)${RESETBG}" >&2
+        return 1
+    fi
+
+    local py
+    py="$(pick_python)" || {
+        echo -e "${RED}Python 3 not found — cannot manage the model server.${RESETBG}" >&2
+        return 1
+    }
+
+    case "$sub" in
+        start|stop|restart|status|doctor|url|model|command)
+            "$py" "$INSTALL_DIR/lib/llamacpp.py" "$sub" "$@"
+            return $?
+            ;;
+        log|logs)
+            local log="$GATHM_STATE_DIR/llamacpp.log"
+            [[ -f "$log" ]] || { echo "No log yet at $log"; return 0; }
+            tail -n "${1:-40}" "$log"
+            return 0
+            ;;
+        *)
+            echo "Usage: gathm llm {status|start|stop|restart|doctor|url|model|log}" >&2
+            return 64
+            ;;
+    esac
+}
+
 # Unified command help
 show_help() {
     cat <<EOF
@@ -617,8 +814,10 @@ Usage:
   gathm                          Start the web GUI in your browser and Pilot here
   gathm tui                      Pilot only (no GUI server, no browser)
   gathm gui                      GUI server + browser only (no Pilot)
-  gathm doctor                   Check your setup: Python, deps, Ollama, model
-  gathm stop                     Stop the GUI server Gathm started
+  gathm doctor                   Check your setup: Python, deps, the LLM, model
+  gathm llm <cmd>                Manage the local llama.cpp server
+                                 (status|start|stop|restart|doctor|url|model|log)
+  gathm stop                     Stop the GUI server (and the LLM Gathm started)
   gathm <agent-command> [...]    Run orchestrator command (run/ask/plan/...)
   gathm <tool> [args...]         Shortcut for: gathm run <tool> [args...]
 
@@ -633,6 +832,7 @@ Examples:
   gathm --no-browser
   gathm tui
   gathm gui --port 9090
+  gathm llm start                Load the model now, so the first question is fast
   gathm ask "weather in Tokyo"
   gathm run dns -t MX gmail.com
   gathm weather "Paris"
@@ -702,8 +902,14 @@ main() {
             ;;
         stop)
             stop_gui
+            stop_llamacpp
             stop_ollama
             return 0
+            ;;
+        llm)
+            shift
+            cmd_llm "$@"
+            return $?
             ;;
         help|-h|--help)
             show_help

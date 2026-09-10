@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "hakxcore" }]
-keywords = ["cli", "security", "networking", "llm", "ollama", "termux", "agent"]
+keywords = ["cli", "security", "networking", "llm", "llama.cpp", "ollama", "termux", "agent"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
@@ -49,6 +49,14 @@ gui = [
 # Page automation for the `browser` tool. A large download, and useless on a
 # phone, so it is never implied.
 browser = ["playwright"]
+# The official OpenAI client for the llama.cpp backend. Optional on purpose:
+# langchain-openai pulls in `openai` and `tiktoken`, which are Rust extensions
+# with no Android wheels — the same trap that keeps langchain-community out of
+# the base list. Without it Gathm talks to llama-server through
+# lib/chat_openai_compat.py, which is standard library plus langchain-core and
+# covers everything Pilot asks of a chat model. Install this if you want
+# tool-calling support from the OpenAI client itself.
+openai = ["langchain-openai"]
 all = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",

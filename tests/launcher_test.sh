@@ -21,6 +21,9 @@ cp "$REPO/lib/utils.bash" "$FIX/lib/utils.bash"
 for f in logging.bash schema.bash deps.bash health.bash recovery.bash; do
     [[ -f "$REPO/lib/$f" ]] && cp "$REPO/lib/$f" "$FIX/lib/$f"
 done
+# The launcher asks lib/llamacpp.py where the model server is; without it the
+# llama.cpp checks below would exercise the "module missing" path instead.
+cp "$REPO/lib/llamacpp.py" "$FIX/lib/llamacpp.py"
 cat > "$FIX/pilot/run.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "PILOT_STARTED args=$*"
@@ -202,6 +205,90 @@ check "a missing model is reported"    "$out" "is not pulled"
 check "with the pull command"          "$out" "ollama pull qwen2.5:72b"
 check "and what is actually installed" "$out" "llama3.2:3b"
 kill $FAKE_PID 2>/dev/null
+
+echo "== llama.cpp backend =="
+# A fake llama-server: a Python HTTP server answering /health and /v1/models
+# the way llama.cpp does. Enough to prove the launcher starts it, sees it, and
+# stops the one it started.
+mkdir -p "$FIX/models" "$FIX/bin"
+cat > "$FIX/stub_llama.py" <<'STUB'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/health": self._send(200, {"status": "ok"})
+        elif self.path.startswith("/v1/models"): self._send(200, {"data": [{"id": "stub-gguf"}]})
+        else: self._send(404, {})
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+STUB
+cat > "$FIX/bin/llama-server" <<'STUB'
+#!/usr/bin/env python3
+import subprocess, sys
+args = sys.argv[1:]
+port = "8081"
+for i, value in enumerate(args):
+    if value == "--port":
+        port = args[i + 1]
+raise SystemExit(subprocess.call([sys.executable, sys.argv[0] + ".stub", port]))
+STUB
+cp "$FIX/stub_llama.py" "$FIX/bin/llama-server.stub"
+chmod +x "$FIX/bin/llama-server"
+printf 'GGUF\x03\x00\x00\x00' > "$FIX/models/stub-gguf.gguf"
+
+LLM_PORT=$(( 8700 + RANDOM % 200 ))
+llm_env() {
+    HOME="$FIX/home" GATHM_GUI_PORT="$PORT"     GATHM_CONFIG_DIR="$FIX/home/.gathm"     GATHM_LLAMACPP_BIN="$FIX/bin/llama-server"     GATHM_LLAMACPP_MODEL_DIR="$FIX/models"     GATHM_LLAMACPP_PORT="$LLM_PORT"     timeout 60 bash "$FIX/gathm" "$@" 2>&1
+}
+
+# An installed-but-stopped server is a warning with a command to fix it, not a
+# refusal — and doctor must not start half a gigabyte of weights loading.
+out=$(llm_env doctor)
+check "doctor picks llama.cpp when it is installed" "$out" "llama.cpp"
+check "and says it is not running"                  "$out" "not running"
+check "with the command that starts it"             "$out" "gathm llm start"
+absent "doctor starts nothing"                      "$out" "listening at"
+
+out=$(llm_env llm start)
+check "gathm llm start brings it up" "$out" "listening at"
+out=$(llm_env llm status)
+check "and status sees it"           "$out" "running"
+check "naming the served model"      "$out" "stub-gguf"
+
+out=$(llm_env doctor)
+check "doctor reports a running server" "$out" "llama.cpp"
+absent "and no longer warns"            "$out" "not running"
+
+out=$(llm_env stop)
+check "gathm stop stops the model server" "$out" "llama.cpp server stopped"
+
+# The launcher starts it when a real run needs it, unlike doctor.
+out=$(llm_env --no-browser --no-gui)
+check "a launch starts the model server" "$out" "PILOT_STARTED"
+check "and says where it is"             "$out" "llama.cpp"
+llm_env stop >/dev/null 2>&1
+
+# Nothing installed: a warning that names the fix, and Gathm still starts.
+out=$(HOME="$FIX/home" GATHM_GUI_PORT="$PORT" GATHM_CONFIG_DIR="$FIX/home/.gathm"       GATHM_LLM_BACKEND=llamacpp GATHM_LLAMACPP_BIN="$FIX/nope"       GATHM_LLAMACPP_MODEL_DIR="$FIX/empty"       timeout 60 bash "$FIX/gathm" --no-browser --no-gui 2>&1)
+check "a missing runtime is a warning"    "$out" "llama.cpp is not installed"
+check "and Gathm still starts"            "$out" "PILOT_STARTED"
+
+# Installed, but no weights — a different problem with a different fix.
+out=$(HOME="$FIX/home" GATHM_GUI_PORT="$PORT" GATHM_CONFIG_DIR="$FIX/home/.gathm"       GATHM_LLM_BACKEND=llamacpp GATHM_LLAMACPP_BIN="$FIX/bin/llama-server"       GATHM_LLAMACPP_MODEL_DIR="$FIX/empty"       timeout 60 bash "$FIX/gathm" doctor 2>&1)
+check "missing weights are reported separately" "$out" "No local model found"
+
+# ~/.gathm/llm_backend is what the installer writes, and it has to be read.
+mkdir -p "$FIX/home/.gathm"
+echo ollama > "$FIX/home/.gathm/llm_backend"
+out=$(llm_env doctor)
+check "a configured backend wins over detection" "$out" "Ollama"
+absent "and llama.cpp is not consulted"          "$out" "llama.cpp"
+rm -f "$FIX/home/.gathm/llm_backend"
 
 echo "== symlinked launcher =="
 ln -s "$FIX/gathm" "$FIX/home/gathm-link"
