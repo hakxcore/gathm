@@ -253,6 +253,20 @@ def model_label(model: Path | None = None) -> str:
     model = model or resolve_model()
     if model is None:
         return "no-model"
+
+    # Weights adopted from Ollama's blob store are named by content hash:
+    # "sha256-ab34…" is a true file name and a useless label. The installer
+    # wrote the tag it came from to ~/.gathm/model, so use that instead.
+    if model.name.startswith("sha256-"):
+        pointer = state_dir() / "model"
+        try:
+            recorded = pointer.read_text(encoding="utf-8").strip()
+        except OSError:
+            recorded = ""
+        if recorded:
+            return recorded
+        return "local-gguf"
+
     stem = model.name
     for suffix in (".gguf",):
         if stem.endswith(suffix):

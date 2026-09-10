@@ -156,7 +156,11 @@ _detect_total_ram_mb() { echo "$FAKE_RAM"; }
 FAKE_RAM=2048;  contains "2 GB gets the 1B model"  "$(_llamacpp_recommend_repo)" "Llama-3.2-1B"
 FAKE_RAM=6000;  contains "6 GB gets the 3B model"  "$(_llamacpp_recommend_repo)" "Llama-3.2-3B"
 FAKE_RAM=12000; contains "12 GB gets the 8B model" "$(_llamacpp_recommend_repo)" "8B"
-FAKE_RAM=24000; contains "24 GB gets the 14B model" "$(_llamacpp_recommend_repo)" "14B"
+# 16 GB is the row that matters on a Mac: the 14B would not fit under the
+# GPU's share of unified memory once the KV cache is allocated.
+FAKE_RAM=16384; contains "16 GB gets the 8B model, not the 14B" \
+    "$(_llamacpp_recommend_repo)" "8B"
+FAKE_RAM=32000; contains "32 GB gets the 14B model" "$(_llamacpp_recommend_repo)" "14B"
 FAKE_RAM=64000; contains "64 GB gets the 32B model" "$(_llamacpp_recommend_repo)" "32B"
 FAKE_RAM=0;     contains "unknown RAM is cautious"  "$(_llamacpp_recommend_repo)" "3B"
 

@@ -632,11 +632,18 @@ the installer picks one by RAM and downloads it from Hugging Face:
 |---|---|---|
 | under 4 GB | Llama 3.2 1B Instruct | ~0.8 GB |
 | 4–8 GB | Llama 3.2 3B Instruct | ~2 GB |
-| 8–16 GB | Llama 3.1 8B Instruct | ~5 GB |
-| 16–32 GB | Qwen 2.5 14B Instruct | ~9 GB |
-| 32 GB and up | Qwen 2.5 32B Instruct | ~20 GB |
+| 8–24 GB | Llama 3.1 8B Instruct | ~5 GB |
+| 24–48 GB | Qwen 2.5 14B Instruct | ~9 GB |
+| 48 GB and up | Qwen 2.5 32B Instruct | ~20 GB |
 
-All Q4_K_M — the size/quality knee for these models. If the disk cannot hold
+The tiers are deliberately more conservative than the Ollama ladder: a model
+has to leave room for its KV cache, and on Apple silicon the GPU addresses only
+about 70% of unified memory — so a 16 GB Mac gets the 8B, not the 14B.
+
+All Q4_K_M — the size/quality knee for these models. A model already pulled by
+Ollama is reused rather than downloaded again when there is no room for a fresh
+one: Ollama stores its model layer as an unmodified GGUF, so `llama-server`
+reads it straight out of the blob store. If the disk cannot hold
 the choice, the installer steps down the ladder rather than starting a download
 that cannot finish; an interrupted download resumes on the next `./install`;
 and what arrives is checked for the GGUF magic bytes, because a moved or gated

@@ -206,6 +206,22 @@ def main() -> int:
         check("labelled without the extension",
               llamacpp.model_label(llamacpp.resolve_model()), "small")
 
+        # Weights adopted from Ollama's blob store are named by content hash.
+        # "sha256-ab34…" is the real file name and a useless thing to show a
+        # user or to send as the model id, so the tag the installer recorded
+        # stands in for it.
+        reset_env()
+        blob = workspace / "state" / "blobs"
+        blob.mkdir(parents=True, exist_ok=True)
+        blob_file = blob / ("sha256-" + "ab" * 32)
+        blob_file.write_bytes(b"GGUF" + b"\x00" * 64)
+        (workspace / "state" / "model").write_text("llama3.2:3b\n")
+        check("an Ollama blob is labelled by its tag",
+              llamacpp.model_label(blob_file), "llama3.2:3b")
+        (workspace / "state" / "model").unlink()
+        check("and falls back to something sane without one",
+              llamacpp.model_label(blob_file), "local-gguf")
+
         reset_env()
         pointer = workspace / "state" / "llamacpp_model"
         pointer.write_text(str(models / "small.gguf"))

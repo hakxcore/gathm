@@ -1329,13 +1329,20 @@ install_llamacpp() {
 # the fp16 model on instruction following, and small enough that the whole
 # thing fits in RAM alongside a browser.
 #
+# The tiers are more conservative than the Ollama ladder above them, and the
+# 16 GB row is why: a 9 GB model leaves nothing for the KV cache on a machine
+# with 16 GB, and on Apple silicon it is worse than that — the GPU can address
+# roughly 70% of unified memory, so ~11 GB is the real ceiling and a 9 GB model
+# plus context does not fit under it. 16 GB therefore gets the 8B (5 GB), and
+# the 14B starts where there is room to run it.
+#
 # Each row: RAM ceiling in MB | Hugging Face repo | approximate MB on disk.
 _llamacpp_model_ladder() {
     cat <<'LADDER'
 4096|bartowski/Llama-3.2-1B-Instruct-GGUF|850
 8192|bartowski/Llama-3.2-3B-Instruct-GGUF|2100
-16384|bartowski/Meta-Llama-3.1-8B-Instruct-GGUF|5000
-32768|bartowski/Qwen2.5-14B-Instruct-GGUF|9100
+24576|bartowski/Meta-Llama-3.1-8B-Instruct-GGUF|5000
+49152|bartowski/Qwen2.5-14B-Instruct-GGUF|9100
 999999|bartowski/Qwen2.5-32B-Instruct-GGUF|20000
 LADDER
 }
@@ -1503,6 +1510,92 @@ _llamacpp_existing_model() {
     return 1
 }
 
+# A model already pulled by Ollama, served straight to llama.cpp.
+#
+# Ollama stores the model layer as an UNMODIFIED GGUF in its blob store, so
+# weights that are already on disk do not need downloading a second time into a
+# different directory. On a machine with no room for a fresh 5 GB download and
+# a perfectly good 2 GB model already pulled, this is the difference between a
+# working install and a note telling the user to free up space.
+#
+#   ~/.ollama/models/manifests/<registry>/<namespace>/<name>/<tag>
+#     is a JSON manifest; the layer with mediaType
+#     application/vnd.ollama.image.model names the blob by digest, and
+#   ~/.ollama/models/blobs/sha256-<hex>
+#     is the GGUF itself.
+#
+# Prints "PATH<TAB>LABEL". $1, if given, is the tag to prefer (name:tag);
+# otherwise the largest model on disk wins.
+#
+# Caveat worth knowing: Ollama keeps the chat template in a separate layer,
+# while llama.cpp reads the one embedded in the GGUF metadata. Library models
+# carry theirs, so --jinja finds it — but one that does not will fall back to
+# llama.cpp's generic prompt and answer a little worse.
+_llamacpp_ollama_blob() {
+    local want="${1:-}"
+    local root="${OLLAMA_MODELS:-$HOME/.ollama/models}"
+    [[ -d "$root/manifests" ]] || return 1
+    GATHM_OLLAMA_ROOT="$root" GATHM_WANT_TAG="$want" python3 - <<'BLOBPY' 2>/dev/null
+import json, os, pathlib
+
+root = pathlib.Path(os.environ["GATHM_OLLAMA_ROOT"])
+want = (os.environ.get("GATHM_WANT_TAG") or "").strip()
+manifests = root / "manifests"
+
+candidates = []
+for manifest in manifests.rglob("*"):
+    if not manifest.is_file():
+        continue
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        continue
+    digest = ""
+    for layer in data.get("layers") or []:
+        if str(layer.get("mediaType", "")).endswith(".image.model"):
+            digest = str(layer.get("digest", ""))
+            break
+    if not digest:
+        continue
+    blob = root / "blobs" / digest.replace(":", "-")
+    try:
+        if not blob.is_file():
+            continue
+        with open(blob, "rb") as handle:
+            if handle.read(4) != b"GGUF":
+                continue
+        size = blob.stat().st_size
+    except OSError:
+        continue
+    parts = manifest.relative_to(manifests).parts
+    label = "%s:%s" % (parts[-2], parts[-1]) if len(parts) >= 2 else manifest.name
+    candidates.append((label == want, size, str(blob), label))
+
+if not candidates:
+    raise SystemExit(1)
+# The tag the user already chose wins; failing that, the biggest model there.
+candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+print("%s\t%s" % (candidates[0][2], candidates[0][3]))
+BLOBPY
+}
+
+# Adopt an Ollama blob as this install's model. Returns 1 when there is none.
+_llamacpp_adopt_ollama_model() {
+    local want="" resolved path label
+    [[ -s "$HOME/.gathm/model" ]] && \
+        want=$(head -n 1 "$HOME/.gathm/model" 2>/dev/null | tr -d '\r\n[:space:]')
+    resolved=$(_llamacpp_ollama_blob "$want") || return 1
+    [[ -n "$resolved" ]] || return 1
+    path="${resolved%%$'\t'*}"
+    label="${resolved##*$'\t'}"
+    [[ -f "$path" ]] || return 1
+    ok "Reusing the model Ollama already pulled: ${label}"
+    info "llama.cpp reads it out of Ollama's blob store — no second download."
+    _llamacpp_save_config "$_GATHM_LLAMACPP_BIN" "$path"
+    _save_model_config "$label" "llamacpp"
+    return 0
+}
+
 # Pick a model, make sure it fits, download it, and record the choice.
 select_and_download_llamacpp_model() {
     local existing
@@ -1514,6 +1607,7 @@ select_and_download_llamacpp_model() {
     fi
 
     if [[ "$GATHM_ONLINE" != "true" ]]; then
+        _llamacpp_adopt_ollama_model && return 0
         warn "Offline and no GGUF on disk — Pilot will have no model to answer with."
         note_missing "A local model (GGUF)" "re-run ./install while online"
         return 1
@@ -1536,7 +1630,10 @@ select_and_download_llamacpp_model() {
     if (( free_mb > 0 )); then
         local fitted; fitted=$(_llamacpp_repo_that_fits "$repo" "$free_mb") || true
         if [[ -z "$fitted" ]]; then
-            warn "Only ${free_mb} MB free — not enough for any model."
+            warn "Only ${free_mb} MB free — not enough to download a model."
+            # Nothing to download does not mean nothing to run: weights already
+            # pulled by Ollama are a GGUF sitting on this disk already.
+            _llamacpp_adopt_ollama_model && return 0
             note_missing "A local model (GGUF)" "free up space, then re-run ./install"
             return 1
         fi
@@ -2097,7 +2194,7 @@ select_and_pull_llm_model() {
 
     if [[ -z "$recommended" ]]; then
         local ram_mb
-        ram_mb=$(_detect_total_ram_mb)
+        ram_mb=$(_detect_total_ram_mb) || true
         recommended=$(_recommend_model_for_hardware)
         if (( ram_mb > 0 )); then
             info "Hardware: ${ram_mb} MB RAM detected → ${recommended}"
@@ -2120,9 +2217,15 @@ select_and_pull_llm_model() {
     fi
 
     local models_dir="${OLLAMA_MODELS:-$HOME/.ollama/models}"
-    local free_mb; free_mb=$(_detect_free_disk_mb "$models_dir")
+    # `|| true` on both, and it is not decoration. Each of these reports "I
+    # cannot tell" / "nothing fits" with a non-zero exit, and under `set -e` a
+    # bare assignment from one aborts the whole installer on the spot — which
+    # is exactly what happened on a Mac with 1.6 GB free: the run died here,
+    # mid-step, having printed nothing about why, and never reached the Pilot
+    # dependencies, Playwright, the speech runtime or verification.
+    local free_mb; free_mb=$(_detect_free_disk_mb "$models_dir") || true
     if (( free_mb > 0 )); then
-        local fitted; fitted=$(_largest_model_that_fits "$recommended" "$free_mb")
+        local fitted; fitted=$(_largest_model_that_fits "$recommended" "$free_mb") || true
         if [[ -z "$fitted" ]]; then
             local smallest_mb; smallest_mb=$(_model_size_mb "gemma3:1b")
             if [[ -n "$pulled_models" ]]; then
@@ -4054,7 +4157,7 @@ verify() {
                 else
                     warn "LLM model '$want_model' not downloaded yet"
                     # If the shortfall is storage, say so and adjust the fix hint.
-                    local _free_mb; _free_mb=$(_detect_free_disk_mb "${OLLAMA_MODELS:-$HOME/.ollama/models}")
+                    local _free_mb; _free_mb=$(_detect_free_disk_mb "${OLLAMA_MODELS:-$HOME/.ollama/models}") || true
                     if (( _free_mb > 0 && _free_mb < $(_model_size_mb "$want_model") + 1024 )); then
                         note_missing "Ollama model $want_model (only ${_free_mb} MB free)" \
                             "free up storage, then: ollama pull $want_model"
