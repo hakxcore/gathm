@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from typing import Any, Iterator
+from typing import Any, Iterator, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -63,10 +63,17 @@ def _as_text(content: Any) -> str:
 class ChatOpenAICompatible(BaseChatModel):
     """Chat model for any server that speaks OpenAI's chat completions API."""
 
+    # Spelled Optional[int], not `int | None`, and that is not a style choice.
+    # These are pydantic fields, and pydantic resolves their annotations at
+    # class-creation time — unlike a dataclass, which leaves the strings alone.
+    # `from __future__ import annotations` defers the evaluation but does not
+    # change what it evaluates to, so on Python 3.9 (which is what macOS ships,
+    # and the floor this project declares) `eval("int | None")` raises and the
+    # module fails to import.
     base_url: str
     model: str
     temperature: float = 0.7
-    max_tokens: int | None = None
+    max_tokens: Optional[int] = None
     timeout: float = 300.0
     api_key: str = "gathm-local"
 
@@ -75,8 +82,8 @@ class ChatOpenAICompatible(BaseChatModel):
         return "gathm-openai-compatible"
 
     # ------------------------------------------------------------------
-    def _payload(self, messages: list[BaseMessage], stream: bool,
-                 stop: list[str] | None) -> dict:
+    def _payload(self, messages: List[BaseMessage], stream: bool,
+                 stop: Optional[List[str]]) -> dict:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": _role_of(m), "content": _as_text(m.content)}
@@ -101,8 +108,8 @@ class ChatOpenAICompatible(BaseChatModel):
         return urllib.request.urlopen(request, timeout=self.timeout)
 
     # ------------------------------------------------------------------
-    def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None,
-                  run_manager: CallbackManagerForLLMRun | None = None,
+    def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None,
+                  run_manager: Optional[CallbackManagerForLLMRun] = None,
                   **kwargs: Any) -> ChatResult:
         with self._request(self._payload(messages, False, stop)) as response:
             data = json.loads(response.read().decode("utf-8", "replace"))
@@ -116,8 +123,8 @@ class ChatOpenAICompatible(BaseChatModel):
                           llm_output={"usage": data.get("usage", {}),
                                       "model": data.get("model", self.model)})
 
-    def _stream(self, messages: list[BaseMessage], stop: list[str] | None = None,
-                run_manager: CallbackManagerForLLMRun | None = None,
+    def _stream(self, messages: List[BaseMessage], stop: Optional[List[str]] = None,
+                run_manager: Optional[CallbackManagerForLLMRun] = None,
                 **kwargs: Any) -> Iterator[ChatGenerationChunk]:
         with self._request(self._payload(messages, True, stop)) as response:
             for raw in response:
