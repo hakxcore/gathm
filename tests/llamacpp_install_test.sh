@@ -207,6 +207,110 @@ printf 'not a zip' > "$FIX/broken.zip"
 _llamacpp_unpack "$FIX/broken.zip" "$FIX/unpacked2" >/dev/null 2>&1
 check "a corrupt archive is rejected" "$?" "1"
 
+echo "== the distro package =="
+# Preferred over the download on Linux, so the cases that matter are: it is
+# used when the package is really there, and it gets out of the way quietly
+# when it is not (a wrong or renamed package name must cost nothing).
+check "apt is detected here" "$(_llamacpp_package_manager)" "apt"
+contains "with the Debian package name" "$(_llamacpp_package_candidates apt)" "llama.cpp-tools"
+
+# The probe has to be real: a package that exists answers yes, one that does
+# not answers no. coreutils stands in for "definitely installed".
+_llamacpp_package_exists apt coreutils
+check "a real package probes true" "$?" "0"
+_llamacpp_package_exists apt gathm-not-a-real-package
+check "an absent package probes false" "$?" "1"
+
+# The success path, with the manager stubbed at _bounded — NOT at apt-get.
+# The installer runs the package manager through `timeout env apt-get`, which
+# resolves the real binary and walks straight past a shell function of that
+# name. Anything that is not the package manager still really runs, because
+# _llamacpp_binary_runs goes through _bounded too and a stub that answered 0
+# for everything would turn its smoke test into a lie.
+mkdir -p "$FIX/pkgbin"
+# Keep the real _bounded so it can be put back verbatim afterwards. Re-sourcing
+# the installer would also restore its ok()/warn(), which are the names this
+# suite uses for its own PASS counter — the counter silently stopped counting.
+_ORIG_BOUNDED="$(declare -f _bounded)"
+_llamacpp_package_exists() { return 0; }
+_pkg_installs() {
+    printf '#!/bin/sh\necho "version: distro"\n' > "$FIX/pkgbin/llama-server"
+    chmod +x "$FIX/pkgbin/llama-server"
+}
+_pkg_installs_broken() {
+    printf '#!/nonexistent/loader\n' > "$FIX/pkgbin/llama-server"
+    chmod +x "$FIX/pkgbin/llama-server"
+}
+_bounded() {
+    shift
+    case "$*" in
+        *apt-get*|*pacman*|*dnf*|*zypper*) $_PKG_ACTION; return "$_PKG_RC" ;;
+        *) "$@" ;;
+    esac
+}
+_PKG_ACTION=_pkg_installs
+_PKG_RC=0
+LLAMACPP_BIN_DIR="$FIX/pkgbin"
+
+_llamacpp_install_via_package_manager >/dev/null 2>&1
+check "a distro package is adopted" "$?" "0"
+check "and it is the binary we found" "$(_llamacpp_existing_bin)" "$FIX/pkgbin/llama-server"
+
+# A package that installs but ships no llama-server (some distros split the
+# server out) must fall through rather than report success.
+rm -f "$FIX/pkgbin/llama-server"
+_PKG_ACTION=true
+_llamacpp_install_via_package_manager >/dev/null 2>&1
+check "a package without llama-server falls through" "$?" "1"
+
+# And one whose binary cannot execute — the trap the prebuilt archives fall
+# into on an old glibc, which a distro package is supposed to avoid.
+_PKG_ACTION=_pkg_installs_broken
+_llamacpp_install_via_package_manager >/dev/null 2>&1
+check "a package whose binary will not run falls through" "$?" "1"
+rm -f "$FIX/pkgbin/llama-server"
+
+# The install command itself failing (no network, held packages, a missing
+# sudo password) is not a reason to stop: the download path is still there.
+_PKG_ACTION=true; _PKG_RC=1
+_llamacpp_install_via_package_manager >/dev/null 2>&1
+check "a failed package install falls through" "$?" "1"
+_PKG_RC=0
+
+GATHM_LLAMACPP_NO_PACKAGE=1 _llamacpp_install_via_package_manager >/dev/null 2>&1
+check "the opt-out is honoured" "$?" "1"
+unset -f _llamacpp_package_exists _pkg_installs _pkg_installs_broken
+unset GATHM_LLAMACPP_NO_PACKAGE
+unset -f _bounded
+eval "$_ORIG_BOUNDED"
+
+echo "== does the binary actually run here =="
+# The prebuilt Linux archives are built against glibc 2.35. On an older distro,
+# or on musl, they unpack perfectly and then cannot execute — and without this
+# check the install reports success and the failure arrives much later, as a
+# linker error from a server the user asked Pilot to start.
+printf '#!/bin/sh\necho "version: b1"\n' > "$FIX/works"
+chmod +x "$FIX/works"
+_llamacpp_binary_runs "$FIX/works"; check "a working binary passes" "$?" "0"
+
+printf '#!/nonexistent/loader\n' > "$FIX/wrong-libc"
+chmod +x "$FIX/wrong-libc"
+_llamacpp_binary_runs "$FIX/wrong-libc"; check "one that cannot execute fails" "$?" "1"
+
+printf 'not executable\n' > "$FIX/not-exec"
+_llamacpp_binary_runs "$FIX/not-exec"; check "a non-executable fails" "$?" "1"
+_llamacpp_binary_runs "$FIX/absent"; check "a missing binary fails" "$?" "1"
+
+# --version is recent; older builds only answer --help, and refusing those
+# would send a perfectly good binary to a 30-minute rebuild.
+cat > "$FIX/old-build" <<'OLD'
+#!/bin/sh
+case "$1" in --version) echo "error: unknown argument" >&2; exit 1 ;; esac
+exit 0
+OLD
+chmod +x "$FIX/old-build"
+_llamacpp_binary_runs "$FIX/old-build"; check "a build that only knows --help passes" "$?" "0"
+
 echo "== what gets written to ~/.gathm =="
 HOME="$FIX/home"; mkdir -p "$HOME"
 SCRIPT_DIR="$FIX/home"     # keeps _audiocpp_write_env's .env inside the fixture

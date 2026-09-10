@@ -610,7 +610,7 @@ where Gathm's wait actually was.
 | Platform | Runtime | Where it comes from |
 |---|---|---|
 | macOS | llama.cpp | Homebrew (`brew install llama.cpp`), else the official prebuilt release |
-| Linux / WSL | llama.cpp | the official prebuilt release, else a CMake build from source |
+| Linux / WSL | llama.cpp | the distro package (`llama.cpp-tools` on Debian/Ubuntu, `llama.cpp` on Arch), else the official prebuilt release, else a CMake build from source |
 | Windows | llama.cpp | the official prebuilt CPU release (Git Bash or WSL runs the installer) |
 | Termux | Ollama | `pkg install ollama` — unchanged |
 
@@ -622,6 +622,14 @@ Ollama is no longer downloaded on a machine where llama.cpp works — set
 
 An existing `llama-server` on your `PATH` is used as-is; Gathm does not install
 a second copy.
+
+The distro package comes first on Linux for the same reason Homebrew does on
+macOS: it is built against the system's own libraries, so it cannot land in the
+state the upstream archives can — unpacking cleanly and then refusing to run
+because the machine has an older glibc than the build wanted, or musl. Package
+names are probed before anything is installed, so a distro without one falls
+through to the download without a wasted step. Whatever the source, the binary
+has to answer `--version` before the installer accepts it.
 
 ### The model
 
@@ -707,6 +715,8 @@ directly (outside the launcher) works too.
 | `GATHM_LLAMACPP_AUTOSTART` | `0` never starts the server implicitly |
 | `GATHM_LLAMACPP_START_TIMEOUT` | seconds to wait for the model to load (default 180) |
 | `GATHM_LLAMACPP_VARIANT` | release flavour to prefer at install: `cpu`, `vulkan`, `cuda` |
+| `GATHM_LLAMACPP_NO_PACKAGE` | `1` skips apt/dnf/pacman and takes the upstream build |
+| `GATHM_LLAMACPP_BUILD` | `1` builds from source even when a binary is available |
 | `GATHM_INSTALL_LLAMACPP` | `0` skips llama.cpp and keeps Ollama |
 | `GATHM_INSTALL_OLLAMA` | `1` installs Ollama as well |
 

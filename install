@@ -1007,6 +1007,7 @@ setup_termux_storage() {
 #   GATHM_LLAMACPP_VARIANT=NAME  release flavour to prefer: cpu | vulkan | cuda
 #   GATHM_LLAMACPP_MODEL_REPO=R  Hugging Face repo to take the model from
 #   GATHM_LLAMACPP_BUILD=1       build from source even if a binary is available
+#   GATHM_LLAMACPP_NO_PACKAGE=1  skip apt/dnf/pacman and take the upstream build
 LLAMACPP_RELEASES_API="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
 # Endpoints as variables, not literals: tests point them at file:// fixtures so
 # the asset picker and the GGUF picker can be exercised without a network.
@@ -1155,6 +1156,156 @@ PY
     return 0
 }
 
+# llama.cpp from the system package manager.
+#
+# Preferred over the prebuilt archives wherever it exists, for the same reason
+# Homebrew is preferred on macOS: the package is built against the system's own
+# glibc, so it cannot land in the "unpacks fine, will not execute" state the
+# upstream Ubuntu-22.04 archives fall into on an older or musl-based distro.
+# It is also signed, and it updates with everything else on the machine.
+#
+# The trade is version lag — a distro build can be months behind upstream — but
+# llama-server's API has been stable for far longer than that, and the start
+# path already retries without its tuning flags when a build does not know a
+# newer one.
+#
+# Package names are PROBED, never assumed: each manager is asked whether the
+# name exists before anything is installed, so a name that is wrong (or has
+# been renamed) costs nothing and falls through to the download path.
+#
+#   Debian/Ubuntu  llama.cpp-tools   (ships llama-server, llama-cli, ...)
+#   Arch           llama.cpp
+#   Fedora         llama-cpp
+#   openSUSE       llama.cpp
+_llamacpp_package_candidates() {
+    case "$1" in
+        apt)    echo "llama.cpp-tools llama-cpp-tools" ;;
+        pacman) echo "llama.cpp" ;;
+        dnf)    echo "llama-cpp llama.cpp" ;;
+        zypper) echo "llama.cpp llama-cpp" ;;
+    esac
+}
+
+# Which package manager to talk to, or nothing.
+_llamacpp_package_manager() {
+    local manager
+    for manager in apt pacman dnf zypper; do
+        case "$manager" in
+            apt)    command -v apt-get &>/dev/null && { echo apt;    return 0; } ;;
+            pacman) command -v pacman  &>/dev/null && { echo pacman; return 0; } ;;
+            dnf)    command -v dnf     &>/dev/null && { echo dnf;    return 0; } ;;
+            zypper) command -v zypper  &>/dev/null && { echo zypper; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
+# Is this package name real on this system? Normalised to 0/1 — apt-cache
+# answers 100 for "no such package" and callers of a predicate should not have
+# to know that.
+_llamacpp_package_exists() {
+    local manager="$1" name="$2"
+    _llamacpp_package_exists_raw "$manager" "$name" && return 0
+    return 1
+}
+
+_llamacpp_package_exists_raw() {
+    local manager="$1" name="$2"
+    case "$manager" in
+        apt)    apt-cache show "$name" &>/dev/null ;;
+        pacman) pacman -Si "$name" &>/dev/null ;;
+        dnf)    dnf --quiet list --available "$name" &>/dev/null \
+                    || dnf --quiet info "$name" &>/dev/null ;;
+        zypper) zypper --non-interactive info "$name" 2>/dev/null | grep -q "^Name *:" ;;
+        *)      return 1 ;;
+    esac
+}
+
+# How to run a privileged install here. Root needs nothing; everyone else needs
+# sudo, and a sudo that would sit waiting for a password nobody is there to
+# type is worse than skipping this path and downloading the archive instead.
+_llamacpp_sudo() {
+    if [[ "$(id -u)" == "0" ]]; then
+        echo ""
+        return 0
+    fi
+    command -v sudo &>/dev/null || return 1
+    # Already cached (the Ollama step does this too), or we may prompt because
+    # a human is watching.
+    if sudo -n true 2>/dev/null; then
+        echo "sudo"
+        return 0
+    fi
+    [[ "${GATHM_NON_INTERACTIVE:-0}" == "1" ]] && return 1
+    echo "sudo"
+    return 0
+}
+
+_llamacpp_install_via_package_manager() {
+    [[ "${GATHM_LLAMACPP_NO_PACKAGE:-0}" == "1" ]] && return 1
+
+    local manager; manager=$(_llamacpp_package_manager) || return 1
+    local sudo_cmd; sudo_cmd=$(_llamacpp_sudo) || {
+        info "No way to install system packages without a password prompt — skipping apt/dnf."
+        return 1
+    }
+
+    local name found=""
+    for name in $(_llamacpp_package_candidates "$manager"); do
+        if _llamacpp_package_exists "$manager" "$name"; then
+            found="$name"
+            break
+        fi
+    done
+    if [[ -z "$found" ]]; then
+        info "No llama.cpp package for this distro — using the official build instead."
+        return 1
+    fi
+
+    info "Installing ${BOLD}${found}${RESET} with ${manager}."
+    local rc=0
+    case "$manager" in
+        apt)    _bounded 900 env DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y "$found" || rc=$? ;;
+        pacman) _bounded 900 $sudo_cmd pacman -S --noconfirm "$found" || rc=$? ;;
+        dnf)    _bounded 900 $sudo_cmd dnf install -y "$found" || rc=$? ;;
+        zypper) _bounded 900 $sudo_cmd zypper --non-interactive install "$found" || rc=$? ;;
+    esac
+    (( rc == 0 )) || { warn "${manager} could not install ${found}"; return 1; }
+
+    # The package existing is not the same as it shipping llama-server: some
+    # distros split the server into its own package.
+    local bin; bin=$(_llamacpp_existing_bin) || {
+        warn "${found} installed but provides no llama-server"
+        return 1
+    }
+    _llamacpp_binary_runs "$bin" || {
+        warn "${found} installed but its llama-server will not run"
+        return 1
+    }
+    return 0
+}
+
+# Does this binary actually run here?
+#
+# The prebuilt Linux archives are built on Ubuntu 22.04, so they need glibc
+# 2.35 or newer and they are useless on musl. Nothing about unpacking them
+# reveals that: the file lands, the install reports success, and the failure
+# arrives much later as "GLIBC_2.35 not found" from a server the user asked
+# Pilot to start. Ask the binary to print its version — if it cannot, we know
+# now, while there is still a source build to fall back to.
+_llamacpp_binary_runs() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 1
+    _bounded 30 "$bin" --version >/dev/null 2>&1 && return 0
+    # Older builds have no --version; --help is the older spelling of "are you
+    # a working executable".
+    _bounded 30 "$bin" --help >/dev/null 2>&1 && return 0
+    # Normalised to 1 rather than leaking the exec failure through: a bad
+    # interpreter exits 127 and a killed process 124, and callers of a
+    # predicate should not have to know that.
+    return 1
+}
+
 # Download and unpack the official prebuilt binaries.
 _llamacpp_install_prebuilt() {
     local platform="$1" resolved url tag
@@ -1203,7 +1354,12 @@ _llamacpp_build_from_source() {
     else
         info "Cloning llama.cpp (shallow)..."
         mkdir -p "$(dirname "$src")" 2>/dev/null || true
-        _bounded 900 git clone --depth 1 "$LLAMACPP_GIT" "$src" || {
+        # 300s, not 900: this clone is ~50 MB, so five minutes is generous on
+        # any real connection — and when the reason it is failing is a blocked
+        # or proxied network, the whole bound gets spent before anyone finds
+        # out. Ollama is still waiting behind this; do not make the user sit
+        # a quarter of an hour to reach it.
+        _bounded 300 git clone --depth 1 "$LLAMACPP_GIT" "$src" || {
             warn "Could not clone llama.cpp"
             return 1
         }
@@ -1239,6 +1395,10 @@ _llamacpp_build_from_source() {
     mkdir -p "$LLAMACPP_BIN_DIR" 2>/dev/null || true
     cp -R "$(dirname "$built")"/. "$LLAMACPP_BIN_DIR"/ 2>/dev/null || true
     chmod +x "$LLAMACPP_BIN_DIR"/llama-* 2>/dev/null || true
+    if ! _llamacpp_binary_runs "$LLAMACPP_BIN_DIR/llama-server"; then
+        warn "The build finished but llama-server will not run."
+        return 1
+    fi
     return 0
 }
 
@@ -1296,13 +1456,42 @@ install_llamacpp() {
             _brew_install llama.cpp && installed=0
     fi
 
+    # The distro package, where there is one. Same reasoning as Homebrew above:
+    # built against this system's libraries, signed, and updated with the rest
+    # of the machine.
+    if (( installed != 0 )) && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]] \
+            && [[ "$platform" != "macos" && "$platform" != "darwin" && "$platform" != "windows" ]]; then
+        _llamacpp_install_via_package_manager && installed=0
+    fi
+
     if (( installed != 0 )) && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]]; then
-        _llamacpp_install_prebuilt "$platform" && installed=0
+        if _llamacpp_install_prebuilt "$platform"; then
+            local candidate; candidate=$(_llamacpp_existing_bin) || candidate=""
+            if [[ -n "$candidate" ]] && _llamacpp_binary_runs "$candidate"; then
+                installed=0
+            else
+                warn "The prebuilt llama.cpp will not run on this system."
+                warn "Usually an older glibc than the build wants, or musl (Alpine)."
+                # Leaving it in place would let _llamacpp_existing_bin find it
+                # again on the next run and skip straight past the build.
+                rm -rf "$LLAMACPP_BIN_DIR" 2>/dev/null || true
+            fi
+        fi
     fi
 
     if (( installed != 0 )); then
-        info "No prebuilt llama.cpp fits this machine — building from source."
-        _llamacpp_build_from_source && installed=0
+        if ! command -v cmake &>/dev/null || ! command -v git &>/dev/null; then
+            warn "No usable prebuilt llama.cpp, and no cmake/git to build one."
+            warn "Install cmake and git and re-run, or set GATHM_INSTALL_LLAMACPP=0"
+            warn "to keep using Ollama."
+        else
+            # Say the price before charging it. A compile that starts unannounced
+            # reads as a hang, and this one can run for half an hour.
+            info "No usable prebuilt llama.cpp — building it from source."
+            info "Expect 5-30 minutes depending on the machine. Skip it with"
+            info "GATHM_INSTALL_LLAMACPP=0 (Gathm then uses Ollama instead)."
+            _llamacpp_build_from_source && installed=0
+        fi
     fi
 
     local elapsed=$(( SECONDS - t0 ))
