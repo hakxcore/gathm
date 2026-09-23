@@ -228,11 +228,40 @@ def build_laya_router() -> tuple[Optional[Callable], str]:
         import laya  # type: ignore[import]
     except ImportError:
         return None, "not installed (pip install laya)"
+
+    # Defaults are laya's own recommendation and right on a laptop: preload
+    # both checkpoints so nothing reloads mid-run. On a phone they are wrong.
+    # Two resident checkpoints is several hundred MB on top of whatever is
+    # already holding the LLM, and Android's low-memory killer reaps the
+    # biggest process without ceremony — which would look like a crashed
+    # benchmark rather than what it is.
+    #
+    #   GATHM_BENCH_LAYA_PRELOAD=0   load on first use instead
+    #   GATHM_BENCH_LAYA_MAX_LOADED=1   keep one checkpoint, not two
+    #
+    # An English-only question set never needs the multilingual checkpoint, so
+    # max_loaded=1 costs nothing here beyond a reload if you mix languages in.
+    preload = (os.environ.get("GATHM_BENCH_LAYA_PRELOAD", "1").strip()
+               not in ("0", "false", "no"))
     try:
-        model = laya.Router(preload=True)
+        max_loaded = int(os.environ.get("GATHM_BENCH_LAYA_MAX_LOADED", "") or 2)
+    except ValueError:
+        max_loaded = 2
+
+    try:
+        model = laya.Router(preload=preload, max_loaded=max(1, max_loaded))
+    except MemoryError:
+        return None, ("out of memory loading a checkpoint — retry with "
+                      "GATHM_BENCH_LAYA_PRELOAD=0 GATHM_BENCH_LAYA_MAX_LOADED=1")
     except Exception as exc:
         return None, "could not load a checkpoint (%s)" % str(exc)[:120]
-    return make_laya_router(model), "laya %s" % getattr(laya, "__version__", "?")
+
+    note = "laya %s" % getattr(laya, "__version__", "?")
+    if not preload:
+        note += ", lazy"
+    if max_loaded != 2:
+        note += ", max_loaded=%d" % max_loaded
+    return make_laya_router(model), note
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +360,8 @@ def measure(name: str, note: str, router: Callable, questions: list[dict],
 
     # A warm-up that is thrown away: the first call pays lazy imports, a cold
     # KV cache, or a checkpoint being paged in, and folding that into the
-    # median would libel whichever router happened to go first.
+    # median would libel whichever router happened to go first. This is doing
+    # real work when GATHM_BENCH_LAYA_PRELOAD=0 — the checkpoint loads here.
     try:
         first = questions[0]
         router(first["q"], shortlists[first["q"]], descriptions)

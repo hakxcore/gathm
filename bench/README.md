@@ -53,6 +53,37 @@ Where a router reports calibrated confidence, the harness also prints what a
 on the rest. That is the shape a real integration would take, so it is the
 number worth optimising.
 
+## On a phone (Termux)
+
+The harness runs on Termux, and that is the most informative place to run it:
+a phone is where the ~500-token tool prefill hurts most, so it is where a
+cheaper router has the most to win.
+
+```bash
+pkg install python
+pip install rich                      # the minimum pilot/main.py needs
+python3 bench/route_bench.py --routers shortlist     # free, instant
+```
+
+Two settings matter here and nowhere else:
+
+```bash
+GATHM_BENCH_LAYA_PRELOAD=0 GATHM_BENCH_LAYA_MAX_LOADED=1     python3 bench/route_bench.py --routers laya
+```
+
+`Router(preload=True)` holds two checkpoints resident, several hundred MB on
+top of whatever is already serving the LLM. Android's low-memory killer takes
+the biggest process without warning, which looks like a crashed benchmark
+rather than what it is. Loading lazily and keeping one checkpoint avoids that;
+an English question set never needs the multilingual one anyway.
+
+For the `llm` router, start the backend first (`ollama serve` on Termux) — the
+harness makes one test call and skips with the reason if nothing answers.
+
+Run the routers one at a time on a phone. Holding laya's checkpoint and the LLM
+in memory at once is the configuration most likely to get something killed, and
+the numbers are per-router anyway.
+
 ## Honest limits
 
 - The `llm` router isolates the routing decision — one completion asking for a
