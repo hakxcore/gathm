@@ -35,4 +35,5 @@ output_schema:
       type: string
 
 fallback_tool: null
-tags: [development, reference, programming, cheatsheet]
+tags: [development, reference, programming, cheatsheet, syntax, example,
+       python, rust, javascript, bash, golang, java, loop, function]

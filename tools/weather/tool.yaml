@@ -50,4 +50,5 @@ output_schema:
       type: array
 
 fallback_tool: null
-tags: [data, weather, forecast, temperature, climate]
+tags: [data, weather, forecast, temperature, climate, rain, raining, hot,
+       cold, sunny, snow, humidity, umbrella, outside]
