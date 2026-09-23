@@ -1,0 +1,79 @@
+{"q": "what's the weather in Delhi", "tool": "weather", "kind": "plain"}
+{"q": "is it going to rain tomorrow", "tool": "weather", "kind": "plain"}
+{"q": "how hot is it outside right now", "tool": "weather", "kind": "oblique"}
+{"q": "should I take an umbrella to work", "tool": "weather", "kind": "oblique"}
+{"q": "price of bitcoin", "tool": "cryptocurrency", "kind": "plain"}
+{"q": "how much is ethereum worth today", "tool": "cryptocurrency", "kind": "plain"}
+{"q": "what is AAPL trading at", "tool": "stocks", "kind": "plain"}
+{"q": "how did tesla stock close yesterday", "tool": "stocks", "kind": "plain"}
+{"q": "convert 500 euros to rupees", "tool": "currency", "kind": "confusable"}
+{"q": "what is the exchange rate for yen", "tool": "currency", "kind": "confusable"}
+{"q": "encrypt this file with a password", "tool": "crypt", "kind": "confusable"}
+{"q": "decrypt backup.tar.gz.enc", "tool": "crypt", "kind": "confusable"}
+{"q": "base64 encode this string", "tool": "cipher", "kind": "confusable"}
+{"q": "decode this base32 blob for me", "tool": "cipher", "kind": "confusable"}
+{"q": "MX records for gmail.com", "tool": "dns", "kind": "plain"}
+{"q": "what nameservers does example.org use", "tool": "dns", "kind": "plain"}
+{"q": "does cloudflare.com have DNSSEC enabled", "tool": "dnssec", "kind": "confusable"}
+{"q": "check the DS and DNSKEY records for this zone", "tool": "dnssec", "kind": "confusable"}
+{"q": "what hostname does 8.8.8.8 resolve back to", "tool": "rdns", "kind": "confusable"}
+{"q": "reverse lookup this IP address", "tool": "rdns", "kind": "confusable"}
+{"q": "who owns the domain anthropic.com", "tool": "whois", "kind": "confusable"}
+{"q": "when does this domain registration expire", "tool": "whois", "kind": "confusable"}
+{"q": "find the registrar and abuse contact via RDAP", "tool": "rdap", "kind": "confusable"}
+{"q": "list subdomains of github.com", "tool": "subdomains", "kind": "confusable"}
+{"q": "enumerate subdomains using certificate transparency", "tool": "subdomains", "kind": "confusable"}
+{"q": "is port 443 open on this host", "tool": "portscan", "kind": "confusable"}
+{"q": "scan the top ports on 10.0.0.0/24", "tool": "portscan", "kind": "confusable"}
+{"q": "check the TLS certificate expiry for example.com", "tool": "certinfo", "kind": "plain"}
+{"q": "who issued the cert for this site and when does it expire", "tool": "certinfo", "kind": "plain"}
+{"q": "which SSL ciphers does this server still accept", "tool": "siteciphers", "kind": "confusable"}
+{"q": "audit the security headers on my site", "tool": "headersaudit", "kind": "plain"}
+{"q": "is this site missing a content security policy", "tool": "headersaudit", "kind": "oblique"}
+{"q": "is there a WAF in front of this domain", "tool": "wafdetect", "kind": "plain"}
+{"q": "what does the robots.txt on this site disallow", "tool": "robotsaudit", "kind": "plain"}
+{"q": "look up CVE-2024-3094", "tool": "cve", "kind": "plain"}
+{"q": "what is the severity of the xz backdoor vulnerability", "tool": "cve", "kind": "oblique"}
+{"q": "has my email been in a data breach", "tool": "pwned", "kind": "plain"}
+{"q": "check if this account was compromised", "tool": "pwned", "kind": "plain"}
+{"q": "is this IP address malicious", "tool": "tipcheck", "kind": "confusable"}
+{"q": "check this domain reputation on virustotal", "tool": "tipcheck", "kind": "plain"}
+{"q": "what ASN does this IP belong to", "tool": "asn", "kind": "plain"}
+{"q": "where is this IP located", "tool": "ipinfo", "kind": "confusable"}
+{"q": "what is my public IP address", "tool": "geo", "kind": "confusable"}
+{"q": "what does the word ephemeral mean", "tool": "define", "kind": "plain"}
+{"q": "definition of petrichor", "tool": "define", "kind": "plain"}
+{"q": "latest headlines today", "tool": "news", "kind": "plain"}
+{"q": "what is happening in the news about AI", "tool": "news", "kind": "confusable"}
+{"q": "search the web for the best python profiler", "tool": "websearch", "kind": "plain"}
+{"q": "who won the cricket world cup in 2011", "tool": "websearch", "kind": "oblique"}
+{"q": "integrate x squared with respect to x", "tool": "newton", "kind": "plain"}
+{"q": "factor the polynomial x^2 - 4", "tool": "newton", "kind": "plain"}
+{"q": "what is the derivative of sin(x)", "tool": "newton", "kind": "plain"}
+{"q": "plot of the movie Interstellar", "tool": "movie", "kind": "plain"}
+{"q": "who directed Inception and what did it score", "tool": "movie", "kind": "plain"}
+{"q": "lyrics to bohemian rhapsody", "tool": "lyrics", "kind": "plain"}
+{"q": "play some music", "tool": "jukebox", "kind": "plain"}
+{"q": "make a QR code for my wifi password", "tool": "qrify", "kind": "plain"}
+{"q": "shorten this long URL for me", "tool": "shorturl", "kind": "plain"}
+{"q": "upload this file and give me a link", "tool": "transfer", "kind": "plain"}
+{"q": "add buy milk to my todo list", "tool": "todo", "kind": "plain"}
+{"q": "what is on my task list", "tool": "todo", "kind": "plain"}
+{"q": "turn this recording into text", "tool": "transcribe", "kind": "oblique"}
+{"q": "transcribe meeting.wav", "tool": "transcribe", "kind": "plain"}
+{"q": "read the text out of this screenshot", "tool": "imganalyze", "kind": "oblique"}
+{"q": "what objects are in this photo", "tool": "imganalyze", "kind": "plain"}
+{"q": "show me a cheatsheet for awk", "tool": "cheat", "kind": "plain"}
+{"q": "how do I write a for loop in rust", "tool": "cheat", "kind": "confusable"}
+{"q": "share my terminal session with a colleague", "tool": "shareterminal", "kind": "plain"}
+{"q": "search shodan for exposed elasticsearch", "tool": "shodan", "kind": "plain"}
+{"q": "crawl this site for endpoints", "tool": "katana", "kind": "confusable"}
+{"q": "run nuclei templates against this target", "tool": "nuclei", "kind": "plain"}
+{"q": "passive subdomain discovery with subfinder", "tool": "subfinder", "kind": "confusable"}
+{"q": "probe these hosts for live HTTP services", "tool": "httpprobe", "kind": "confusable"}
+{"q": "what status code does this URL return", "tool": "httpprobe", "kind": "confusable"}
+{"q": "covid case numbers for India", "tool": "covidinfo", "kind": "plain"}
+{"q": "make me a meme with this caption", "tool": "meme", "kind": "plain"}
+{"q": "how much disk space is left on this machine", "tool": "system", "kind": "plain"}
+{"q": "what processes are eating my CPU", "tool": "system", "kind": "plain"}
+{"q": "open example.com in a browser and screenshot it", "tool": "browser", "kind": "plain"}
