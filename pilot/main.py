@@ -878,8 +878,35 @@ _CATALOGUE_RE = re.compile(
     r"your tools|available tools|capabilit(y|ies)|help me with)\b", re.I)
 
 
+# What a question is ABOUT, as opposed to what it is asking. A domain, URL,
+# e-mail address, IP or filename is the operand — the thing to act on — and its
+# pieces are not routing signal. Splitting them into words actively misroutes:
+# "what nameservers does example.org use" scored `newton`, because the tokens
+# of example.org include "example" and newton's own description says "For
+# example: 'newton derive x^2'". The tool that the question names outright is
+# still matched against the raw query, so "run dns on example.org" is unharmed.
+#
+# A bare dotted name has to end in a TLD to count as a domain. Treating every
+# dotted token as an operand was too greedy: "what does the robots.txt on this
+# site disallow" lost the word that routes it, and answered about TLS ciphers.
+# A domain ends in a TLD; a filename ends in an extension. Anything this list
+# misses simply keeps today's behaviour of splitting into words.
+_TLDS = ("com|org|net|io|dev|ai|co|edu|gov|mil|int|info|biz|me|xyz|app|cloud"
+         "|tech|site|online|store|blog|news|tv|cc|ly|gg|in|uk|us|ca|au|de|fr"
+         "|nl|es|it|se|no|fi|pl|ru|br|jp|cn|kr|sg|nz|za|ie|ch|at|be|dk|pt|mx")
+_OPERAND_RE = re.compile(
+    r"""(
+        (?:https?://|www\.)\S+              # URLs
+      | [\w.+-]+@[\w-]+\.[\w.-]+           # e-mail addresses
+      | \d{1,3}(?:\.\d{1,3}){3}            # IPv4, with or without a /mask
+      | [\w-]+(?:\.[\w-]+)*\.(?:""" + _TLDS + r""")\b   # domains
+    )""",
+    re.VERBOSE | re.IGNORECASE)
+
+
 def _query_terms(query: str) -> set:
-    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    without_operands = _OPERAND_RE.sub(" ", query or "")
+    words = re.findall(r"[a-z0-9]+", without_operands.lower())
     return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
 
 
@@ -930,12 +957,29 @@ def _tool_index() -> dict:
         tags: set = set()
         manifest = TOOLS_DIR / name / "tool.yaml"
         try:
+            # A bracketed YAML list may wrap across lines, and reading only the
+            # first one silently dropped every tag after the wrap — a tool
+            # could lose half its vocabulary by being edited to fit 80 columns,
+            # with nothing to show for it but worse routing. Keep taking lines
+            # until the bracket closes.
+            #
+            # Still hand-parsed rather than pulled through PyYAML: Pilot does
+            # not import yaml, and adding a dependency to read one line of
+            # metadata would cost more than it saves.
+            collected = ""
             for line in manifest.read_text().splitlines():
-                if line.startswith("tags:"):
-                    tags = {t.strip().strip("\"'") for t in
-                            line.split(":", 1)[1].strip(" []").split(",")}
-                    tags = {t for t in tags if t}
-                    break
+                if not collected and line.startswith("tags:"):
+                    collected = line.split(":", 1)[1].strip()
+                    if "[" not in collected or "]" in collected:
+                        break
+                elif collected:
+                    collected += " " + line.strip()
+                    if "]" in line:
+                        break
+            if collected:
+                tags = {t.strip().strip("\"'") for t in
+                        collected.strip(" []").split(",")}
+                tags = {t for t in tags if t}
         except Exception:  # noqa: BLE001 - a tool without a manifest still works
             tags = set()
         tags |= BUILTIN_TAGS.get(name, set())
@@ -995,12 +1039,19 @@ def _shortlist_tools(query: str, tools: list) -> list:
     picked = [name for _score, name in scored[:TOOL_SHORTLIST]]
 
     if not picked:
-        # No signal at all: the common cases, so "how hot is it" still finds a
-        # way. `system` is in here because a question with no other signal is
-        # at least as likely to be about the machine in front of the user as
-        # about the weather, and without it the model cannot even see which
-        # platform it is on.
-        fallback = ["weather", "websearch", "system", "dns", "ipinfo",
+        # No signal at all. `websearch` leads because that is what a question
+        # with no recognisable domain usually is — general knowledge, like "who
+        # won the cricket world cup in 2011". `system` is second because a
+        # question with no other signal is at least as likely to be about the
+        # machine in front of the user, and without it the model cannot even
+        # see which platform it is on.
+        #
+        # `weather` used to lead, to keep "how hot is it" working. That made
+        # every unrecognised question a weather question, and it was never the
+        # right fix: the words people use for weather — hot, cold, rain,
+        # umbrella — simply were not in the tool's tags. They are now, so those
+        # questions route directly and never reach this list.
+        fallback = ["websearch", "system", "weather", "dns", "ipinfo",
                     "define", "news", "browser", "stocks", "cryptocurrency",
                     "currency"]
         picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
