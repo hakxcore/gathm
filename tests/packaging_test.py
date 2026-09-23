@@ -114,7 +114,12 @@ def test_every_runtime_directory_is_packaged():
            destination.startswith("gathmcli/_bundle/"))
 
     # Anything on disk that looks like runtime but is not mapped is a trap.
-    skip = {"tests", "docs", "engineer", "dist", "gathmcli", "node_modules"}
+    # Development-only directories. `bench` is here for the same reason `tests`
+    # is: the routing benchmark is a tool for working ON Gathm, not part of
+    # what gets installed, and shipping its question set in the wheel would be
+    # dead weight on a phone.
+    skip = {"tests", "docs", "engineer", "dist", "gathmcli", "node_modules",
+            "bench"}
     for entry in sorted(os.listdir(ROOT)):
         if not os.path.isdir(os.path.join(ROOT, entry)):
             continue
