@@ -367,6 +367,7 @@ class LlamaCppConfig:
     ctx: int = DEFAULT_CTX
     ngl: int = 0
     threads: int = 4
+    cache_reuse: int = 256
     extra_args: tuple[str, ...] = ()
 
     @classmethod
@@ -381,6 +382,10 @@ class LlamaCppConfig:
         except ValueError:
             threads = 0
         extra = tuple(shlex.split(os.environ.get("GATHM_LLAMACPP_ARGS", "") or ""))
+        try:
+            cache_reuse = int(os.environ.get("GATHM_LLAMACPP_CACHE_REUSE", "") or 256)
+        except ValueError:
+            cache_reuse = 256
         return cls(
             binary=resolve_binary(),
             model=resolve_model(),
@@ -389,6 +394,7 @@ class LlamaCppConfig:
             ctx=max(256, ctx),
             ngl=gpu_layers(),
             threads=threads if threads > 0 else physical_cores(),
+            cache_reuse=max(0, cache_reuse),
             extra_args=extra,
         )
 
@@ -573,6 +579,25 @@ def build_command(cfg: LlamaCppConfig, minimal: bool = False) -> list[str]:
         "-c", str(cfg.ctx),
         "-t", str(cfg.threads),
         "-ngl", str(cfg.ngl),
+        # One slot. This is the single most expensive default we had wrong.
+        #
+        # llama-server divides the context window BETWEEN slots, and gives each
+        # slot its own KV cache. Left to its default this build opened four, so
+        # -c 4096 meant 1024 tokens per slot — smaller than Gathm's own ~1300
+        # token prompt, which therefore never fit and was re-prefilled, shifted
+        # or truncated every time. Worse, consecutive calls in one conversation
+        # landed on DIFFERENT slots, so the cached prefix of the previous call
+        # was never the prefix of the next one and every call paid full price.
+        #
+        # Measured on a phone at 26 tokens/second of prefill, that was ~50
+        # seconds per call and three calls to answer one question. Gathm serves
+        # one person at a time; parallel slots buy it nothing and cost it the
+        # whole context.
+        "--parallel", "1",
+        # Reuse a cached prefix even when it has shifted — the system prompt is
+        # identical turn after turn, and re-reading it is the most wasteful
+        # thing this server can do.
+        "--cache-reuse", str(cfg.cache_reuse),
         # The name clients see in /v1/models, and what they may send back as
         # "model". Without it the server answers with the full path to the
         # weights, which is neither stable nor pretty in a status bar.
