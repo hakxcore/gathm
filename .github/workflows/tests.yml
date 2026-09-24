@@ -66,6 +66,11 @@ jobs:
       - name: Launcher suite
         run: bash tests/launcher_test.sh
 
+      # The connectivity check runs before every tool, so its cost is on every
+      # command. Against a local stub, so it needs no network of its own.
+      - name: Connectivity-check suite
+        run: bash tests/netcheck_test.sh
+
       # The llama.cpp half of the installer: which release archive it picks,
       # which GGUF it picks, and what it does with what arrives. Runs against
       # file:// fixtures, so it needs no network and downloads nothing.
