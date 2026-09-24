@@ -106,7 +106,7 @@ def main() -> int:
 
     reply = None
     try:
-        for output in pilot.app.stream(state, config={"recursion_limit": 25}):
+        for output in pilot.app.stream(state, config={"recursion_limit": pilot.AGENT_MAX_STEPS}):
             for key, value in output.items():
                 if key == "agent" and value.get("next_step") == "end":
                     reply = value["messages"][-1].content

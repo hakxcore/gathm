@@ -147,5 +147,70 @@ class TestPilotRegressions(unittest.TestCase):
         self.assertEqual(step_one, step_two,
                          "the tool list changed between ReAct steps")
 
+    def test_a_repeated_tool_call_is_refused(self):
+        """The same command twice in one turn cannot produce new information.
+
+        Observed on a phone: "weather in mumbai" ran the weather tool six
+        times, five of them identical and argument-less, then failed with
+        HTTP 400 nine minutes in — the context had overflowed because every
+        repeat added another ~740 tokens of observation to it.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        already = [
+            HumanMessage(content="weather in mumbai"),
+            AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+            HumanMessage(content="Observation: Mumbai 29C patchy rain"),
+        ]
+        self.assertEqual(PILOT._invocations_already_run(
+            already + [AIMessage(content="x")]), ["weather mumbai"])
+
+    @unittest.skipUnless(PILOT.LANGCHAIN_AVAILABLE,
+                         "tool_node builds LangChain messages")
+    def test_a_repeat_is_refused_without_running_the_tool(self):
+        """The refusal must not execute anything — that is the saving."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        ran = []
+        original = PILOT.run_gathm_tool_raw
+        PILOT.run_gathm_tool_raw = lambda cmd: ran.append(cmd) or "should not run"
+        try:
+            state = {"messages": [
+                HumanMessage(content="weather in mumbai"),
+                AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+                HumanMessage(content="Observation: Mumbai 29C patchy rain"),
+                AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+            ]}
+            observation = PILOT.tool_node(state)["messages"][0].content
+        finally:
+            PILOT.run_gathm_tool_raw = original
+
+        self.assertEqual(ran, [], "the repeated tool was executed anyway")
+        self.assertIn("already run", observation)
+        self.assertIn("weather mumbai", observation)
+
+    def test_a_different_tool_call_still_runs(self):
+        """The guard must not block a genuine second step."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        history = [
+            HumanMessage(content="weather in mumbai"),
+            AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+            HumanMessage(content="Observation: Mumbai 29C"),
+            AIMessage(content="Action: gathm\nAction Input: weather delhi"),
+        ]
+        self.assertNotIn("weather delhi",
+                         PILOT._invocations_already_run(history))
+
+    def test_the_loop_limit_is_reachable_in_human_time(self):
+        """A ceiling nobody waits for is not a ceiling.
+
+        Each round costs ~30 s on a phone and grows the context, so the old
+        limit of 25 was twelve minutes — and the turn failed by overflowing
+        the context long before reaching it.
+        """
+        self.assertLessEqual(PILOT.AGENT_MAX_STEPS, 8)
+        self.assertGreaterEqual(PILOT.AGENT_MAX_STEPS, 3)
+
 if __name__ == "__main__":
     unittest.main()

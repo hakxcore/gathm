@@ -308,6 +308,21 @@ def describe_agent_failure(exc: BaseException) -> str:
         return "agent error: %s" % exc
 
     backend = LLM_BACKEND
+
+    # A local server answers 400 when the conversation no longer fits its
+    # context window. "HTTP Error 400: Bad Request" tells the user nothing and
+    # sounds like a bug in their question; the cause is a loop that grew the
+    # history past the window, and the fix is a bigger window or a shorter
+    # leash.
+    if ("400" in text or "bad request" in text) and backend in ("llamacpp", "ollama"):
+        return (
+            "the conversation grew past the model's context window, so the "
+            "server refused it. Either the answer needed too many steps or the "
+            "window is too small — raise GATHM_LLAMACPP_CTX (currently %s) or "
+            "lower GATHM_AGENT_MAX_STEPS (currently %d)."
+            % (os.environ.get("GATHM_LLAMACPP_CTX", "4096"), AGENT_MAX_STEPS)
+        )
+
     if backend == "llamacpp":
         url = (getattr(_llm_config, "base_url", None)
                or os.environ.get("GATHM_LLAMACPP_BASE_URL")
@@ -1294,6 +1309,19 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 _BOX_RE = re.compile(r"[\u2500-\u257f\u2580-\u259f]+")
 OBS_MAX_CHARS = int(os.getenv("GATHM_OBS_MAX_CHARS", "1500"))
 
+# How many times the agent may go round the think-act-observe loop.
+#
+# Was 25. On a phone a round costs roughly thirty seconds — so the old limit
+# was a twelve-minute ceiling, which is not a limit anyone waits for. Worse,
+# each round adds its observation to the context, so a long loop does not fail
+# by hitting this number; it fails by overflowing the model's context window
+# and returning HTTP 400, nine minutes in, with nothing to show.
+#
+# Six is enough for question -> tool -> answer with room for one retry and one
+# follow-up tool. Anything a 1B model produces on round seven is not worth the
+# minute it costs.
+AGENT_MAX_STEPS = int(os.getenv("GATHM_AGENT_MAX_STEPS", "6"))
+
 
 def _clean_observation(output: str) -> str:
     """Reduce a tool's terminal output to what a model can actually use."""
@@ -1324,6 +1352,23 @@ def _looks_like_tool_failure(output: str) -> bool:
             or '"error"' in lowered)
 
 
+def _invocations_already_run(messages) -> list:
+    """Every tool command this turn has already executed."""
+    seen = []
+    for message in list(messages)[:-1]:
+        if getattr(message, "type", None) != "ai":
+            continue
+        command = extract_tool_input(str(getattr(message, "content", "") or ""))
+        if not command:
+            continue
+        try:
+            command = normalize_tool_command(command)
+        except Exception:  # noqa: BLE001 - an unparseable command still counts
+            pass
+        seen.append(command)
+    return seen
+
+
 def tool_node(state: AgentState):
     last_message = state["messages"][-1]
     content = last_message.content
@@ -1335,6 +1380,25 @@ def tool_node(state: AgentState):
             normalized_input = normalize_tool_command(tool_input)
         except Exception:
             normalized_input = tool_input
+
+        # A small model that has already been given an answer will often ask
+        # for it again — observed on a phone as six `weather` calls for one
+        # question, five of them identical and argument-less, ending in a
+        # context overflow nine minutes later.
+        #
+        # Running it again cannot produce new information, and it is not free:
+        # each repeat costs its own network round trip and adds another ~740
+        # tokens of observation to a context that is already the reason the
+        # turn is about to fail. Refuse, and say plainly that the answer is
+        # already above.
+        if normalized_input in _invocations_already_run(state["messages"]):
+            return {"messages": [HumanMessage(content=(
+                f"Observation: you have already run `{normalized_input}` in this "
+                f"conversation and its output is above. Running it again cannot "
+                f"tell you anything new. Answer the user's question now, using "
+                f"that output."
+            ))]}
+
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
 
@@ -1588,7 +1652,7 @@ def main():
             _set_token_sink(_ReplySpeech(_reply_speech) if _reply_speech else None)
             start_waiting()
             try:
-                for output in app.stream(state, config={"recursion_limit": 25}):
+                for output in app.stream(state, config={"recursion_limit": AGENT_MAX_STEPS}):
                     for key, value in output.items():
                         if key == "agent" and value.get("next_step") == "end":
                             final_agent_reply = value["messages"][-1].content  # type: ignore[index]
