@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -60,6 +61,38 @@ class TestPilotRegressions(unittest.TestCase):
         category = PILOT.classify_high_risk_query("tell me whats the weather in pune today?")
         self.assertIsNone(category)
 
+
+    def test_prompt_keeps_constants_before_variables(self):
+        """The rules must precede the tool list, or the prefix cache is worthless.
+
+        llama.cpp reuses the KV state of a prompt PREFIX. This template used to
+        open with the shortlisted tool list, which changes with the question, so
+        the cacheable prefix ended after about fifteen tokens and the ~700
+        tokens of rules below it were re-prefilled every turn — measured at
+        twenty-six seconds of re-reading unchanged text per question on a phone.
+
+        This guards the ordering, not the wording. A variable field that drifts
+        back above a constant one costs a full prefill per turn, and nothing
+        else in this suite would notice.
+        """
+        template = PILOT_MAIN_PATH.read_text().split(
+            'system_prompt = f"""', 1)[1].split('"""', 1)[0]
+
+        first_variable = re.search(r"\{[a-z_]+\}", template)
+        self.assertIsNotNone(first_variable, "the template has no substitutions")
+        prefix = template[: first_variable.start()]
+
+        self.assertIn("CRITICAL RULES:", prefix,
+                      "CRITICAL RULES moved below a variable field — prefix cache dead")
+        self.assertGreater(len(prefix), 2000,
+                           "stable prefix is only %d chars; a variable field moved up"
+                           % len(prefix))
+        self.assertGreater(template.index("{tool_descriptions}"),
+                           template.index("CRITICAL RULES:"),
+                           "the tool list is above the rules again")
+        # The rules point at the list; with the list below them, so must the text.
+        self.assertNotIn("list above", template,
+                         "a rule still refers to a tool list 'above' it")
 
 if __name__ == "__main__":
     unittest.main()

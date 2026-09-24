@@ -1169,13 +1169,29 @@ Tools you CAN use offline: {usable}.
                    "DISABLED — say so and stop; do not retry"),
         )
 
+    # ORDER MATTERS, and it is not cosmetic.
+    #
+    # llama.cpp caches the KV state of a prompt PREFIX and reuses it when the
+    # next prompt starts with the same tokens. Everything from the first
+    # differing token onward has to be prefilled again — on a phone, at ~26
+    # tokens per second.
+    #
+    # This block used to open with the tool list, which changes with every
+    # question (the shortlist picks different tools), so the cacheable prefix
+    # ended after about fifteen tokens and the ~690-token rules below it were
+    # re-read every single time. Ask about the weather and then about DNS, and
+    # that was twenty-six seconds spent re-reading text that had not changed.
+    #
+    # So: everything constant first, everything question-dependent last. The
+    # rules, which are the largest part by far, are now a stable prefix shared
+    # by every question. Keep it that way — moving a variable section above a
+    # constant one silently costs a full prefill per turn.
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
-You have access to the following gathm tools:
-{tool_descriptions}
-{offline_notice}
+You have access to a set of gathm tools, listed at the end of these rules.
+
 CRITICAL RULES:
-0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
-0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
+0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed below.
+0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the AVAILABLE TOOLS list below. Never run a tool to answer a question about tools.
 0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
 0bb. NEVER CLAIM YOU RAN SOMETHING YOU DID NOT RUN. You only know a command's result if an Observation gave it to you. If you did not call the tool, say what you would run and that you have not run it — do not report output, numbers, or "the file was created". An invented result is worse than no answer, because the user cannot tell the difference.
 0c. DO IT, DO NOT DESCRIBE IT. If the user asks for something you have a tool for, call the tool. Never answer with the command they could type themselves — "you can list them with ls ~/Desktop" is a failure, running it and showing the result is the answer. They are talking to you because they do not want to type it.
@@ -1194,11 +1210,14 @@ Action Input: [tool_name] [arguments]
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If a tool fails, say in one sentence WHAT failed and quote the error text you were given, then add that the engineer has been notified. Never replace the error with a generic message — the user cannot fix what they cannot see.
-12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+12. ONLY use tool names from the AVAILABLE TOOLS list below. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+When you have a final answer, provide it directly without the Action format.
+
+AVAILABLE TOOLS — these are the only tool names you may use:
+{tool_descriptions}
 {system_help}
 {browser_help}
-When you have a final answer, provide it directly without the Action format.
-"""
+{offline_notice}"""
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
     response = _invoke_spoken(llm, messages)
