@@ -716,6 +716,7 @@ directly (outside the launcher) works too.
 | `GATHM_LLAMACPP_CTX` | context window in tokens (default `4096`) |
 | `GATHM_LLAMACPP_NGL` | layers offloaded to the GPU (default: all, if there is a GPU) |
 | `GATHM_LLAMACPP_THREADS` | generation threads (default: physical cores) |
+| `GATHM_LLAMACPP_CACHE_REUSE` | prefix-cache reuse window in tokens (default `256`) |
 | `GATHM_LLAMACPP_ARGS` | extra `llama-server` flags |
 | `GATHM_LLAMACPP_AUTOSTART` | `0` never starts the server implicitly |
 | `GATHM_LLAMACPP_START_TIMEOUT` | seconds to wait for the model to load (default 180) |
@@ -727,6 +728,14 @@ directly (outside the launcher) works too.
 
 A flag `llama-server` does not recognise is not fatal: Gathm retries once
 without its tuning flags, so a distro build a year behind still starts.
+
+The server runs with `--parallel 1` on purpose. llama-server divides the
+context window between slots and gives each slot its own KV cache, so its
+default of several slots meant two things at once: a slice of context too
+small for Gathm's own prompt, and consecutive calls in one conversation landing
+on different slots, where the previous call's cached prefix was no use. On a
+phone prefilling at 26 tokens/second that was ~50 seconds per call, three times
+per question. Gathm serves one person at a time; slots buy it nothing.
 
 ### Still on Ollama?
 

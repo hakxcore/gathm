@@ -246,7 +246,28 @@ def main() -> int:
         check("GPU layers are passed through", cmd[cmd.index("-ngl") + 1], "33")
         contains("extra args are appended", cmd, "--flash-attn")
         contains("the chat template is used", cmd, "--jinja")
+        # One slot, always. llama-server divides the context between slots and
+        # gives each its own cache, so more than one means a prompt that does
+        # not fit and a prefix that is never reused — measured at ~50 s of
+        # wasted prefill per call on a phone.
+        check("exactly one slot", cmd[cmd.index("--parallel") + 1], "1")
+        contains("prefix reuse is on", cmd, "--cache-reuse")
         check("the model is named for clients", cmd[cmd.index("-a") + 1], "big")
+        reset_env(GATHM_LLAMACPP_MODEL=str(models / "big.gguf"),
+                  GATHM_LLAMACPP_BIN=str(workspace / "llama-server"),
+                  GATHM_LLAMACPP_CACHE_REUSE="512")
+        check("prefix reuse is tunable",
+              llamacpp.build_command(llamacpp.LlamaCppConfig.from_env())[
+                  llamacpp.build_command(
+                      llamacpp.LlamaCppConfig.from_env()).index("--cache-reuse") + 1],
+              "512")
+        reset_env(GATHM_LLAMACPP_MODEL=str(models / "big.gguf"),
+                  GATHM_LLAMACPP_BIN=str(workspace / "llama-server"),
+                  GATHM_LLAMACPP_PORT="9099", GATHM_LLAMACPP_CTX="8192",
+                  GATHM_LLAMACPP_THREADS="6", GATHM_LLAMACPP_NGL="33",
+                  GATHM_LLAMACPP_ARGS="--flash-attn on")
+        cfg = llamacpp.LlamaCppConfig.from_env()
+        cmd = llamacpp.build_command(cfg)
         check("the minimal command drops the tuning flags",
               llamacpp.build_command(cfg, minimal=True),
               [str(workspace / "llama-server"), "-m", str(models / "big.gguf"),
