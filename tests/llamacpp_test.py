@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from unittest.mock import patch
 import subprocess
 import sys
 import tempfile
@@ -391,7 +392,8 @@ def main() -> int:
         reset_env(GATHM_LLAMACPP_BIN=str(workspace / "nope"),
                   GATHM_LLAMACPP_MODEL=str(workspace / "nope.gguf"),
                   GATHM_LLAMACPP_MODEL_DIR=str(workspace / "empty"))
-        cfg = llamacpp.LlamaCppConfig.from_env()
+        with patch.object(llamacpp, "_candidate_binaries", return_value=[]):
+            cfg = llamacpp.LlamaCppConfig.from_env()
         check("no binary is found", cfg.binary, None)
         started, message = llamacpp.start(cfg, timeout=5)
         check("starting fails cleanly", started, False)
@@ -467,7 +469,10 @@ def main() -> int:
         env_missing = dict(env)
         env_missing["GATHM_LLAMACPP_BIN"] = str(workspace / "nope")
         result = subprocess.run(
-            [sys.executable, str(REPO / "lib" / "llamacpp.py"), "status"],
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); from lib import llamacpp; "
+             "llamacpp._candidate_binaries = lambda: []; raise SystemExit(llamacpp.main(['status']))",
+             str(REPO)],
             capture_output=True, text=True, env=env_missing, timeout=60)
         check("status exits 2 when nothing is installed", result.returncode, 2)
 

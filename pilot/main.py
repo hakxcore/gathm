@@ -484,6 +484,13 @@ def normalize_tool_command(command: str) -> str:
     normalized = _normalize_tool_invocation(parts)
     return shlex.join(normalized)
 
+def _tool_allowed(name: str) -> bool:
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", name):
+        return False
+    allowed = os.environ.get("GATHM_ALLOWED_TOOLS")
+    return allowed is None or name in allowed.split(",")
+
+
 def run_gathm_tool_raw(command: str) -> str:
     text = (command or "").strip()
 
@@ -493,6 +500,8 @@ def run_gathm_tool_raw(command: str) -> str:
     # unbalanced quote would be rejected here rather than by the shell that has
     # to run it. The string the classifier reads is the string that runs.
     if _is_raw_shell_command(text):
+        if not _tool_allowed("system"):
+            return "Error: Tool access denied."
         return _run_system_command(text[len("system"):].strip())
 
     try:
@@ -506,6 +515,9 @@ def run_gathm_tool_raw(command: str) -> str:
     tool_name = normalized_parts[0]
     tool_args = normalized_parts[1:]
 
+    if not _tool_allowed(tool_name):
+        return "Error: Tool access denied."
+
     # Dispatch built-in tools before looking in the shell tools directory
     if tool_name == "browser":
         return _run_browser_action(" ".join(tool_args))
@@ -515,9 +527,9 @@ def run_gathm_tool_raw(command: str) -> str:
         return f"Error: Tool '{tool_name}' not found."
     try:
         env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
-        shell_cmd = f'source "{GATHM_ROOT}/lib/utils.bash" && "{tool_path}" "$@"'
+        shell_cmd = 'source "$1/lib/utils.bash" && shift && command "$@"'
         result = subprocess.run(
-            ["bash", "-c", shell_cmd, "gathm-tool", *tool_args],
+            ["bash", "-c", shell_cmd, "gathm-tool", str(GATHM_ROOT), str(tool_path), *tool_args],
             capture_output=True,
             text=True,
             timeout=120,

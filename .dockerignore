@@ -1,0 +1,19 @@
+# Credentials and local state must never enter the image context.
+.git
+.env
+.env.*
+!.env.example
+**/venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.gathm
+.codex
+.agents
+dist
+build
+*.egg-info
+*.log
+bench
+docs/performance

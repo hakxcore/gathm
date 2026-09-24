@@ -13,7 +13,7 @@ shortenURL()
     [[ ! "$url" =~ ^https?:// ]] && url="http://$url"
     
     # Using tinyurl.com API
-    local response=$(httpGet "http://tinyurl.com/api-create.php?url=$url")
+    local response=$(httpGet "https://tinyurl.com/api-create.php?url=$url")
     if [[ -z "$response" || "$response" == "Error"* ]]; then
         echo "Error: Could not shorten URL."
         return 1
@@ -49,7 +49,7 @@ Usage: shorturl [flag] [URL]
 
 Examples:
    shorturl -s "https://google.com"
-   shorturl -e "http://tinyurl.com/jhkj"
+   shorturl -e "https://tinyurl.com/jhkj"
 EOF
 }
 

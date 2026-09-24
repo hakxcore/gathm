@@ -45,7 +45,7 @@ decodeQR()
     echo "Decoding QR code from $file_path..."
     
     # Use the qrserver.com API for decoding
-    local response=$(curl -s -F "file=@$file_path" http://api.qrserver.com/v1/read-qr-code/)
+    local response=$(curl -s -F "file=@$file_path" https://api.qrserver.com/v1/read-qr-code/)
     
     if [[ -z "$response" ]]; then
         echo "Error: Could not connect to decoding API."

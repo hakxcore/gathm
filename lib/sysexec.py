@@ -10,7 +10,7 @@ which need a human first".
 Three tiers:
 
     safe      read-only inspection (uname, df, ps, ls, Get-Process …) with no
-              shell metacharacters. Runs immediately: it cannot change anything.
+              shell metacharacters. Runs immediately; this is not a security sandbox.
     confirm   everything else. Needs explicit approval from a human before it
               runs. Without an approver, it is refused.
     blocked   catastrophic, irreversible, or a remote-code-execution pattern.
@@ -20,7 +20,7 @@ Two rules do most of the work:
 
   * A shell metacharacter demotes anything to `confirm`. `ls` is safe;
     `ls; rm -rf ~` starts with a safe binary and is not.
-  * The allowlist is of binaries that cannot write. Anything absent is not
+  * The allowlist covers inspected command/argument combinations. Anything absent is not
     assumed hostile, just unproven — it goes to a human.
 
 Platforms
@@ -73,104 +73,51 @@ AUDIT_LOG = CONFIG_DIR / "shell.log"
 DEFAULT_TIMEOUT = 60
 MAX_OUTPUT_CHARS = 4000
 
-# Read-only by nature. Every one of these can be run on a stranger's machine
-# without changing it — that is the entry requirement, not "usually harmless".
+# Only inspection programs without execution/output-file modes belong here.
+# Programmable utilities and package managers require confirmation, even when
+# their most common invocation happens to be read-only.
 SAFE_BINARIES = {
-    # identity and platform
-    "uname", "hostname", "whoami", "id", "groups", "arch", "sw_vers",
-    "getprop", "lsb_release", "sysctl", "uptime", "date", "locale",
-    # filesystem inspection
-    "ls", "pwd", "df", "du", "stat", "file", "find", "readlink", "basename",
-    "dirname", "wc", "head", "tail", "cat", "less", "tree", "realpath",
-    # processes and resources
-    "ps", "top", "vm_stat", "free", "nproc", "sysctl", "lsof", "vmstat",
-    "iostat", "who", "w",
-    # packages and tooling, queried not changed
-    "which", "type", "command", "env", "printenv", "python3", "python",
-    "node", "git", "brew", "pkg", "apt", "dpkg", "rpm", "pip", "pip3",
-    # network inspection
-    "ifconfig", "ip", "netstat", "ss", "route", "ping", "dig", "nslookup",
-    "host", "traceroute", "arp",
-    # text
-    "echo", "printf", "grep", "awk", "sed", "sort", "uniq", "cut", "tr",
-    "diff", "md5sum", "shasum", "sha256sum",
+    "uname", "whoami", "id", "groups", "arch", "sw_vers", "getprop",
+    "lsb_release", "uptime", "locale", "ls", "pwd", "df", "du", "readlink",
+    "basename", "dirname", "wc", "head", "tail", "cat", "realpath", "ps",
+    "vm_stat", "free", "nproc", "who", "w", "which", "printenv", "netstat",
+    "ping", "host", "traceroute", "echo", "grep", "cut", "tr", "diff",
 }
-
-# The same idea in PowerShell and cmd. Stored lower-case because Windows
-# command names are case-insensitive and models capitalise them inconsistently.
 WINDOWS_SAFE_BINARIES = {
-    # identity and platform
-    "systeminfo", "hostname", "whoami", "ver", "getmac", "chcp",
-    # filesystem inspection
-    "dir", "tree", "type", "where", "vol", "fc", "comp", "attrib",
-    # processes and resources
-    "tasklist", "qwinsta", "driverquery", "gpresult",
-    # network inspection
-    "ipconfig", "netstat", "route", "ping", "nslookup", "tracert", "pathping",
-    "arp", "netsh", "nbtstat",
-    # queried, not changed — see WINDOWS_WRITING_SUBCOMMANDS
-    "reg", "net", "sc", "wmic", "schtasks", "certutil",
-    # PowerShell aliases for the read-only cmdlets, which models love
-    "gci", "gc", "gcm", "gps", "gsv", "gm", "gp", "gl", "gu", "gdr", "gal",
-    "ls", "cat", "ps", "pwd", "echo", "history", "man", "help",
+    "systeminfo", "hostname", "whoami", "getmac", "tasklist", "driverquery",
+    "netstat", "ping", "tracert", "pathping", "dir", "ls", "cat", "ps",
+    "pwd", "echo", "gci", "gc", "gps", "gsv", "gcm",
+    "get-computerinfo", "get-process", "get-childitem", "get-volume",
+    "get-service", "get-content", "get-location", "get-command",
+    "test-netconnection", "measure-object",
 }
 
-# Cmdlet verbs that are read-only by PowerShell's own naming convention.
-# Format- is deliberately absent: Format-Table is harmless, Format-Volume is
-# not, and the convention does not distinguish them.
-WINDOWS_SAFE_VERBS = (
-    "get-", "test-", "measure-", "resolve-", "compare-", "select-", "sort-",
-    "convertfrom-", "convertto-", "out-string", "read-host", "show-command",
-)
 
-# Subcommands that turn an otherwise read-only tool into a writing one.
-# `git status` is inspection; `git push` is not. `brew list` is inspection;
-# `brew install` is not.
-WRITING_SUBCOMMANDS = {
-    "git": {"push", "commit", "reset", "clean", "rebase", "merge", "checkout",
-            "switch", "restore", "rm", "mv", "add", "apply", "am", "cherry-pick",
-            "revert", "tag", "gc", "prune", "filter-branch", "config", "init",
-            "clone", "fetch", "pull", "submodule", "stash", "worktree"},
-    "brew": {"install", "uninstall", "remove", "upgrade", "update", "link",
-             "unlink", "cleanup", "tap", "untap", "reinstall", "pin", "unpin"},
-    "pkg":  {"install", "uninstall", "remove", "upgrade", "update", "autoclean",
-             "clean", "reinstall"},
-    "apt":  {"install", "remove", "purge", "upgrade", "update", "autoremove",
-             "dist-upgrade"},
-    "pip":  {"install", "uninstall", "download"},
-    "pip3": {"install", "uninstall", "download"},
-    "ip":   {"link", "addr", "route", "netns", "rule"},   # `ip … add/del` writes
-    "sysctl": {"-w"},
-    # Interpreters run arbitrary code; only --version style flags stay safe.
-    "python3": {"-c", "-m"},
-    "python":  {"-c", "-m"},
-    "node":    {"-e", "-p", "--eval", "--print"},
-}
-
-# The same, for the Windows tools that are only read-only in their query mode.
-WINDOWS_WRITING_SUBCOMMANDS = {
-    "reg":     {"add", "delete", "import", "restore", "load", "unload", "copy",
-                "save"},
-    "net":     {"user", "localgroup", "group", "stop", "start", "use", "share",
-                "accounts", "session"},
-    "sc":      {"config", "create", "delete", "start", "stop", "pause",
-                "failure", "sdset"},
-    "wmic":    {"call", "create", "delete", "set"},
-    "schtasks":{"/create", "/delete", "/change", "/run", "/end"},
-    "netsh":   {"set", "add", "delete", "reset", "import"},
-    "certutil":{"-addstore", "-delstore", "-urlcache", "-decode", "-encode",
-                "-importpfx"},
-    "attrib":  {"+r", "-r", "+h", "-h", "+s", "-s"},
-}
+def _read_only_arguments(binary: str, args: list[str], dialect: str) -> bool:
+    if dialect == "windows":
+        if binary == "ipconfig":
+            return not args or [a.lower() for a in args] == ["/all"]
+        if binary in {"reg", "net"}:
+            return bool(args) and args[0].lower() == {"reg": "query", "net": "view"}[binary]
+        # PowerShell common parameters can write files or assign variables.
+        if any(a.lower().startswith(("-out", "-errorvariable", "-warningvariable",
+                                    "-informationvariable", "-pipelinevariable")) for a in args):
+            return False
+        return binary in WINDOWS_SAFE_BINARIES
+    if binary in {"python", "python3", "node"}:
+        return args in (["--version"], ["-V"])
+    if binary in {"date", "hostname", "ifconfig", "env"}:
+        return not args
+    return binary in SAFE_BINARIES
 
 # Anything a shell would interpret. Present, and the command is no longer just
 # the binary it starts with.
-SHELL_METACHARACTERS = re.compile(r"[;&|`$><\n]|\$\(|\|\|")
+SHELL_METACHARACTERS = re.compile(r"[;&|`$><\n\r(){}]|\$\(")
 
 # PowerShell reads variables with `$` in almost every useful command
 # (`Get-ChildItem $env:USERPROFILE`), so a bare `$` cannot mean "suspicious"
 # there. `$(...)` still runs code, and still counts.
-WINDOWS_METACHARACTERS = re.compile(r"[;&|`><\n]|\$\(")
+WINDOWS_METACHARACTERS = re.compile(r"[;&|`><\n\r(){}\[\]]|\$\(")
 
 # Never, with or without approval. Ordered roughly by how often each shows up
 # in a model's output when it has misunderstood the question.
@@ -399,33 +346,25 @@ def _leaf(token: str) -> str:
 
 
 def _first_binary(command: str, dialect: str = "posix") -> tuple:
-    """(binary, args) of the command, or ("", []) if it cannot be parsed."""
+    """Parse without trusting an arbitrary executable's basename."""
     try:
         parts = shlex.split(command, posix=(dialect != "windows"))
     except ValueError:
         return "", []
     if not parts:
         return "", []
+    # env with no flags/assignments is the only wrapper we accept.
+    if dialect != "windows" and parts[0] == "env" and len(parts) > 1:
+        parts = parts[1:]
+    name = parts[0].strip('"')
+    if "/" in name or "\\" in name:
+        return "", []
     if dialect == "windows":
-        # Windows has no `env`/`nohup` wrappers worth unwrapping, and its paths
-        # are full of backslashes that POSIX splitting would eat.
-        return _leaf(parts[0]), [p.strip('"') for p in parts[1:]]
-    # Skip a leading `sudo`/`env`, but remember it: sudo never reaches `safe`.
-    idx = 0
-    wrappers = ("env", "nice", "nohup", "time")
-    while idx < len(parts) and parts[idx] in wrappers:
-        idx += 1
-    if idx >= len(parts):
-        # The whole command was wrappers, so the last one IS the command:
-        # bare `env` prints the environment and is read-only.
-        return os.path.basename(parts[-1]), []
-    return os.path.basename(parts[idx]), parts[idx + 1:]
-
-
-def _windows_is_read_only(binary: str) -> bool:
-    if binary in WINDOWS_SAFE_BINARIES or binary in SAFE_BINARIES:
-        return True
-    return binary.startswith(WINDOWS_SAFE_VERBS)
+        # .cmd/.ps1 can be arbitrary scripts named after a trusted command.
+        if name.lower().endswith((".cmd", ".bat", ".ps1", ".com")):
+            return "", []
+        return _leaf(name), [p.strip('"') for p in parts[1:]]
+    return name, parts[1:]
 
 
 def classify(command: str, dialect: str = "") -> tuple:
@@ -454,31 +393,9 @@ def classify(command: str, dialect: str = "") -> tuple:
     if not binary:
         return "confirm", "the command could not be parsed"
 
-    if dialect == "windows":
-        if binary in ("runas", "start-process", "sudo", "gsudo"):
-            return "confirm", "it asks for administrator rights"
-        if not _windows_is_read_only(binary):
-            return "confirm", f"'{binary}' is not on the read-only list"
-        writing = WINDOWS_WRITING_SUBCOMMANDS.get(binary)
-        if writing:
-            for arg in args:
-                if arg.lower() in writing:
-                    return "confirm", f"'{binary} {arg}' can change things"
-        return "safe", "read-only"
-
-    if binary in ("sudo", "doas", "su"):
-        return "confirm", "it asks for root"
-
-    if binary not in SAFE_BINARIES:
-        return "confirm", f"'{binary}' is not on the read-only list"
-
-    writing = WRITING_SUBCOMMANDS.get(binary)
-    if writing:
-        for arg in args:
-            if arg in writing:
-                return "confirm", f"'{binary} {arg}' can change things"
-
-    return "safe", "read-only"
+    if not _read_only_arguments(binary, args, dialect):
+        return "confirm", f"'{binary}' and these arguments are not proven read-only"
+    return "safe", "read-only inspection (not a sandbox)"
 
 
 def _audit(command: str, tier: str, outcome: str) -> None:
@@ -548,8 +465,18 @@ def run(command: str, approve=None, timeout: int = DEFAULT_TIMEOUT) -> tuple:
             return False, "not run — you declined it."
 
     try:
-        proc = subprocess.run(argv_prefix + [command], capture_output=True,
-                              text=True, timeout=timeout)
+        # Preserve normal tilde/glob expansion, but bypass functions and
+        # startup files for automatic inspection. Host executables/PATH remain
+        # trusted; confirmation is not an operating-system sandbox.
+        argv = argv_prefix + [command]
+        env = dict(os.environ)
+        if tier == "safe" and dialect == "posix":
+            shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+            env = {k: v for k, v in env.items()
+                   if k not in {"BASH_ENV", "ENV"} and not k.startswith("BASH_FUNC_")}
+            argv = [shell, "-c", "command " + command]
+        proc = subprocess.run(argv, capture_output=True,
+                              text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         _audit(command, tier, f"timeout-{timeout}s")
         return False, f"timed out after {timeout}s"

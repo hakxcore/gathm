@@ -227,15 +227,17 @@ echo "== the distro package =="
 # Preferred over the download on Linux, so the cases that matter are: it is
 # used when the package is really there, and it gets out of the way quietly
 # when it is not (a wrong or renamed package name must cost nothing).
-check "apt is detected here" "$(_llamacpp_package_manager)" "apt"
 contains "with the Debian package name" "$(_llamacpp_package_candidates apt)" "llama.cpp-tools"
-
-# The probe has to be real: a package that exists answers yes, one that does
-# not answers no. coreutils stands in for "definitely installed".
-_llamacpp_package_exists apt coreutils
-check "a real package probes true" "$?" "0"
-_llamacpp_package_exists apt gathm-not-a-real-package
-check "an absent package probes false" "$?" "1"
+# Test the real package database only where apt is present. Simulated package
+# adoption below must not depend on the host operating system.
+if command -v apt-cache >/dev/null 2>&1; then
+    _llamacpp_package_exists apt coreutils
+    check "a real package probes true" "$?" "0"
+    _llamacpp_package_exists apt gathm-not-a-real-package
+    check "an absent package probes false" "$?" "1"
+fi
+_llamacpp_package_manager() { echo apt; }
+_llamacpp_sudo() { echo ""; }
 
 # The success path, with the manager stubbed at _bounded — NOT at apt-get.
 # The installer runs the package manager through `timeout env apt-get`, which
@@ -248,6 +250,12 @@ mkdir -p "$FIX/pkgbin"
 # the installer would also restore its ok()/warn(), which are the names this
 # suite uses for its own PASS counter — the counter silently stopped counting.
 _ORIG_BOUNDED="$(declare -f _bounded)"
+_ORIG_EXISTING="$(declare -f _llamacpp_existing_bin)"
+# Simulate discovery inside the test package, independent of host installs.
+_llamacpp_existing_bin() {
+    [[ -x "$LLAMACPP_BIN_DIR/llama-server" ]] || return 1
+    printf '%s\n' "$LLAMACPP_BIN_DIR/llama-server"
+}
 _llamacpp_package_exists() { return 0; }
 _pkg_installs() {
     printf '#!/bin/sh\necho "version: distro"\n' > "$FIX/pkgbin/llama-server"
@@ -299,6 +307,7 @@ unset -f _llamacpp_package_exists _pkg_installs _pkg_installs_broken
 unset GATHM_LLAMACPP_NO_PACKAGE
 unset -f _bounded
 eval "$_ORIG_BOUNDED"
+eval "$_ORIG_EXISTING"
 
 echo "== does the binary actually run here =="
 # The prebuilt Linux archives are built against glibc 2.35. On an older distro,

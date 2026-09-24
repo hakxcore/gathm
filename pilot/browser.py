@@ -43,6 +43,8 @@ import os
 import shutil
 import subprocess
 import threading
+import re
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any, Optional
 
@@ -370,19 +372,31 @@ def _page_text(page: Any, max_lines: int = 200) -> str:
 # Action: open URL in the system's GUI browser
 # ---------------------------------------------------------------------------
 
+def _valid_web_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                and not parsed.username and not parsed.password
+                and not any(ord(c) < 32 for c in url))
+    except ValueError:
+        return False
+
+
 def open_url(url: str) -> str:
+    if not _valid_web_url(url):
+        return "Error: Only HTTP and HTTPS URLs are supported."
     plat = _platform()
     try:
         if plat == "macos":
             subprocess.run(["open", url], check=True, timeout=5)
         elif plat == "windows":
-            subprocess.run(["cmd", "/c", "start", "", url], check=True, timeout=5)
+            os.startfile(url)
         elif plat == "termux":
             subprocess.run(["termux-open-url", url], check=True, timeout=5)
         elif plat == "wsl":
             try:
-                subprocess.run(["cmd.exe", "/c", "start", "", url],
-                               check=True, timeout=5)
+                # cmd.exe re-parses arguments; never pass URL text to it.
+                subprocess.run(["wslview", url], check=True, timeout=5)
             except Exception:
                 subprocess.run(["xdg-open", url], check=False, timeout=5)
         else:
@@ -402,6 +416,8 @@ def open_url(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def fetch_page(url: str, timeout: int = 15) -> str:
+    if not _valid_web_url(url):
+        return "Error: Only HTTP and HTTPS URLs are supported."
     try:
         import requests  # type: ignore[import]
         from bs4 import BeautifulSoup  # type: ignore[import]
@@ -419,7 +435,7 @@ def fetch_page(url: str, timeout: int = 15) -> str:
     except ImportError:
         try:
             result = subprocess.run(
-                ["curl", "-s", "-L", "--max-time", str(timeout),
+                ["curl", "-s", "-L", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", str(timeout),
                  "-A", "Mozilla/5.0", url],
                 capture_output=True, text=True, timeout=timeout + 5,
             )
@@ -436,6 +452,8 @@ def fetch_page(url: str, timeout: int = 15) -> str:
 # ---------------------------------------------------------------------------
 
 def navigate(url: str) -> str:
+    if not _valid_web_url(url):
+        return "Error: Only HTTP and HTTPS URLs are supported."
     err = _session.ensure()
     if err:
         return err
@@ -498,6 +516,8 @@ def scroll_page(direction: str) -> str:
 
 
 def screenshot(url: Optional[str] = None) -> str:
+    if url and not _valid_web_url(url):
+        return "Error: Only HTTP and HTTPS URLs are supported."
     err = _session.ensure()
     if err:
         return err
@@ -553,7 +573,7 @@ def run_browser_action(command: str) -> str:
     rest = parts[1].strip() if len(parts) > 1 else ""
 
     def _with_scheme(u: str) -> str:
-        return u if u.startswith(("http://", "https://")) else "https://" + u
+        return u if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", u) else "https://" + u
 
     if action == "open":
         return open_url(_with_scheme(rest)) if rest else "Usage: browser open <url>"

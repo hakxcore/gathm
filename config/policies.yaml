@@ -16,7 +16,7 @@ roles:
       - "tool:healthcheck"
       - "config:read"
     blocked_tools: []
-    requires_approval: [shodan, crypt]
+    requires_approval: [shodan, crypt, shareterminal, transfer]
     rate_limit: 120  # Per minute
 
   user:
@@ -24,6 +24,7 @@ roles:
     permissions:
       - "tool:execute"
       - "tool:discover"
+    requires_approval: [crypt, shareterminal, transfer]
     rate_limit: 60  # Per minute
 
   readonly:

@@ -55,7 +55,7 @@ run_subdomain_stage() {
   echo "[1/6] Subdomain discovery"
   : > "$hosts_file"
 
-  if has_bin subfinder; then
+  if gathm_tool_allowed subfinder && has_bin subfinder; then
     echo "  - using subfinder"
     subfinder -d "$domain" -silent 2>/dev/null >> "$hosts_file" || true
   fi
@@ -75,7 +75,7 @@ run_dns_stage() {
 
   echo "[2/6] DNS resolution"
   : > "$resolved_file"
-  if has_bin dnsx; then
+  if gathm_tool_allowed dnsx && has_bin dnsx; then
     echo "  - using dnsx"
     dnsx -l "$hosts_file" -silent 2>/dev/null >> "$resolved_file" || true
   else
@@ -91,7 +91,7 @@ run_http_stage() {
 
   echo "[3/6] HTTP probing"
   : > "$live_file"
-  if has_bin httpx; then
+  if gathm_tool_allowed httpx && has_bin httpx; then
     echo "  - using httpx"
     httpx -l "$resolved_file" -silent 2>/dev/null >> "$live_file" || true
   else
@@ -107,7 +107,7 @@ run_naabu_stage() {
 
   echo "[4/6] Port scanning"
   : > "$ports_file"
-  if has_bin naabu; then
+  if gathm_tool_allowed naabu && has_bin naabu; then
     echo "  - using naabu"
     naabu -list "$resolved_file" -top-ports "$top_ports" -silent 2>/dev/null >> "$ports_file" || true
   else
@@ -121,7 +121,7 @@ run_katana_stage() {
 
   echo "[5/6] Crawling"
   : > "$crawl_file"
-  if has_bin katana; then
+  if gathm_tool_allowed katana && has_bin katana; then
     echo "  - using katana"
     katana -list "$live_file" -depth "$crawl_depth" -silent 2>/dev/null >> "$crawl_file" || true
   else
@@ -135,7 +135,7 @@ run_nuclei_stage() {
 
   echo "[6/6] Vulnerability templates"
   : > "$nuclei_file"
-  if has_bin nuclei; then
+  if gathm_tool_allowed nuclei && has_bin nuclei; then
     echo "  - using nuclei"
     nuclei -l "$live_file" -severity "$nuclei_severity" -silent 2>/dev/null >> "$nuclei_file" || true
   else

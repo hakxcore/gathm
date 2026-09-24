@@ -28,8 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install Python dependencies for API server (optional - graceful fallback)
-RUN pip3 install --no-cache-dir pyyaml 2>/dev/null || true
+# Install the API dependencies explicitly; installation failure stops the build.
+COPY api/requirements.txt /tmp/gathm-api-requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt
 
 # Create non-root user for security
 ARG GATHM_USER=gathm
@@ -76,7 +77,7 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD bash -c "gathm health all --json" || exit 1
+    CMD curl --fail --silent http://127.0.0.1:8080/api/v1/ping || exit 1
 
 # Default: run the API server
-CMD ["python3", "/opt/gathm/api/server.py", "--port", "8080"]
+CMD ["python3", "/opt/gathm/api/server.py", "--host", "0.0.0.0", "--port", "8080"]

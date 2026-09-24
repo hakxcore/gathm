@@ -13,7 +13,7 @@ Endpoints:
     GET  /api/v1/tools                  - List all tools
     GET  /api/v1/tools/{name}           - Get tool metadata
     POST /api/v1/tools/{name}/execute   - Execute a tool
-    GET  /api/v1/health                 - System health check (public)
+    GET  /api/v1/health                 - System health check (authorized)
     GET  /api/v1/health/{tool}          - Tool health check
     POST /api/v1/agent/ask              - Natural language query
     POST /api/v1/agent/plan             - Create execution plan
@@ -32,10 +32,15 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import ipaddress
+from contextvars import ContextVar
+from urllib.parse import urlsplit
 import json
 import os
 import platform
 import secrets
+import signal
 import re
 import shutil
 import subprocess
@@ -45,20 +50,19 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Literal, Union
 
 try:
     from fastapi import FastAPI, HTTPException, Request, Response, status
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
     import uvicorn
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
-    class CORSMiddleware:
-        def __init__(self, *args, **kwargs): pass
+    def Field(default=None, **kwargs):
+        return default
     class StaticFiles:
         def __init__(self, *args, **kwargs): pass
     status = None
@@ -93,12 +97,6 @@ try:
 except ImportError:
     HAS_YAML = False
 
-class GathmAPIHandler:
-    """Compatibility stub for testing legacy API server imports."""
-    @staticmethod
-    def _check_auth():
-        return True
-
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -113,33 +111,6 @@ DEFAULT_PORT = int(os.environ.get("GATHM_PORT", 8080))
 DEFAULT_HOST = os.environ.get("GATHM_HOST", "127.0.0.1")
 PILOT_DIR = GATHM_ROOT / "pilot"
 CHAT_SCRIPT = PILOT_DIR / "chat_once.py"
-DEFAULT_PORT = 8080
-DEFAULT_HOST = "127.0.0.1"
-
-# MIME types for static GUI files
-MIME_TYPES = {
-    ".html": "text/html",
-    ".css": "text/css",
-    ".js": "application/javascript",
-    ".json": "application/json",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".svg": "image/svg+xml",
-    ".ico": "image/x-icon",
-}
-
-# API Authentication
-# Set GATHM_API_KEY environment variable to enable API key authentication.
-# When set, all requests must include: Authorization: Bearer <key>
-# Health and root endpoints are exempt.
-GATHM_API_KEY = os.environ.get("GATHM_API_KEY", "")
-# NOTE: PUBLIC_PATHS lives next to the auth logic below. It used to be defined
-# here as well, and that earlier copy was silently shadowed by the later one --
-# so entries added here (notably /api/v1/ping) never took effect.
-
-import hashlib
-import secrets
-
 API_VERSION = "3.0.0"
 
 # ---------------------------------------------------------------------------
@@ -211,7 +182,11 @@ def _build_token_map() -> dict[str, str]:
             pair = pair.strip()
             if ":" in pair:
                 tok, role = pair.split(":", 1)
+                if not tok.strip() or not role.strip():
+                    raise ValueError("GATHM_API_KEYS entries require a nonempty token and role")
                 token_map[tok.strip()] = role.strip()
+            else:
+                raise ValueError("GATHM_API_KEYS entries must use token:role")
     legacy = os.environ.get("GATHM_API_KEY", "")
     if legacy and legacy not in token_map:
         token_map[legacy] = "admin"
@@ -219,10 +194,11 @@ def _build_token_map() -> dict[str, str]:
 
 TOKEN_MAP: dict[str, str] = _build_token_map()
 AUTH_ENABLED = bool(TOKEN_MAP)
+_EXECUTION_ENV: ContextVar = ContextVar("gathm_execution_env", default=None)
 
 # Public paths that skip auth entirely.
 # GUI static files are also public (any path not starting with /api/).
-PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/health", "/api/v1/ping"}
+PUBLIC_PATHS = {"/", "/api", "/api/v1", "/api/v1/ping"}
 
 def resolve_role(request: Request) -> str | None:
     """Return the role for the request's bearer token, or None if unauthenticated."""
@@ -292,7 +268,13 @@ def check_rate_limit(key: str, limit: int) -> bool:
 # Tool helpers
 # ---------------------------------------------------------------------------
 
+def valid_tool_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", name))
+
+
 def load_tool_manifest(tool_name: str) -> dict:
+    if not valid_tool_name(tool_name):
+        return {}
     return _load_yaml(TOOLS_DIR / tool_name / "tool.yaml")
 
 def list_tools() -> list[dict]:
@@ -314,8 +296,33 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKJHABCDFG]')
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
+def _kill_process(proc) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+MAX_OUTPUT_BYTES = 1024 * 1024
+MAX_OUTPUT_LINES = 10000
+
+
+async def _bounded_read(stream) -> bytes:
+    data = bytearray()
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            return bytes(data)
+        if len(data) + len(chunk) > MAX_OUTPUT_BYTES:
+            raise ValueError("Process output limit exceeded")
+        data.extend(chunk)
+
+
 async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None = None) -> dict:
-    env = {**os.environ, "GATHM_OUTPUT_MODE": "json"}
+    env = _child_env()
     if extra_env:
         env.update(extra_env)
 
@@ -326,14 +333,26 @@ async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None =
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=(os.name == "posix"),
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
+            async def collect():
+                readers = [asyncio.create_task(_bounded_read(proc.stdout)),
+                           asyncio.create_task(_bounded_read(proc.stderr))]
+                try:
+                    stdout, stderr = await asyncio.gather(*readers)
+                    await proc.wait()
+                    return stdout, stderr
+                finally:
+                    for reader in readers:
+                        reader.cancel()
+                    await asyncio.gather(*readers, return_exceptions=True)
+            stdout, stderr = await asyncio.wait_for(collect(), timeout=timeout)
+        except (asyncio.TimeoutError, ValueError) as exc:
+            _kill_process(proc)
             await proc.communicate()
             return {"status": "error", "exit_code": -1, "output": "",
-                    "error": f"Timed out after {timeout}s", "duration_ms": timeout * 1000}
+                    "error": str(exc) or f"Timed out after {timeout}s", "duration_ms": timeout * 1000}
         duration_ms = int((time.time() - start_time) * 1000)
 
         return {
@@ -345,28 +364,6 @@ async def _run_subprocess(cmd: list[str], timeout: int, extra_env: dict | None =
         }
     except Exception as exc:
         return {"status": "error", "exit_code": -1, "output": "", "error": str(exc)}
-
-# Words to remove when extracting a tool's argument from natural language.
-_NL_FILLER = frozenset([
-    "get", "show", "tell", "me", "what", "is", "are", "the", "a", "an",
-    "give", "find", "look", "up", "lookup", "check", "please", "i", "want",
-    "to", "know", "about", "can", "you", "run", "gathm", "use", "do",
-    "for", "in", "at", "on", "from", "of", "and",
-    # common query openers per domain
-    "weather", "forecast", "temperature", "temp",
-    "dns", "records", "record", "query", "lookup",
-    "ip", "address",
-    "define", "definition", "meaning", "word",
-    "crypto", "cryptocurrency", "price", "cost", "value",
-    "news", "latest", "current", "today",
-    "whois", "info", "information",
-    "movie", "film", "song", "lyrics",
-])
-
-def _extract_tool_args(query: str, tool_name: str) -> list:
-    """Strip NL filler and the tool name from a query, returning bare args."""
-    filler = _NL_FILLER | {tool_name.lower()}
-    return [w for w in query.split() if w.lower() not in filler]
 
 async def execute_tool(tool_name: str, args: list[str], timeout: int = 120) -> dict:
     start = time.monotonic()
@@ -448,7 +445,7 @@ def run_chat_agent(query: str, history: list = None, timeout: int | None = None)
             text=True,
             timeout=timeout,
             cwd=str(PILOT_DIR),
-            env={**os.environ},
+            env=_child_env(),
         )
     except subprocess.TimeoutExpired:
         return {"error": (
@@ -501,6 +498,8 @@ class Job:
     tool: str           # tool name for kind="tool"; agent sub-command otherwise
     args: list[str]
     timeout: int
+    owner: str = ""
+    execution_env: dict = field(default_factory=dict, repr=False)
     status: JobStatus = JobStatus.pending
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -534,8 +533,12 @@ def _job_to_dict(job: Job) -> dict:
 
 async def _persist_job(job: Job) -> None:
     try:
-        JOBS_DIR.mkdir(parents=True, exist_ok=True)
-        (JOBS_DIR / f"{job.id}.json").write_text(json.dumps(_job_to_dict(job), indent=2))
+        JOBS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        JOBS_DIR.chmod(0o700)
+        path = JOBS_DIR / f"{job.id}.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(_job_to_dict(job), handle, indent=2)
     except Exception:
         pass
 
@@ -549,7 +552,7 @@ async def _run_job_task(job: Job) -> None:
     else:
         cmd = [BASH_CMD, str(AGENT_SCRIPT), job.kind] + job.args + ["--json"]
 
-    env = {**os.environ, "GATHM_OUTPUT_MODE": "json"}
+    env = _child_env(job.execution_env)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -557,26 +560,33 @@ async def _run_job_task(job: Job) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=(os.name == "posix"),
         )
         job._proc = proc
 
         stderr_lines: list[str] = []
+        stderr_bytes = stdout_bytes = 0
 
         async def _drain_stderr() -> None:
+            nonlocal stderr_bytes
             assert proc.stderr
             while True:
                 line = await proc.stderr.readline()
                 if not line:
                     break
+                stderr_bytes += len(line)
+                if stderr_bytes > MAX_OUTPUT_BYTES or len(stderr_lines) >= MAX_OUTPUT_LINES:
+                    raise ValueError("Process error output limit exceeded")
                 stderr_lines.append(line.decode(errors="replace").rstrip())
 
         async def _drain_stdout() -> None:
+            nonlocal stdout_bytes
             assert proc.stdout
             deadline = asyncio.get_event_loop().time() + job.timeout
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
                 if remaining <= 0:
-                    proc.kill()
+                    _kill_process(proc)
                     job.status = JobStatus.failed
                     job.error = f"Timed out after {job.timeout}s"
                     break
@@ -586,6 +596,9 @@ async def _run_job_task(job: Job) -> None:
                     continue
                 if not raw:
                     break
+                stdout_bytes += len(raw)
+                if stdout_bytes > MAX_OUTPUT_BYTES or len(job.output_lines) >= MAX_OUTPUT_LINES:
+                    raise ValueError("Process output limit exceeded")
                 text = raw.decode(errors="replace").rstrip("\n")
                 job.output_lines.append(text)
                 event_data = json.dumps({"event": "output", "line": text, "ts": time.time()})
@@ -595,8 +608,16 @@ async def _run_job_task(job: Job) -> None:
                     except asyncio.QueueFull:
                         pass
 
-        await asyncio.gather(_drain_stdout(), _drain_stderr())
-        await proc.wait()
+        async def collect():
+            readers = [asyncio.create_task(_drain_stdout()), asyncio.create_task(_drain_stderr())]
+            try:
+                await asyncio.gather(*readers)
+                await proc.wait()
+            finally:
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+        await asyncio.wait_for(collect(), timeout=job.timeout)
         if job.status == JobStatus.running:
             job.exit_code = proc.returncode
             job.error = "\n".join(stderr_lines) if proc.returncode != 0 else ""
@@ -605,11 +626,15 @@ async def _run_job_task(job: Job) -> None:
     except asyncio.CancelledError:
         if job._proc:
             try:
-                job._proc.kill()
+                _kill_process(job._proc)
+                await job._proc.communicate()
             except Exception:
                 pass
         job.status = JobStatus.cancelled
     except Exception as exc:
+        if job._proc:
+            _kill_process(job._proc)
+            await job._proc.communicate()
         job.status = JobStatus.failed
         job.error = str(exc)
     finally:
@@ -627,8 +652,19 @@ async def _run_job_task(job: Job) -> None:
         job._subscribers.clear()
         await _persist_job(job)
 
-def _create_job(kind: str, tool: str, args: list[str], timeout: int) -> Job:
-    job = Job(id=uuid.uuid4().hex, kind=kind, tool=tool, args=args, timeout=timeout)
+def _create_job(kind: str, tool: str, args: list[str], timeout: int, owner: str = "") -> Job:
+    if len(_job_store) >= 200:
+        finished = [j for j in _job_store.values() if j.status in
+                    (JobStatus.completed, JobStatus.failed, JobStatus.cancelled)]
+        if not finished:
+            raise HTTPException(429, "Job queue is full")
+        oldest = min(finished, key=lambda j: j.created_at).id
+        del _job_store[oldest]
+        (JOBS_DIR / f"{oldest}.json").unlink(missing_ok=True)
+    if sum(j.status in (JobStatus.pending, JobStatus.running) for j in _job_store.values()) >= 4:
+        raise HTTPException(429, "Too many active jobs")
+    job = Job(id=uuid.uuid4().hex, kind=kind, tool=tool, args=args, timeout=timeout,
+              owner=owner, execution_env=dict(_EXECUTION_ENV.get() or {}))
     _job_store[job.id] = job
     job._task = asyncio.create_task(_run_job_task(job))
     return job
@@ -636,6 +672,39 @@ def _create_job(kind: str, tool: str, args: list[str], timeout: int) -> Job:
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
+
+class BodyLimitMiddleware:
+    """Bound uploads before JSON parsing, including chunked requests."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
+            return await self.app(scope, receive, send)
+        limit = MAX_AUDIO_BYTES if scope["path"] == "/api/v1/transcribe" else 1024 * 1024
+        data = bytearray()
+        while True:
+            try:
+                event = await asyncio.wait_for(receive(), timeout=30)
+            except asyncio.TimeoutError:
+                return await JSONResponse({"error": "Upload timed out"}, status_code=408)(scope, receive, send)
+            if event["type"] == "http.disconnect":
+                return
+            chunk = event.get("body", b"")
+            if len(data) + len(chunk) > limit:
+                return await JSONResponse({"error": "Request body too large"}, status_code=413)(scope, receive, send)
+            data.extend(chunk)
+            if not event.get("more_body", False):
+                break
+        sent = False
+        async def replay():
+            nonlocal sent
+            if sent:
+                return await receive()
+            sent = True
+            return {"type": "http.request", "body": bytes(data), "more_body": False}
+        await self.app(scope, replay, send)
+
 
 app = FastAPI(
     title="Gathm Enterprise API",
@@ -645,57 +714,101 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
+app.add_middleware(BodyLimitMiddleware)
 
 # ---------------------------------------------------------------------------
 # Auth + rate-limit middleware
 # ---------------------------------------------------------------------------
 
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _role_environment(role: str) -> dict:
+    allowed = {t["name"] for t in list_tools()}
+    if role_has_permission(role, "system:execute"):
+        allowed.add("system")
+    if role_has_permission(role, "browser:execute"):
+        allowed.add("browser")
+    # Explicit denies take precedence over capabilities, including builtins.
+    allowed -= set(role_blocked_tools(role)) | set(role_requires_approval(role))
+    env = {"GATHM_ALLOWED_TOOLS": ",".join(sorted(allowed)),
+           "GATHM_NON_INTERACTIVE": "1", "GATHM_AUTO_INSTALL": "0"}
+    if "system" not in allowed:
+        env["GATHM_ALLOW_SHELL"] = "0"
+    return env
+
+
+def _child_env(overrides: dict | None = None) -> dict:
+    env = dict(os.environ)
+    # Tool output must not disclose credentials that grant API access.
+    env.pop("GATHM_API_KEY", None)
+    env.pop("GATHM_API_KEYS", None)
+    env.update(_EXECUTION_ENV.get() or {})
+    env.update(overrides or {})
+    env["GATHM_OUTPUT_MODE"] = "json"
+    return env
+
+
+def _principal(request: Request) -> str:
+    return hashlib.sha256(request.headers.get("authorization", "local").encode()).hexdigest()
+
+
+def _owns_job(request: Request, job: Job) -> bool:
+    return role_has_permission(_get_role(request), "*") or job.owner == _principal(request)
+
+
 @app.middleware("http")
 async def auth_and_ratelimit(request: Request, call_next):
     path = request.url.path.rstrip("/")
+    host = request.url.hostname or ""
+    # Check both peer and Host: a hostile domain resolving to 127.0.0.1 must
+    # not inherit the local GUI's authority (DNS rebinding).
+    if not AUTH_ENABLED and (not _is_loopback(host) or not request.client or
+                             not _is_loopback(request.client.host)):
+        return JSONResponse({"error": "API keys are required for remote access"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin:
+        try:
+            parsed = urlsplit(origin)
+            same_origin = (parsed.scheme == request.url.scheme and parsed.netloc == request.url.netloc
+                           and not parsed.path and not parsed.query and not parsed.fragment)
+        except ValueError:
+            same_origin = False
+        if not same_origin:
+            return JSONResponse({"error": "Cross-origin requests are not allowed"}, status_code=403)
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return JSONResponse({"error": "Cross-site requests are not allowed"}, status_code=403)
 
-    # Public paths and GUI static assets skip auth
-    is_api = path.startswith("/api/")
-    is_public = path in PUBLIC_PATHS or not is_api
-
-    if is_public:
-        return await call_next(request)
-
+    is_public = path in PUBLIC_PATHS or not path.startswith("/api/")
     role = resolve_role(request)
-    if role is None:
-        return JSONResponse(
-            {"error": "Unauthorized", "detail": "Provide: Authorization: Bearer <token>"},
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Rate limit: use token as key when auth enabled, else IP
-    auth_header = request.headers.get("Authorization", "")
-    rl_key = auth_header[7:] if auth_header.startswith("Bearer ") else (
-        request.client.host if request.client else "anonymous"
-    )
-    limit = role_rate_limit(role)
-    if not check_rate_limit(rl_key, limit):
-        policies = _get_policies()
-        window = policies.get("rate_limiting", {}).get("window_seconds", 60)
-        return JSONResponse(
-            {"error": "rate_limit_exceeded", "role": role, "limit": limit,
-             "window_seconds": window},
-            status_code=429,
-            headers={"X-RateLimit-Limit": str(limit), "Retry-After": str(window)},
-        )
-
-    # Attach role to request state for route handlers
+    if not is_public and role is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401,
+                            headers={"WWW-Authenticate": "Bearer"})
+    role = role or "anonymous"
     request.state.role = role
-    response = await call_next(request)
-    response.headers["X-RateLimit-Limit"] = str(limit)
+    limit = role_rate_limit(role)
+    if not is_public and not check_rate_limit(_principal(request), limit):
+        return JSONResponse({"error": "rate_limit_exceeded"}, status_code=429,
+                            headers={"Retry-After": "60"})
+    token = _EXECUTION_ENV.set(_role_environment(role) if not is_public else {})
+    try:
+        response = await call_next(request)
+    finally:
+        _EXECUTION_ENV.reset(token)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if not path.startswith("/api"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' blob:; "
+            "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
     return response
 
 # ---------------------------------------------------------------------------
@@ -703,45 +816,47 @@ async def auth_and_ratelimit(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 class ExecuteRequest(BaseModel):
-    args: list[str] | str = []
-    timeout: int = 120
+    args: Union[list[str], str] = []
+    timeout: int = Field(default=120, ge=1, le=600)
 
 class QueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=16000)
 
 class ChatRequest(BaseModel):
     """GUI chat turn. `history` is prior turns as {"role", "content"} dicts."""
-    query: str
-    history: list = []
+    query: str = Field(min_length=1, max_length=16000)
+    history: list = Field(default_factory=list, max_length=100)
 
 class SpeechRequest(BaseModel):
     """Text to render as speech for the browser to play."""
-    text: str
+    text: str = Field(min_length=1, max_length=16000)
 
 class TaskRequest(BaseModel):
-    task: str
+    task: str = Field(min_length=1, max_length=16000)
 
 class PipelineRequest(BaseModel):
-    pipeline: str
+    pipeline: str = Field(min_length=1, max_length=16000)
 
 class ParallelRequest(BaseModel):
-    tools: str
+    tools: str = Field(min_length=1, max_length=16000)
 
 class HealRequest(BaseModel):
     tool: str = "all"
 
 class JobRequest(BaseModel):
-    kind: str = "tool"       # "tool" | "ask" | "plan" | "chain" | "parallel" | "engineer"
+    kind: Literal["tool", "ask", "plan", "chain", "parallel", "engineer"] = "tool"
     tool: str                # tool name or agent command argument
-    args: list[str] | str = []
-    timeout: int = 120
+    args: Union[list[str], str] = []
+    timeout: int = Field(default=120, ge=1, le=600)
 
 # ---------------------------------------------------------------------------
 # Helper: enforce tool-level permissions
 # ---------------------------------------------------------------------------
 
 def _check_tool_access(role: str, tool_name: str) -> JSONResponse | None:
-    """Returns a 403 response if the role cannot access the tool, else None."""
+    """Returns a denial response if the role cannot access the tool."""
+    if not valid_tool_name(tool_name):
+        raise HTTPException(400, "Invalid tool name")
     if not role_has_permission(role, "tool:execute"):
         return JSONResponse(
             {"error": "forbidden", "detail": f"Role '{role}' lacks tool:execute permission"},
@@ -761,14 +876,16 @@ def _check_tool_access(role: str, tool_name: str) -> JSONResponse | None:
     return None
 
 def _get_role(request: Request) -> str:
-    return getattr(request.state, "role", "admin")
+    return getattr(request.state, "role", "anonymous")
 
 # ---------------------------------------------------------------------------
 # Routes: tools
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/tools", tags=["tools"])
-async def get_tools():
+async def get_tools(request: Request):
+    if not role_has_permission(_get_role(request), "tool:discover"):
+        raise HTTPException(403, "Tool discovery is not allowed")
     tools = list_tools()
     return {"tools": tools, "count": len(tools)}
 
@@ -805,11 +922,13 @@ async def execute(tool_name: str, body: ExecuteRequest, request: Request):
     return JSONResponse(result, status_code=200 if result["status"] == "success" else 500)
 
 # ---------------------------------------------------------------------------
-# Routes: health (public)
+# Routes: health (authorized)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/health", tags=["health"])
-async def health():
+async def health(request: Request):
+    if not role_has_permission(_get_role(request), "tool:healthcheck"):
+        raise HTTPException(403, "Health checks are not allowed")
     return await run_agent_command("health", "all")
 
 @app.get("/api/v1/health/{tool_name}", tags=["health"])
@@ -817,6 +936,8 @@ async def health_tool(tool_name: str, request: Request):
     role = _get_role(request)
     if not role_has_permission(role, "tool:healthcheck"):
         raise HTTPException(403, f"Role '{role}' lacks tool:healthcheck permission")
+    if not valid_tool_name(tool_name):
+        raise HTTPException(400, "Invalid tool name")
     return await run_agent_command("health", tool_name)
 
 # ---------------------------------------------------------------------------
@@ -857,8 +978,8 @@ async def agent_plan(body: TaskRequest, request: Request):
 @app.post("/api/v1/agent/engineer", tags=["agent"])
 async def agent_engineer(body: TaskRequest, request: Request):
     role = _get_role(request)
-    if not role_has_permission(role, "tool:execute"):
-        raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    if not role_has_permission(role, "*"):
+        raise HTTPException(403, f"Role '{role}' requires administrator access")
     return await run_agent_command("engineer", body.task)
 
 @app.post("/api/v1/agent/chain", tags=["agent"])
@@ -885,7 +1006,7 @@ async def agent_status(request: Request):
 @app.post("/api/v1/agent/heal", tags=["agent"])
 async def agent_heal(body: HealRequest, request: Request):
     role = _get_role(request)
-    if not role_has_permission(role, "tool:execute") or role == "readonly":
+    if not role_has_permission(role, "*"):
         raise HTTPException(403, f"Role '{role}' cannot trigger self-healing")
     return await run_agent_command("heal", body.tool)
 
@@ -908,16 +1029,19 @@ async def submit_job(body: JobRequest, request: Request):
         if denied:
             return denied
 
-    job = _create_job(kind=body.kind, tool=body.tool, args=args, timeout=body.timeout)
+    if body.kind == "engineer" and not role_has_permission(role, "*"):
+        raise HTTPException(403, "Engineering jobs require administrator access")
+    job = _create_job(kind=body.kind, tool=body.tool, args=args, timeout=body.timeout,
+                      owner=_principal(request))
     return JSONResponse(_job_to_dict(job), status_code=202)
 
 @app.get("/api/v1/jobs", tags=["jobs"])
-async def list_jobs(request: Request, status: str | None = None):
+async def list_jobs(request: Request, status: Optional[str] = None):
     """List all jobs, optionally filtered by status."""
     role = _get_role(request)
     if not role_has_permission(role, "tool:discover"):
         raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
-    jobs = list(_job_store.values())
+    jobs = [j for j in _job_store.values() if _owns_job(request, j)]
     if status:
         try:
             target = JobStatus(status)
@@ -934,7 +1058,7 @@ async def get_job(job_id: str, request: Request):
     if not role_has_permission(role, "tool:discover"):
         raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
     job = _job_store.get(job_id)
-    if not job:
+    if not job or not _owns_job(request, job):
         raise HTTPException(404, f"Job '{job_id}' not found")
     return _job_to_dict(job)
 
@@ -953,7 +1077,7 @@ async def stream_job(job_id: str, request: Request):
     if not role_has_permission(role, "tool:discover"):
         raise HTTPException(403, f"Role '{role}' lacks tool:discover permission")
     job = _job_store.get(job_id)
-    if not job:
+    if not job or not _owns_job(request, job):
         raise HTTPException(404, f"Job '{job_id}' not found")
 
     async def event_stream():
@@ -999,7 +1123,7 @@ async def cancel_job(job_id: str, request: Request):
     if not role_has_permission(role, "tool:execute"):
         raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
     job = _job_store.get(job_id)
-    if not job:
+    if not job or not _owns_job(request, job):
         raise HTTPException(404, f"Job '{job_id}' not found")
     if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
         return JSONResponse({"id": job_id, "status": job.status.value,
@@ -1073,13 +1197,19 @@ async def transcribe_audio(request: Request):
     records 16 kHz mono WAV, which is what the ASR models want, so no
     conversion is needed on this path.
     """
+    if not role_has_permission(_get_role(request), "tool:execute"):
+        raise HTTPException(403, "Speech execution is not allowed")
     mod = _speech()
     if mod is None:
         raise HTTPException(503, "speech runtime unavailable")
     if not mod.asr_enabled():
         raise HTTPException(503, mod.asr_unavailable_reason())
 
-    audio = await request.body()
+    audio = bytearray()
+    async for chunk in request.stream():
+        if len(audio) + len(chunk) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "Recording too large")
+        audio.extend(chunk)
     if not audio:
         raise HTTPException(400, "no audio in the request body")
     if len(audio) > MAX_AUDIO_BYTES:
@@ -1123,7 +1253,7 @@ async def transcribe_audio(request: Request):
             pass
 
 @app.post("/api/v1/speech", tags=["speech"])
-async def speech_synthesize(body: SpeechRequest):
+async def speech_synthesize(body: SpeechRequest, request: Request):
     """Render text to a WAV with audio.cpp and return the audio itself.
 
     Playback happens in the browser rather than on the server: the API process
@@ -1131,6 +1261,8 @@ async def speech_synthesize(body: SpeechRequest):
     phone anyway. Runs in a thread — synthesis is a blocking subprocess that
     takes seconds on a phone and would otherwise stall the event loop.
     """
+    if not role_has_permission(_get_role(request), "tool:execute"):
+        raise HTTPException(403, "Speech execution is not allowed")
     mod = _speech()
     if mod is None:
         raise HTTPException(503, "speech runtime unavailable")
@@ -1177,7 +1309,7 @@ async def api_info():
             "GET /api/v1/tools/{name}": "Get tool metadata",
             "POST /api/v1/tools/{name}/execute": "Execute a tool (synchronous)",
             "GET /api/v1/ping": "Liveness probe (public)",
-            "GET /api/v1/health": "System health check (public)",
+            "GET /api/v1/health": "System health check (authorized)",
             "GET /api/v1/health/{tool}": "Tool health check",
             "POST /api/v1/agent/ask": "Natural language query",
             "POST /api/v1/agent/plan": "Create execution plan",
@@ -1299,6 +1431,7 @@ def main():
         port=port,
         log_level="info",
         access_log=True,
+        proxy_headers=False,
     )
 
 

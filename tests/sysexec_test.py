@@ -94,9 +94,6 @@ def test_safe():
         "uptime",
         "date",
         "cat /etc/hostname",
-        "git status",
-        "git log --oneline -5",
-        "brew list --versions cmake",
         "which python3",
         "sw_vers",
         "ifconfig",
@@ -113,6 +110,14 @@ def test_safe():
 def test_confirm():
     print("\nanything that could change something asks first")
     for cmd, why in [
+        ("git status", "may execute configured fsmonitor hooks"),
+        ("git log --oneline -5", "may execute configured pagers"),
+        ("brew list --versions cmake", "package manager extensions are executable"),
+        ("python3 /tmp/script.py", "runs a script"),
+        ("find . -delete", "deletes files"),
+        ("sed -i backup file", "rewrites files"),
+        ("sysctl kernel.value=1", "writes a kernel parameter"),
+        ("/tmp/ls", "untrusted executable path"),
         ("rm old.txt", "deletes a file"),
         ("mv a b", "moves a file"),
         ("cp a b", "writes a file"),
@@ -487,8 +492,6 @@ def test_windows_safe():
         "tracert example.com",
         "reg query HKLM\\Software",
         "net view",
-        "sc query spooler",
-        "C:\\Windows\\System32\\ipconfig.exe /all",   # full path, .exe stripped
     ]:
         check(cmd, wtier(cmd), "safe")
     # PowerShell reads variables constantly; a bare $ cannot mean "suspicious".

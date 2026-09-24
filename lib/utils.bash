@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# API restrictions also apply when a tool directly invokes a sibling tool.
+source "${BASH_SOURCE[0]%/*}/access.bash"
+if [[ "${GATHM_ALLOWED_TOOLS+x}" == x && "$0" == */tools/*/* ]]; then
+    gathm_tool_allowed "${0##*/}" || exit 1
+fi
+
 # Colors
 RED="$(printf '\033[31m')"
 GREEN="$(printf '\033[32m')"

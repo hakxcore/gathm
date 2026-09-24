@@ -50,12 +50,15 @@ retry_with_backoff() {
     return $exit_code
 }
 
+source "$SCRIPT_DIR_RECOVERY/lib/access.bash"
+
 # Execute a tool with full recovery pipeline
 # Usage: execute_with_recovery TOOL_NAME [args...]
 # Optional env: _GATHM_FALLBACK_DEPTH (internal, tracks recursion depth)
 #               _GATHM_FALLBACK_CHAIN (internal, colon-separated visited tools)
 execute_with_recovery() {
     local tool_name="$1"
+    gathm_tool_allowed "$tool_name" || return 1
     shift
     local tool_args=("$@")
     local tool_path="$SCRIPT_DIR_RECOVERY/tools/$tool_name/$tool_name"
@@ -200,6 +203,7 @@ _termux_pkg_name() {
 # Try to install a dependency using available package manager
 _try_install_dep() {
     local dep="$1"
+    [[ "$dep" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]] || return 1
 
     # config/agent.yaml has carried allow_auto_install_deps for a while and
     # nothing read it, so this ran `sudo apt-get install -y` on a desktop
@@ -245,7 +249,9 @@ _try_install_dep() {
 
     if (( runnable )); then
         log_info "recovery" "Installing missing dependency '$dep': $hint"
-        if eval "$hint" >/dev/null 2>&1 && command -v "$dep" >/dev/null 2>&1; then
+        local install_argv=()
+        read -r -a install_argv <<< "$hint"
+        if "${install_argv[@]}" >/dev/null 2>&1 && command -v "$dep" >/dev/null 2>&1; then
             log_info "recovery" "Installed dependency: $dep"
             return 0
         fi

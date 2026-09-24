@@ -1,25 +1,24 @@
-version: '3.8'
-
 services:
   # Gathm API Server
   gathm-api:
     build: .
     container_name: gathm-api
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       - GATHM_LOG_LEVEL=INFO
       - GATHM_OUTPUT_MODE=json
       - GATHM_MAX_RETRIES=3
+      - GATHM_API_KEY=${GATHM_API_KEY:?Set GATHM_API_KEY before starting the API}
       # API keys (set these in .env file or environment)
       - OMDB_API_KEY=${OMDB_API_KEY:-}
       - SHODAN_API_KEY=${SHODAN_API_KEY:-}
     volumes:
-      - gathm-data:/root/.gathm
-      - gathm-logs:/root/.gathm/logs
+      - gathm-data:/home/gathm/.gathm
+      - gathm-logs:/home/gathm/.gathm/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "gathm health all --json"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/v1/ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -33,8 +32,8 @@ services:
     environment:
       - GATHM_LOG_LEVEL=INFO
     volumes:
-      - gathm-data:/root/.gathm
-      - gathm-logs:/root/.gathm/logs
+      - gathm-data:/home/gathm/.gathm
+      - gathm-logs:/home/gathm/.gathm/logs
     restart: unless-stopped
     depends_on:
       - gathm-api

@@ -1,0 +1,1171 @@
+{
+  "date": "2026-09-24",
+  "revision": "8634e3b + local cleanup/security/performance changes",
+  "bandit": {
+    "files": 15,
+    "severity_counts": {
+      "LOW": 66,
+      "MEDIUM": 8,
+      "HIGH": 1
+    },
+    "errors": [],
+    "findings": [
+      {
+        "file": "api/server.py",
+        "line": 46,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "api/server.py",
+        "line": 441,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "api/server.py",
+        "line": 542,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "api/server.py",
+        "line": 572,
+        "severity": "LOW",
+        "rule": "B101",
+        "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code."
+      },
+      {
+        "file": "api/server.py",
+        "line": 584,
+        "severity": "LOW",
+        "rule": "B101",
+        "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code."
+      },
+      {
+        "file": "api/server.py",
+        "line": 631,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "api/server.py",
+        "line": 1244,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "api/server.py",
+        "line": 1252,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "bench/termux_latency.py",
+        "line": 11,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "bench/termux_latency.py",
+        "line": 21,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "bench/termux_latency.py",
+        "line": 44,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "bench/termux_latency.py",
+        "line": 81,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "bench/termux_latency.py",
+        "line": 154,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "gathmcli/cli.py",
+        "line": 244,
+        "severity": "LOW",
+        "rule": "B606",
+        "message": "Starting a process without a shell."
+      },
+      {
+        "file": "lib/chat_openai_compat.py",
+        "line": 108,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 60,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 159,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 298,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 298,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 320,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 418,
+        "severity": "MEDIUM",
+        "rule": "B104",
+        "message": "Possible binding to all interfaces."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 476,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 476,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 498,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 531,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 547,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "lib/llamacpp.py",
+        "line": 635,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/llm.py",
+        "line": 70,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/llm.py",
+        "line": 76,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/llm.py",
+        "line": 87,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/llm.py",
+        "line": 348,
+        "severity": "MEDIUM",
+        "rule": "B310",
+        "message": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 47,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 253,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 259,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 259,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 286,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 579,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 584,
+        "severity": "LOW",
+        "rule": "B112",
+        "message": "Try, Except, Continue detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 596,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 607,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 626,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 748,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 843,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 1114,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 1440,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 1533,
+        "severity": "LOW",
+        "rule": "B112",
+        "message": "Try, Except, Continue detected."
+      },
+      {
+        "file": "lib/speech.py",
+        "line": 1657,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/sysexec.py",
+        "line": 65,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "lib/sysexec.py",
+        "line": 407,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "lib/sysexec.py",
+        "line": 478,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 44,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 345,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 391,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 391,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 393,
+        "severity": "LOW",
+        "rule": "B606",
+        "message": "Starting a process without a shell."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 395,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 395,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 399,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 399,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 401,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 401,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 405,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 437,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/browser.py",
+        "line": 437,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 3,
+        "severity": "LOW",
+        "rule": "B404",
+        "message": "Consider possible security implications associated with the subprocess module."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 387,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 417,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 531,
+        "severity": "LOW",
+        "rule": "B607",
+        "message": "Starting a process with a partial executable path"
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 531,
+        "severity": "LOW",
+        "rule": "B603",
+        "message": "subprocess call - check for execution of untrusted input."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 649,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 655,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/main.py",
+        "line": 1128,
+        "severity": "MEDIUM",
+        "rule": "B604",
+        "message": "Function call with shell=True parameter identified, possible security issue."
+      },
+      {
+        "file": "pilot/tui.py",
+        "line": 64,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/tui.py",
+        "line": 91,
+        "severity": "LOW",
+        "rule": "B110",
+        "message": "Try, Except, Pass detected."
+      },
+      {
+        "file": "pilot/tui.py",
+        "line": 268,
+        "severity": "HIGH",
+        "rule": "B605",
+        "message": "Starting a process with a shell, possible injection detected, security issue."
+      }
+    ]
+  },
+  "shellcheck": {
+    "severity_counts": {
+      "warning": 55
+    },
+    "findings": [
+      {
+        "file": "tools/weather/weather",
+        "line": 17,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/weather/weather",
+        "line": 19,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/weather/weather",
+        "line": 20,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/weather/weather",
+        "line": 24,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/weather/weather",
+        "line": 31,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/weather/weather",
+        "line": 59,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/transfer/transfer",
+        "line": 19,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/transfer/transfer",
+        "line": 30,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/transfer/transfer",
+        "line": 92,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/todo/todo",
+        "line": 25,
+        "level": "warning",
+        "code": 2034,
+        "message": "count appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "tools/todo/todo",
+        "line": 26,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/todo/todo",
+        "line": 105,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/stocks/stocks",
+        "line": 23,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/siteciphers/siteciphers",
+        "line": 39,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/siteciphers/siteciphers",
+        "line": 68,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/siteciphers/siteciphers",
+        "line": 86,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/shorturl/shorturl",
+        "line": 16,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/shorturl/shorturl",
+        "line": 30,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/shorturl/shorturl",
+        "line": 62,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/qrify/qrify",
+        "line": 12,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/qrify/qrify",
+        "line": 28,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/qrify/qrify",
+        "line": 48,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/qrify/qrify",
+        "line": 56,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/qrify/qrify",
+        "line": 92,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/newton/newton",
+        "line": 49,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/lyrics/lyrics",
+        "line": 12,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/lyrics/lyrics",
+        "line": 13,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/lyrics/lyrics",
+        "line": 16,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/lyrics/lyrics",
+        "line": 24,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/lyrics/lyrics",
+        "line": 60,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 29,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 45,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 46,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 48,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 49,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/currency/currency",
+        "line": 67,
+        "level": "warning",
+        "code": 2155,
+        "message": "Declare and assign separately to avoid masking return values."
+      },
+      {
+        "file": "tools/crypt/crypt",
+        "line": 70,
+        "level": "warning",
+        "code": 2220,
+        "message": "Invalid flags are not handled. Add a *) case."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 14,
+        "level": "warning",
+        "code": 2034,
+        "message": "MAGENTA appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 15,
+        "level": "warning",
+        "code": 2034,
+        "message": "CYAN appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 17,
+        "level": "warning",
+        "code": 2034,
+        "message": "BLACK appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 20,
+        "level": "warning",
+        "code": 2034,
+        "message": "SAFFRON appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 21,
+        "level": "warning",
+        "code": 2034,
+        "message": "INDIAN_GREEN appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 22,
+        "level": "warning",
+        "code": 2034,
+        "message": "ASHOKA_BLUE appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 24,
+        "level": "warning",
+        "code": 2034,
+        "message": "REDBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 25,
+        "level": "warning",
+        "code": 2034,
+        "message": "GREENBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 26,
+        "level": "warning",
+        "code": 2034,
+        "message": "ORANGEBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 27,
+        "level": "warning",
+        "code": 2034,
+        "message": "BLUEBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 28,
+        "level": "warning",
+        "code": 2034,
+        "message": "MAGENTABG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 29,
+        "level": "warning",
+        "code": 2034,
+        "message": "CYANBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 30,
+        "level": "warning",
+        "code": 2034,
+        "message": "WHITEBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/utils.bash",
+        "line": 31,
+        "level": "warning",
+        "code": 2034,
+        "message": "BLACKBG appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/schema.bash",
+        "line": 229,
+        "level": "warning",
+        "code": 2034,
+        "message": "err_json appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "lib/health.bash",
+        "line": 9,
+        "level": "warning",
+        "code": 2034,
+        "message": "GATHM_HEALTH_CACHE_TTL appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "install",
+        "line": 1991,
+        "level": "warning",
+        "code": 2034,
+        "message": "install_rc appears unused. Verify use (or export if used externally)."
+      },
+      {
+        "file": "agent/planner.sh",
+        "line": 187,
+        "level": "warning",
+        "code": 2034,
+        "message": "steps appears unused. Verify use (or export if used externally)."
+      }
+    ]
+  },
+  "pip_audit": {
+    "scope": "Installed pilot/venv Python packages; excludes absent optional dependencies and OS/Go/native binaries",
+    "packages_checked": 58,
+    "vulnerabilities": 0,
+    "packages": [
+      {
+        "name": "annotated-doc",
+        "version": "0.0.5"
+      },
+      {
+        "name": "annotated-types",
+        "version": "0.8.0"
+      },
+      {
+        "name": "anyio",
+        "version": "4.14.2"
+      },
+      {
+        "name": "beautifulsoup4",
+        "version": "4.15.0"
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22"
+      },
+      {
+        "name": "charset-normalizer",
+        "version": "3.5.1"
+      },
+      {
+        "name": "click",
+        "version": "8.4.2"
+      },
+      {
+        "name": "distro",
+        "version": "1.9.0"
+      },
+      {
+        "name": "fastapi",
+        "version": "0.141.1"
+      },
+      {
+        "name": "greenlet",
+        "version": "3.5.5"
+      },
+      {
+        "name": "h11",
+        "version": "0.16.0"
+      },
+      {
+        "name": "httpcore",
+        "version": "1.0.9"
+      },
+      {
+        "name": "httptools",
+        "version": "0.8.0"
+      },
+      {
+        "name": "httpx",
+        "version": "0.28.1"
+      },
+      {
+        "name": "idna",
+        "version": "3.19"
+      },
+      {
+        "name": "jsonpatch",
+        "version": "1.33"
+      },
+      {
+        "name": "jsonpointer",
+        "version": "3.1.1"
+      },
+      {
+        "name": "langchain-core",
+        "version": "1.6.0"
+      },
+      {
+        "name": "langchain-ollama",
+        "version": "1.1.0"
+      },
+      {
+        "name": "langchain-protocol",
+        "version": "0.0.18"
+      },
+      {
+        "name": "langgraph",
+        "version": "1.2.11"
+      },
+      {
+        "name": "langgraph-checkpoint",
+        "version": "4.2.0"
+      },
+      {
+        "name": "langgraph-prebuilt",
+        "version": "1.1.0"
+      },
+      {
+        "name": "langgraph-sdk",
+        "version": "0.4.2"
+      },
+      {
+        "name": "langsmith",
+        "version": "0.11.1"
+      },
+      {
+        "name": "markdown-it-py",
+        "version": "4.2.0"
+      },
+      {
+        "name": "mdurl",
+        "version": "0.1.2"
+      },
+      {
+        "name": "ollama",
+        "version": "0.6.2"
+      },
+      {
+        "name": "orjson",
+        "version": "3.12.0"
+      },
+      {
+        "name": "ormsgpack",
+        "version": "1.12.2"
+      },
+      {
+        "name": "packaging",
+        "version": "26.3"
+      },
+      {
+        "name": "pip",
+        "version": "26.2.1"
+      },
+      {
+        "name": "playwright",
+        "version": "1.62.0"
+      },
+      {
+        "name": "prompt-toolkit",
+        "version": "3.0.53"
+      },
+      {
+        "name": "pydantic",
+        "version": "2.13.4"
+      },
+      {
+        "name": "pydantic-core",
+        "version": "2.46.4"
+      },
+      {
+        "name": "pyee",
+        "version": "13.0.1"
+      },
+      {
+        "name": "pygments",
+        "version": "2.21.0"
+      },
+      {
+        "name": "python-dotenv",
+        "version": "1.2.3"
+      },
+      {
+        "name": "pyyaml",
+        "version": "6.0.3"
+      },
+      {
+        "name": "requests",
+        "version": "2.34.2"
+      },
+      {
+        "name": "requests-toolbelt",
+        "version": "1.0.0"
+      },
+      {
+        "name": "rich",
+        "version": "15.0.0"
+      },
+      {
+        "name": "sniffio",
+        "version": "1.3.1"
+      },
+      {
+        "name": "soupsieve",
+        "version": "2.9.2"
+      },
+      {
+        "name": "starlette",
+        "version": "1.6.0"
+      },
+      {
+        "name": "tenacity",
+        "version": "9.1.4"
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0"
+      },
+      {
+        "name": "typing-inspection",
+        "version": "0.4.4"
+      },
+      {
+        "name": "urllib3",
+        "version": "2.7.0"
+      },
+      {
+        "name": "uuid-utils",
+        "version": "0.17.0"
+      },
+      {
+        "name": "uvicorn",
+        "version": "0.52.4"
+      },
+      {
+        "name": "uvloop",
+        "version": "0.22.1"
+      },
+      {
+        "name": "watchfiles",
+        "version": "1.2.0"
+      },
+      {
+        "name": "wcwidth",
+        "version": "0.8.2"
+      },
+      {
+        "name": "websockets",
+        "version": "15.0.1"
+      },
+      {
+        "name": "xxhash",
+        "version": "4.0.1"
+      },
+      {
+        "name": "zstandard",
+        "version": "0.25.0"
+      }
+    ]
+  }
+}

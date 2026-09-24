@@ -275,8 +275,8 @@ class TestAPIServerImports(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         sys.modules["server"] = module
         spec.loader.exec_module(module)
-        self.assertTrue(hasattr(module, "GathmAPIHandler"))
-        self.assertTrue(hasattr(module, "GATHM_API_KEY"))
+        self.assertTrue(hasattr(module, "app"))
+        self.assertTrue(hasattr(module, "TOKEN_MAP"))
 
     def test_server_has_auth_method(self):
         import importlib.util
@@ -286,8 +286,7 @@ class TestAPIServerImports(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         sys.modules["server"] = module
         spec.loader.exec_module(module)
-        handler = module.GathmAPIHandler
-        self.assertTrue(hasattr(handler, "_check_auth"))
+        self.assertTrue(callable(module.resolve_role))
 
 
 class TestEngineerModule(unittest.TestCase):

@@ -73,7 +73,7 @@ getTasks()
 # --- Clear all tasks ---
 clearTasks()
 {
-    > "$TODO_FILE"
+    : > "$TODO_FILE"
     echo "Tasks cleared."
 }
 

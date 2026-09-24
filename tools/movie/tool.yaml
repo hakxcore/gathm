@@ -9,8 +9,8 @@ dependencies:
 
 apis:
   - name: omdbapi
-    base_url: http://www.omdbapi.com
-    health_endpoint: http://www.omdbapi.com/
+    base_url: https://www.omdbapi.com
+    health_endpoint: https://www.omdbapi.com/
     auth_required: true
     auth_type: api_key
 

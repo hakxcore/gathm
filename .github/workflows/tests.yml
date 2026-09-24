@@ -51,6 +51,7 @@ jobs:
           set -e
           python3 tests/packaging_test.py
           python3 tests/sysexec_test.py
+          python3 tests/security_test.py
           python3 tests/macos_speech_test.py
           python3 tests/speech_stream_test.py
           python3 tests/reply_stream_test.py

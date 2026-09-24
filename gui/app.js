@@ -13,7 +13,7 @@ const API_BASE = window.GATHM_API_URL ||
 // missing library costs you the icons, not the buttons.
 function refreshIcons() {
     try {
-        if (window.lucide && lucide.createIcons) lucide.createIcons();
+        if (window.gathmIcons) window.gathmIcons();
     } catch (_) { /* decoration is never worth an exception */ }
 }
 

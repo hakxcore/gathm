@@ -73,7 +73,7 @@ elif [[ "$1" == "Moon" || "$1" == "moon" ]]; then
   getLocationWeather "Moon"
 else
   # Check if last arg is a unit flag
-  last_arg="${@: -1}"
+  last_arg="${!#}"
   if [[ "$last_arg" =~ ^[miM]+$ ]]; then
     # Construct wttr.in query params
     params="?"
@@ -84,7 +84,7 @@ else
     if [[ $# -eq 1 ]]; then
       getIPWeather "$params"
     else
-      args_without_last="${@:1:(($# - 1))}"
+      args_without_last="${*:1:(($# - 1))}"
       getLocationWeather "${args_without_last}${params}"
     fi
   else

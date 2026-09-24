@@ -17,6 +17,7 @@ trap 'rm -rf "$FIX"' EXIT
 mkdir -p "$FIX/lib" "$FIX/pilot" "$FIX/api" "$FIX/agent" "$FIX/tools/dummy" "$FIX/home"
 cp "$REPO/gathm" "$FIX/gathm"
 cp "$REPO/lib/utils.bash" "$FIX/lib/utils.bash"
+cp "$REPO/lib/access.bash" "$FIX/lib/access.bash"
 # utils.bash sources siblings relative to itself; copy what exists.
 for f in logging.bash schema.bash deps.bash health.bash recovery.bash; do
     [[ -f "$REPO/lib/$f" ]] && cp "$REPO/lib/$f" "$FIX/lib/$f"
@@ -145,6 +146,7 @@ check "0.0.0.0 advertised as loopback" "$out" "http://127.0.0.1:$ALT"
 HOME="$FIX/home" GATHM_GUI_PORT="$ALT" timeout 30 bash "$FIX/gathm" stop >/dev/null 2>&1
 
 echo "== degraded environments =="
+run stop >/dev/null 2>&1
 mv "$FIX/api/server.py" "$FIX/api/server.py.off"
 out=$(run --no-browser)
 check "missing server.py is reported"  "$out" "API server not found"
@@ -170,7 +172,7 @@ absent "doctor starts no GUI"          "$out" "Starting GUI server"
 out=$(run --no-browser)
 check "a dead Ollama still lets Gathm start" "$out" "PILOT_STARTED"
 check "and says so"                          "$out" "Ollama"
-$(run stop >/dev/null 2>&1)
+run stop >/dev/null 2>&1
 
 # With a model server up, the configured model is checked against what is
 # actually pulled — a 404 from inside LangChain later is not a useful error.
@@ -275,7 +277,7 @@ llm_env stop >/dev/null 2>&1
 
 # Nothing installed: a warning that names the fix, and Gathm still starts.
 out=$(HOME="$FIX/home" GATHM_GUI_PORT="$PORT" GATHM_CONFIG_DIR="$FIX/home/.gathm"       GATHM_LLM_BACKEND=llamacpp GATHM_LLAMACPP_BIN="$FIX/nope"       GATHM_LLAMACPP_MODEL_DIR="$FIX/empty"       timeout 60 bash "$FIX/gathm" --no-browser --no-gui 2>&1)
-check "a missing runtime is a warning"    "$out" "llama.cpp is not installed"
+check "missing runtime or weights is a warning" "$out" "Pilot cannot answer questions"
 check "and Gathm still starts"            "$out" "PILOT_STARTED"
 
 # Installed, but no weights — a different problem with a different fix.

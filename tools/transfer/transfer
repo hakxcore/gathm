@@ -20,7 +20,7 @@ upload_file()
     echo "${BLUE}Uploading $filename...${RESETBG}"
 
     local response
-    response=$(curl -s --upload-file "$file_path" "https://free.keep.sh") || { echo "Failure!"; return 1; }
+    response=$(curl --fail --silent --show-error --max-time 120 --upload-file "$file_path" "https://free.keep.sh") || { echo "Failure!"; return 1; }
     
     echo -e "${GREEN}Success!${RESETBG}"
     echo -e "${BLUE}Transfer Download Command:${RESETBG} transfer -d $(echo "$response" | cut -d "/" -f 4) $filename"
@@ -47,7 +47,24 @@ download_file()
     fi
 
     echo "${BLUE}Downloading $filename...${RESETBG}"
-    curl -s -L "https://free.keep.sh/$file_id/$filename" > "$filename" || { echo "Failure"; return 1; }
+    # Downloads cannot overwrite an existing file or escape the current directory.
+    if [[ ! "$file_id" =~ ^[a-zA-Z0-9_-]+$ || "$filename" == */* || "$filename" == .* || "$filename" == -* ]]; then
+        echo "Error: Invalid download ID or filename." >&2
+        return 1
+    fi
+    local temporary
+    temporary=$(mktemp "./.gathm-download.XXXXXX") || return 1
+    if ! curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --max-time 120 "https://free.keep.sh/$file_id/$filename" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    # Hard-link creation is atomic and refuses existing files, including symlinks.
+    if ! ln "$temporary" "./$filename"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    rm -f "$temporary"
     echo -e "${GREEN}File saved as $filename${RESETBG}"
 }
 
@@ -73,8 +90,8 @@ EOF
 # --- Option Parsing ---
 while getopts "o:d:vh" opt; do
   case "$opt" in
-    d) download_file "$OPTARG" "$3"; exit 0 ;;
-    o) upload_file "$OPTARG"; exit 0 ;;
+    d) download_file "$OPTARG" "$3"; exit $? ;;
+    o) upload_file "$OPTARG"; exit $? ;;
     v) echo "Version $currentVersion"; exit 0 ;;
     h) usage; exit 0 ;;
   esac

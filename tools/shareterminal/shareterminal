@@ -124,7 +124,13 @@ install_upterm() {
 
 # ── backend: tmate ───────────────────────────────────────────────────────────
 
-TMATE_SOCKET="/tmp/gathm-tmate.sock"
+# Session credentials and sockets are private to this user.
+umask 077
+SHARE_STATE="$HOME/.gathm/shareterminal"
+mkdir -p "$SHARE_STATE" || exit 1
+chmod 700 "$SHARE_STATE" || exit 1
+TMATE_SOCKET="$SHARE_STATE/tmate.sock"
+UPTERM_LOG="$SHARE_STATE/upterm.log"
 
 tmate_start() {
   local readonly_mode="$1"
@@ -198,7 +204,7 @@ tmate_stop() {
 
 # ── backend: upterm ──────────────────────────────────────────────────────────
 
-UPTERM_PIDFILE="/tmp/gathm-upterm.pid"
+UPTERM_PIDFILE="$SHARE_STATE/upterm.pid"
 
 upterm_start() {
   local readonly_mode="$1"
@@ -210,17 +216,17 @@ upterm_start() {
   fi
 
   local shell_cmd="${SHELL:-/bin/bash}"
-  local extra_flags=""
-  [[ "$readonly_mode" == "ro" ]] && extra_flags="--force-command 'cat'"
+  local extra_flags=()
+  [[ "$readonly_mode" == "ro" ]] && extra_flags=(--force-command cat)
 
   echo "${BLUE}Starting shared terminal session via upterm...${RESETBG}"
   # upterm host runs in the foreground; run it detached then capture info
-  nohup bash -c "upterm host $extra_flags -- $shell_cmd" > /tmp/gathm-upterm.log 2>&1 &
+  nohup upterm host "${extra_flags[@]}" -- "$shell_cmd" > "$UPTERM_LOG" 2>&1 &
   echo $! > "$UPTERM_PIDFILE"
 
   # Wait for upterm to print the connection string
   local retries=0
-  while ! grep -q "ssh" /tmp/gathm-upterm.log 2>/dev/null; do
+  while ! grep -q "ssh" "$UPTERM_LOG" 2>/dev/null; do
     sleep 1
     retries=$((retries + 1))
     if [[ $retries -ge 20 ]]; then
@@ -241,7 +247,7 @@ upterm_info() {
   fi
 
   local ssh_line
-  ssh_line=$(grep "ssh" /tmp/gathm-upterm.log 2>/dev/null | tail -1)
+  ssh_line=$(grep "ssh" "$UPTERM_LOG" 2>/dev/null | tail -1)
 
   echo
   echo "${BOLD}${GREEN}Terminal session is live!${RESETBG}"
@@ -260,7 +266,7 @@ upterm_stop() {
   local pid
   pid=$(cat "$UPTERM_PIDFILE")
   kill "$pid" 2>/dev/null
-  rm -f "$UPTERM_PIDFILE" /tmp/gathm-upterm.log
+  rm -f "$UPTERM_PIDFILE" "$UPTERM_LOG"
   echo "${GREEN}Shared session stopped.${RESETBG}"
 }
 

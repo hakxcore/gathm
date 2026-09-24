@@ -18,7 +18,7 @@ getMovieInfo()
   fi
   movie=$(echo "$@" | tr " " + )
   export PYTHONIOENCODING=utf8
-  movieInfo=$(httpGet "http://www.omdbapi.com/?t=$movie&apikey=$apiKey")
+  movieInfo=$(httpGet "https://www.omdbapi.com/?t=$movie&apikey=$apiKey")
   
   checkResponse=$(echo "$movieInfo" | python3 -c "import sys, json; print(json.load(sys.stdin).get('Response', 'False'))" 2>/dev/null)
   

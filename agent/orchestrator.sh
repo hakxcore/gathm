@@ -153,6 +153,7 @@ _sanitize_input() {
 # --- Tool Execution with Recovery ---
 cmd_run() {
     local tool_name="$1"
+    gathm_tool_allowed "$tool_name" || return 1
     shift
     local tool_args=("$@")
 
@@ -955,7 +956,11 @@ cmd_cache() {
             echo -e "${GREEN}Cleaned $cleaned expired cache entries.${RESETBG}"
             ;;
         purge)
-            rm -rf "$GATHM_CACHE_DIR"/* 2>/dev/null
+            if [[ -z "$GATHM_CACHE_DIR" || "$GATHM_CACHE_DIR" == / ]]; then
+                echo "Refusing to purge an empty or root cache directory" >&2
+                return 1
+            fi
+            rm -rf "${GATHM_CACHE_DIR:?}"/* 2>/dev/null
             echo -e "${GREEN}Cache purged.${RESETBG}"
             ;;
         invalidate)

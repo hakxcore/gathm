@@ -202,7 +202,7 @@ class TestPilotToolCoverage(_HomeSandboxTestCase):
             for path in TOOLS_DIR.iterdir()
             if path.is_dir() and (path / path.name).is_file()
         )
-        self.assertListEqual(discovered, expected)
+        self.assertListEqual(discovered, sorted(set(expected) | set(PILOT.BUILTIN_TOOLS)))
 
     def test_unknown_tool_returns_clear_error(self):
         output = PILOT.run_gathm_tool_raw("tool_that_does_not_exist")
@@ -213,6 +213,9 @@ class TestPilotToolCoverage(_HomeSandboxTestCase):
         self.assertGreater(len(tools), 0)
 
         for tool in tools:
+            if tool in PILOT.BUILTIN_TOOLS:
+                self.assertIn("Usage:", PILOT.run_gathm_tool_raw(tool))
+                continue
             args = TOOL_SMOKE_ARGS.get(tool, "-v")
             command = f"{tool} {args}".strip()
             with self.subTest(tool=tool, command=command):
