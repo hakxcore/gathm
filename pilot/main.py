@@ -1058,6 +1058,46 @@ def _shortlist_tools(query: str, tools: list) -> list:
     return picked
 
 
+# A tool's output comes back into the conversation as a HumanMessage, because
+# that is what the ReAct loop feeds the model next. So "the last HumanMessage"
+# is the OBSERVATION once a tool has run, not the question — and everything
+# downstream that asked for "what the user wants" was handed the weather report
+# instead.
+#
+# Two things went wrong with that, one of them expensive:
+#
+#   * the tool shortlist was recomputed against the tool's own output, so step
+#     two of a turn offered a different set of tools than step one; and
+#   * because the tool list is part of the system prompt, that made the prompt
+#     DIFFERENT on every step of a single question. llama.cpp could not reuse
+#     the prefix it had just cached, so a 1,505-token prompt was prefilled from
+#     scratch — 53 seconds on a phone — to answer a question it had already
+#     read 1,198 tokens of.
+#
+# The question is what the shortlist and the small-talk check should see, so
+# observations are skipped when looking for it.
+_OBSERVATION_PREFIXES = ("Observation:", "Error: Could not parse tool input.")
+
+
+def _last_user_question(messages) -> str:
+    """The most recent thing the USER asked, ignoring fed-back tool output.
+
+    Duck-typed on the message's own `type` rather than isinstance: without
+    LangChain installed the names at the top of this file are aliased to
+    typing.Any, and isinstance against that raises. LangChain's own
+    HumanMessage.type is "human", so this is the same test without the
+    dependency on the class being a real class.
+    """
+    for message in reversed(messages or []):
+        if getattr(message, "type", None) != "human":
+            continue
+        text = str(getattr(message, "content", "") or "")
+        if text.lstrip().startswith(_OBSERVATION_PREFIXES):
+            continue
+        return text
+    return ""
+
+
 _SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool with a shell
     command: Action Input: system <command>
     This machine is: {platform}
@@ -1109,11 +1149,7 @@ def call_model(state: AgentState):
 
     # Small talk never needs a tool. Answer with the short prompt and finish,
     # skipping tool discovery and the long rule list entirely.
-    _last = ""
-    for _m in reversed(state.get("messages") or []):
-        if isinstance(_m, HumanMessage):
-            _last = str(getattr(_m, "content", "") or "")
-            break
+    _last = _last_user_question(state.get("messages"))
     if _is_small_talk(_last):
         from langchain_core.messages import AIMessage as _AIMsg
         _llm = _build_llm()

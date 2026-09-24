@@ -94,5 +94,58 @@ class TestPilotRegressions(unittest.TestCase):
         self.assertNotIn("list above", template,
                          "a rule still refers to a tool list 'above' it")
 
+    def test_tool_output_is_not_mistaken_for_the_question(self):
+        """The shortlist must route on what the user asked, not on the answer.
+
+        A tool's output re-enters the conversation as a HumanMessage, because
+        that is what the ReAct loop feeds back. "The last HumanMessage" is
+        therefore the OBSERVATION once a tool has run, so step two of a turn was
+        choosing its tools by reading the weather report rather than the
+        question that asked for it.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        conversation = [
+            HumanMessage(content="weather in Delhi"),
+            AIMessage(content="Action: gathm\nAction Input: weather Delhi"),
+            HumanMessage(content="Observation: Delhi 31C haze, humidity 44%"),
+        ]
+        self.assertEqual(PILOT._last_user_question(conversation), "weather in Delhi")
+
+        # A failed tool comes back the same way and must also be ignored.
+        conversation.append(HumanMessage(content="Error: Could not parse tool input."))
+        self.assertEqual(PILOT._last_user_question(conversation), "weather in Delhi")
+
+        # A genuine follow-up IS the question again.
+        conversation.append(HumanMessage(content="and in Mumbai?"))
+        self.assertEqual(PILOT._last_user_question(conversation), "and in Mumbai?")
+
+        # Nothing from the user at all is an empty string, not a crash.
+        self.assertEqual(PILOT._last_user_question([]), "")
+        self.assertEqual(PILOT._last_user_question(None), "")
+
+    def test_shortlist_is_stable_across_react_steps(self):
+        """The tool list is part of the system prompt, so it must not move.
+
+        If step two offers different tools than step one, the system prompt
+        differs, and llama.cpp cannot reuse the prefix it just cached — the
+        whole prompt is prefilled again, at ~26 tokens per second on a phone.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        tools = PILOT.discover_tools()
+        question = "MX records for gmail.com"
+        step_one = PILOT._shortlist_tools(question, tools)
+
+        conversation = [
+            HumanMessage(content=question),
+            AIMessage(content="Action: gathm\nAction Input: dns -t MX gmail.com"),
+            HumanMessage(content="Observation: gmail.com MX 10 alt1.aspmx.l.google.com"),
+        ]
+        step_two = PILOT._shortlist_tools(
+            PILOT._last_user_question(conversation), tools)
+        self.assertEqual(step_one, step_two,
+                         "the tool list changed between ReAct steps")
+
 if __name__ == "__main__":
     unittest.main()
