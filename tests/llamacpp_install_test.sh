@@ -164,6 +164,22 @@ FAKE_RAM=32000; contains "32 GB gets the 14B model" "$(_llamacpp_recommend_repo)
 FAKE_RAM=64000; contains "64 GB gets the 32B model" "$(_llamacpp_recommend_repo)" "32B"
 FAKE_RAM=0;     contains "unknown RAM is cautious"  "$(_llamacpp_recommend_repo)" "3B"
 
+# A phone is not a small desktop. The desktop tiers would hand an 8 GB phone
+# the 8B model — 5 GB of weights on a device that throttles within a minute and
+# whose low-memory killer takes the biggest process first.
+_is_termux() { return 0; }
+FAKE_RAM=8192;  contains "an 8 GB phone gets the 1B model" \
+    "$(_llamacpp_recommend_repo)" "Llama-3.2-1B"
+FAKE_RAM=12000; contains "a 12 GB phone gets the 3B model" \
+    "$(_llamacpp_recommend_repo)" "Llama-3.2-3B"
+FAKE_RAM=16384; contains "and never more than that on a phone" \
+    "$(_llamacpp_recommend_repo)" "Llama-3.2-3B"
+check "the phone threshold is the one Ollama uses" \
+    "$GATHM_TERMUX_LARGE_MIN_RAM_MB" "11000"
+contains "an explicit repo still wins on a phone" \
+    "$(GATHM_LLAMACPP_MODEL_REPO=me/mine _llamacpp_recommend_repo)" "me/mine"
+_is_termux() { return 1; }
+
 echo "== the storage gate =="
 check "a model that fits is kept" \
     "$(_llamacpp_repo_that_fits bartowski/Qwen2.5-14B-Instruct-GGUF 20000)" \
