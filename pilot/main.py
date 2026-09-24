@@ -314,6 +314,14 @@ def describe_agent_failure(exc: BaseException) -> str:
     # sounds like a bug in their question; the cause is a loop that grew the
     # history past the window, and the fix is a bigger window or a shorter
     # leash.
+    if "recursion" in text and "limit" in text:
+        return (
+            "the model kept asking for the same thing instead of answering. "
+            "It is usually too small for this prompt — try a larger model, or "
+            "raise GATHM_AGENT_MAX_STEPS if the question genuinely needs more "
+            "steps."
+        )
+
     if ("400" in text or "bad request" in text) and backend in ("llamacpp", "ollama"):
         return (
             "the conversation grew past the model's context window, so the "
@@ -1362,6 +1370,40 @@ def _looks_like_tool_failure(output: str) -> bool:
             or '"error"' in lowered)
 
 
+_OBSERVATION_LEAD = "Observation:"
+
+
+def _is_recursion_limit(exc: BaseException) -> bool:
+    """Whether the graph gave up because it went round too many times.
+
+    Matched on the message rather than the class: langgraph has moved
+    GraphRecursionError between modules across versions, and an ImportError
+    here would be a worse failure than the one it is trying to describe.
+    """
+    text = "%s %s" % (type(exc).__name__, exc)
+    lowered = text.lower()
+    return "recursion" in lowered and "limit" in lowered
+
+
+def _last_observation(messages) -> str:
+    """The most recent tool output, as something a user can read.
+
+    Used when the loop has to be cut short: the data is already in the
+    conversation, and handing it over is better than another round with a
+    model that is not converging.
+    """
+    for message in reversed(list(messages or [])):
+        text = str(getattr(message, "content", "") or "")
+        if getattr(message, "type", None) == "human" and text.startswith(_OBSERVATION_LEAD):
+            body = text[len(_OBSERVATION_LEAD):].strip()
+            # The failure form carries instructions for the model after the
+            # output; a user should see the output, not the stage directions.
+            if body.lower().startswith("the tool failed"):
+                return body
+            return body
+    return ""
+
+
 def _invocations_already_run(messages) -> list:
     """Every tool command this turn has already executed."""
     seen = []
@@ -1402,12 +1444,21 @@ def tool_node(state: AgentState):
         # turn is about to fail. Refuse, and say plainly that the answer is
         # already above.
         if normalized_input in _invocations_already_run(state["messages"]):
-            return {"messages": [HumanMessage(content=(
-                f"Observation: you have already run `{normalized_input}` in this "
-                f"conversation and its output is above. Running it again cannot "
-                f"tell you anything new. Answer the user's question now, using "
-                f"that output."
-            ))]}
+            # Telling the model "you already ran that" was not enough: a 1B
+            # model reads the refusal, does not know what to do with it, and
+            # asks again — six times, until the recursion limit threw a
+            # LangGraph stack trace at the user seven seconds in.
+            #
+            # It has the answer; it just cannot get to it. So end the turn and
+            # give the user the observation, rather than another round of
+            # asking a model that has already demonstrated it will not stop.
+            from langchain_core.messages import AIMessage as _AIMsg
+            previous = _last_observation(state["messages"])
+            if previous:
+                return {"messages": [_AIMsg(content=previous)], "next_step": "end"}
+            return {"messages": [_AIMsg(content=(
+                f"I ran `{normalized_input}` but could not turn its output into "
+                f"an answer."))], "next_step": "end"}
 
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
@@ -1441,7 +1492,12 @@ if LANGCHAIN_AVAILABLE:
     workflow.add_node("action", tool_node)
     workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", should_continue, {"action": "action", "end": END})
-    workflow.add_edge("action", "agent")
+    # The tool node can finish the turn too. Without this it always handed
+    # control back to the model, so a model that kept asking for a tool it had
+    # already run went round until the recursion limit threw — which is what a
+    # 1B model does with a refusal it does not understand. Now the refusal ends
+    # the turn with the answer already in hand.
+    workflow.add_conditional_edges("action", should_continue, {"action": "action", "end": END})
     app = workflow.compile()
 else:
     llm = None
@@ -1661,17 +1717,34 @@ def main():
             _reply_speech = start_reply_stream()
             _set_token_sink(_ReplySpeech(_reply_speech) if _reply_speech else None)
             start_waiting()
+            _last_tool_output = ""
             try:
                 for output in app.stream(state, config={"recursion_limit": AGENT_MAX_STEPS}):
                     for key, value in output.items():
-                        if key == "agent" and value.get("next_step") == "end":
-                            final_agent_reply = value["messages"][-1].content  # type: ignore[index]
+                        messages = value.get("messages") or []
+                        # Remember the data as it goes past, so a loop that
+                        # never converges can still be answered from it.
+                        if messages:
+                            seen = str(getattr(messages[-1], "content", "") or "")
+                            if seen.startswith(_OBSERVATION_LEAD):
+                                _last_tool_output = seen[len(_OBSERVATION_LEAD):].strip()
+                        # The tool node can end the turn now, not just the
+                        # agent — checking only "agent" dropped its answer.
+                        if value.get("next_step") == "end" and messages:
+                            final_agent_reply = messages[-1].content  # type: ignore[index]
             except KeyboardInterrupt:
                 # Ctrl+C during AI processing — cancel the current query, not the app
                 stop_waiting()
                 console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
+                # A loop that will not converge is not an error to show the
+                # user. The tool ran, its output is in hand, and a LangGraph
+                # stack trace with a docs URL is a worse answer than the data.
+                if _is_recursion_limit(e) and _last_tool_output:
+                    stop_waiting()
+                    render_response(_last_tool_output)
+                    continue
                 # The TUI used to print the raw exception, so a stopped Ollama
                 # server read as "[Errno 111] Connection refused" with no hint
                 # that `ollama serve` is the fix. Same describer as the API path.

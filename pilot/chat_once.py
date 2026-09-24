@@ -106,11 +106,28 @@ def main() -> int:
 
     reply = None
     try:
+        last_tool_output = ""
         for output in pilot.app.stream(state, config={"recursion_limit": pilot.AGENT_MAX_STEPS}):
             for key, value in output.items():
-                if key == "agent" and value.get("next_step") == "end":
-                    reply = value["messages"][-1].content
+                messages = value.get("messages") or []
+                if messages:
+                    seen = str(getattr(messages[-1], "content", "") or "")
+                    if seen.startswith("Observation:"):
+                        last_tool_output = seen[len("Observation:"):].strip()
+                # The tool node ends the turn too, not just the agent —
+                # checking only "agent" silently dropped its answer.
+                if value.get("next_step") == "end" and messages:
+                    reply = messages[-1].content
     except Exception as exc:  # noqa: BLE001
+        # A loop that will not converge is not an error to hand the GUI. The
+        # tool ran and its output is in hand; that is a better answer than a
+        # LangGraph stack trace with a documentation URL.
+        if pilot._is_recursion_limit(exc) and last_tool_output:
+            return _emit({
+                "reply": last_tool_output,
+                "backend": getattr(pilot, "LLM_BACKEND", "unknown"),
+                "model": getattr(pilot, "OLLAMA_MODEL", "unknown"),
+            })
         return _emit({"error": _describe_failure(exc)}, 3)
 
     return _emit({

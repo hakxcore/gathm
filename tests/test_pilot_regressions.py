@@ -186,8 +186,11 @@ class TestPilotRegressions(unittest.TestCase):
             PILOT.run_gathm_tool_raw = original
 
         self.assertEqual(ran, [], "the repeated tool was executed anyway")
-        self.assertIn("already run", observation)
-        self.assertIn("weather mumbai", observation)
+        # Earlier this returned a refusal telling the model to answer from what
+        # it had. A 1B model ignored that and asked again until the recursion
+        # limit threw, so the repeat now ends the turn with the observation
+        # itself — the data was there the whole time.
+        self.assertIn("29C", observation)
 
     def test_a_different_tool_call_still_runs(self):
         """The guard must not block a genuine second step."""
@@ -211,6 +214,50 @@ class TestPilotRegressions(unittest.TestCase):
         """
         self.assertLessEqual(PILOT.AGENT_MAX_STEPS, 8)
         self.assertGreaterEqual(PILOT.AGENT_MAX_STEPS, 3)
+
+    @unittest.skipUnless(PILOT.LANGCHAIN_AVAILABLE,
+                         "tool_node builds LangChain messages")
+    def test_a_repeat_ends_the_turn_with_the_answer(self):
+        """A refusal the model ignores must not become another round.
+
+        Telling a 1B model "you already ran that" did not stop it: observed as
+        six rounds ending in a LangGraph recursion stack trace, seven seconds
+        in, with the weather sitting unused in the conversation the whole time.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        state = {"messages": [
+            HumanMessage(content="weather in mumbai"),
+            AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+            HumanMessage(content="Observation: Mumbai: Patchy rain, +29 C"),
+            AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+        ]}
+        result = PILOT.tool_node(state)
+        self.assertEqual(result.get("next_step"), "end",
+                         "the repeat did not end the turn")
+        self.assertIn("29", result["messages"][-1].content,
+                      "the observation was not handed back as the answer")
+
+    def test_the_last_observation_is_recoverable(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        messages = [
+            HumanMessage(content="weather in mumbai"),
+            HumanMessage(content="Observation: Mumbai: Patchy rain, +29 C"),
+            AIMessage(content="Action: gathm\nAction Input: weather mumbai"),
+        ]
+        self.assertEqual(PILOT._last_observation(messages),
+                         "Mumbai: Patchy rain, +29 C")
+        self.assertEqual(PILOT._last_observation([]), "")
+
+    def test_a_recursion_limit_is_recognised_however_it_is_spelled(self):
+        """The exception class has moved between langgraph versions."""
+        self.assertTrue(PILOT._is_recursion_limit(
+            Exception("Recursion limit of 6 reached without hitting a stop condition")))
+        self.assertTrue(PILOT._is_recursion_limit(
+            RuntimeError("GRAPH_RECURSION_LIMIT")))
+        self.assertFalse(PILOT._is_recursion_limit(
+            Exception("Connection refused")))
 
 if __name__ == "__main__":
     unittest.main()
