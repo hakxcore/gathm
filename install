@@ -1027,6 +1027,12 @@ _llamacpp_supported() {
     local p="${_GATHM_PLATFORM:-$(detect_platform)}"
     case "$p" in
         macos|darwin|linux|wsl|windows) return 0 ;;
+        # Termux packages llama.cpp itself — `pkg install llama-cpp`, ~26 MB
+        # against Ollama's several hundred, and the same engine underneath
+        # without the supervisor. That is a better trade on a phone than
+        # anywhere else, which is why this platform was excluded before the
+        # package was found rather than on its merits.
+        termux) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1180,6 +1186,7 @@ PY
 _llamacpp_package_candidates() {
     case "$1" in
         apt)    echo "llama.cpp-tools llama-cpp-tools" ;;
+        pkg)    echo "llama-cpp" ;;
         pacman) echo "llama.cpp" ;;
         dnf)    echo "llama-cpp llama.cpp" ;;
         zypper) echo "llama.cpp llama-cpp" ;;
@@ -1189,6 +1196,12 @@ _llamacpp_package_candidates() {
 # Which package manager to talk to, or nothing.
 _llamacpp_package_manager() {
     local manager
+    # Termux first: it ships apt as well, but `pkg` is the supported front end
+    # and the one that knows about the TUR repositories.
+    if _is_termux && command -v pkg &>/dev/null; then
+        echo pkg
+        return 0
+    fi
     for manager in apt pacman dnf zypper; do
         case "$manager" in
             apt)    command -v apt-get &>/dev/null && { echo apt;    return 0; } ;;
@@ -1212,7 +1225,7 @@ _llamacpp_package_exists() {
 _llamacpp_package_exists_raw() {
     local manager="$1" name="$2"
     case "$manager" in
-        apt)    apt-cache show "$name" &>/dev/null ;;
+        apt|pkg) apt-cache show "$name" &>/dev/null ;;
         pacman) pacman -Si "$name" &>/dev/null ;;
         dnf)    dnf --quiet list --available "$name" &>/dev/null \
                     || dnf --quiet info "$name" &>/dev/null ;;
@@ -1225,6 +1238,13 @@ _llamacpp_package_exists_raw() {
 # sudo, and a sudo that would sit waiting for a password nobody is there to
 # type is worse than skipping this path and downloading the archive instead.
 _llamacpp_sudo() {
+    # Termux has no root and needs none: packages install into $PREFIX, which
+    # the app owns. Asking for sudo here would fail and skip the package path
+    # on the one platform where it is cheapest.
+    if _is_termux; then
+        echo ""
+        return 0
+    fi
     if [[ "$(id -u)" == "0" ]]; then
         echo ""
         return 0
@@ -1266,6 +1286,7 @@ _llamacpp_install_via_package_manager() {
     local rc=0
     case "$manager" in
         apt)    _bounded 900 env DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y "$found" || rc=$? ;;
+        pkg)    _bounded 900 pkg install -y "$found" || rc=$? ;;
         pacman) _bounded 900 $sudo_cmd pacman -S --noconfirm "$found" || rc=$? ;;
         dnf)    _bounded 900 $sudo_cmd dnf install -y "$found" || rc=$? ;;
         zypper) _bounded 900 $sudo_cmd zypper --non-interactive install "$found" || rc=$? ;;
@@ -1464,6 +1485,15 @@ install_llamacpp() {
         _llamacpp_install_via_package_manager && installed=0
     fi
 
+    # Termux gets the package or nothing. No prebuilt archive targets Bionic,
+    # and an on-device CMake build costs the better part of an hour for a
+    # binary `pkg` already has — so fall back to Ollama rather than burn that.
+    if (( installed != 0 )) && _is_termux; then
+        warn "No llama.cpp package available — keeping Ollama on this device."
+        warn "Try: pkg install llama-cpp   (then re-run ./install)"
+        return 1
+    fi
+
     if (( installed != 0 )) && [[ "${GATHM_LLAMACPP_BUILD:-0}" != "1" ]]; then
         if _llamacpp_install_prebuilt "$platform"; then
             local candidate; candidate=$(_llamacpp_existing_bin) || candidate=""
@@ -1536,10 +1566,33 @@ _llamacpp_model_ladder() {
 LADDER
 }
 
+# Phones get their own two-step ladder, for the same reasons the Ollama one
+# exists: Android inference is pure CPU, thermal throttling starts within a
+# minute, and the low-memory killer reaps the biggest process mid-response. The
+# desktop tiers would hand an 8 GB phone a 5 GB model, which is exactly the
+# install that does not work. The 11 GB threshold is shared with the Ollama
+# ladder (GATHM_TERMUX_LARGE_MIN_RAM_MB) so the two cannot drift apart.
+GATHM_TERMUX_LLAMACPP_SMALL="bartowski/Llama-3.2-1B-Instruct-GGUF"
+GATHM_TERMUX_LLAMACPP_LARGE="bartowski/Llama-3.2-3B-Instruct-GGUF"
+
+_llamacpp_termux_repo() {
+    local ram_mb
+    ram_mb=$(_detect_total_ram_mb) || true
+    if [[ "$ram_mb" =~ ^[0-9]+$ ]] \
+            && (( ram_mb >= GATHM_TERMUX_LARGE_MIN_RAM_MB )); then
+        echo "$GATHM_TERMUX_LLAMACPP_LARGE"
+    else
+        echo "$GATHM_TERMUX_LLAMACPP_SMALL"
+    fi
+}
+
 # The repo this machine should run, by RAM.
 _llamacpp_recommend_repo() {
     if [[ -n "${GATHM_LLAMACPP_MODEL_REPO:-}" ]]; then
         echo "$GATHM_LLAMACPP_MODEL_REPO"; return 0
+    fi
+    if _is_termux; then
+        _llamacpp_termux_repo; return 0
     fi
     local ram_mb; ram_mb=$(_detect_total_ram_mb) || true
     [[ "$ram_mb" =~ ^[0-9]+$ ]] || ram_mb=0

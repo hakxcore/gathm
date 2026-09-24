@@ -582,7 +582,10 @@ The resolved binary, model directory, family, and voice are written to
 Gathm runs the model itself, on your machine, with no account and no request
 leaving the box. On macOS, Linux and Windows that is **llama.cpp** —
 specifically its `llama-server`, which speaks the OpenAI chat API on
-`127.0.0.1:8081`. Termux keeps Ollama, which is the path verified on Android.
+`127.0.0.1:8081`. Termux too: it packages llama.cpp itself, and 26 MB of
+package against several hundred for Ollama is a better trade on a phone than
+anywhere else. A device with no such package falls back to Ollama rather than
+spending an hour on an on-device compile for a binary `pkg` already has.
 
 ### Why llama.cpp rather than Ollama
 
@@ -612,7 +615,7 @@ where Gathm's wait actually was.
 | macOS | llama.cpp | Homebrew (`brew install llama.cpp`), else the official prebuilt release |
 | Linux / WSL | llama.cpp | the distro package (`llama.cpp-tools` on Debian/Ubuntu, `llama.cpp` on Arch), else the official prebuilt release, else a CMake build from source |
 | Windows | llama.cpp | the official prebuilt CPU release (Git Bash or WSL runs the installer) |
-| Termux | Ollama | `pkg install ollama` — unchanged |
+| Termux | llama.cpp | `pkg install llama-cpp` — ~26 MB, and Termux packages Vulkan/OpenCL backends for the phone GPU separately |
 
 The binary lands in `~/.gathm/llamacpp/bin`, the weights in `~/.gathm/models`,
 and both paths are written to `~/.gathm/llamacpp_bin` and
@@ -663,8 +666,10 @@ or at a different Hugging Face repo with `GATHM_LLAMACPP_MODEL_REPO=owner/repo`.
 
 ### The model on Termux
 
-Termux stays on Ollama, and on its own two-step ladder instead of the desktop
-RAM tiers, because on Android inference is pure CPU, thermal throttling starts within a minute, and
+Termux keeps its own two-step ladder instead of the desktop RAM tiers —
+`Llama-3.2-1B` under 11 GB of RAM and `Llama-3.2-3B` above it, mirroring the
+Ollama ladder below and sharing its threshold — because on Android inference is
+pure CPU, thermal throttling starts within a minute, and
 the low-memory killer reaps the Ollama server mid-response:
 
 | Phone RAM (`MemTotal`) | Model |
