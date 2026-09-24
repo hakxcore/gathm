@@ -529,7 +529,17 @@ def run_gathm_tool_raw(command: str) -> str:
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
     try:
-        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
+        # Tools render for humans; the agent wants data. A tool that has a
+        # compact form honours GATHM_TOOL_COMPACT and returns one line instead
+        # of a screenful; one that does not simply ignores it, so this is safe
+        # to set for every tool in the catalogue.
+        #
+        # It is worth a lot. `weather` returns 9,026 characters of ASCII art,
+        # of which the model reads ~740 tokens after truncation — twenty-seven
+        # seconds of prefill on a phone, to learn a temperature that fits in
+        # seventy characters.
+        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1",
+               "GATHM_TOOL_COMPACT": "1"}
         shell_cmd = f'source "{GATHM_ROOT}/lib/utils.bash" && "{tool_path}" "$@"'
         result = subprocess.run(
             ["bash", "-c", shell_cmd, "gathm-tool", *tool_args],

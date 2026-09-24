@@ -50,5 +50,10 @@ output_schema:
       type: array
 
 fallback_tool: null
+environment:
+  - name: GATHM_TOOL_COMPACT
+    description: "1 returns one line of current conditions instead of the full report — what Pilot asks for, so the model reads 70 characters rather than 9,000"
+    required: false
+
 tags: [data, weather, forecast, temperature, climate, rain, raining, hot,
        cold, sunny, snow, humidity, umbrella, outside]

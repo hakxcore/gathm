@@ -71,6 +71,11 @@ jobs:
       - name: Connectivity-check suite
         run: bash tests/netcheck_test.sh
 
+      # Tools render for humans; the agent asks for data. Stubs the fetch, so
+      # it asserts the URL without touching the network.
+      - name: Compact tool-output suite
+        run: bash tests/compact_tool_test.sh
+
       # The llama.cpp half of the installer: which release archive it picks,
       # which GGUF it picks, and what it does with what arrives. Runs against
       # file:// fixtures, so it needs no network and downloads nothing.

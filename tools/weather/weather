@@ -10,6 +10,34 @@ LANG="${LANG:-en}"
 locale=$(echo "$LANG" | cut -c1-2)
 [[ $(echo "$locale" | grep -Eo "[a-z A-Z]*" | wc -c) != 3 ]] && locale="en"
 
+# What the agent asks for, as opposed to what a person reads.
+#
+# The full report is 9,026 characters of ASCII cloud art and box-drawing
+# tables. A person in a terminal wants that. A model does not: after cleaning
+# and truncation it reads ~740 tokens of it, and on a phone prefilling at 26
+# tokens per second that is twenty-seven seconds spent looking at pictures of
+# clouds to find out it is 29 degrees.
+#
+# wttr.in will just tell us, on the same endpoint and in the same 2 seconds:
+#
+#   https://wttr.in/Mumbai              9026 chars
+#   https://wttr.in/Mumbai?format=...     ~70 chars
+#
+# %C rather than %c on purpose — the text condition, not the emoji. An emoji
+# costs several tokens and tells a text model nothing the words do not.
+#
+# Set GATHM_TOOL_COMPACT=1 to get it. Pilot sets it for every tool it runs;
+# a human never does, so `gathm run weather` in a terminal is unchanged.
+#
+# The limit worth knowing: this is CURRENT conditions only. The three-day
+# forecast has no one-line form upstream, so a question about tomorrow still
+# needs the full report.
+WEATHER_COMPACT_FORMAT="%l:+%C,+%t+(feels+%f),+humidity+%h,+wind+%w,+precip+%p"
+
+_weather_compact() {
+  [[ "${GATHM_TOOL_COMPACT:-0}" == "1" ]]
+}
+
 getIPWeather()
 {
   local params="$1"
@@ -19,17 +47,34 @@ getIPWeather()
     local city=$(httpGet ipinfo.io/city)
     local region=$(httpGet ipinfo.io/region)
     [[ $(echo "$region" | wc -w) -eq 2 ]] && region=$(echo "$region" | grep -Eo "[A-Z]*" | tr -d "[:space:]")
-    httpGet "$locale.wttr.in/${city},${region}${params}"
+    httpGet "$locale.wttr.in/${city},${region}$(_weather_params "$params")"
   else
     local location=$(httpGet ipinfo.io/loc)
-    httpGet "$locale.wttr.in/${location}${params}"
+    httpGet "$locale.wttr.in/${location}$(_weather_params "$params")"
+  fi
+}
+
+# The query string to send: the caller's own params for a human, the one-line
+# format for the agent. A compact request ignores unit flags — the format
+# string fixes the units — which is the right trade for an observation nobody
+# reads twice.
+_weather_params() {
+  if _weather_compact; then
+    echo "?format=${WEATHER_COMPACT_FORMAT}"
+  else
+    echo "$1"
   fi
 }
 
 getLocationWeather()
 {
   local args=$(echo "$@" | tr " " +)
-  httpGet "$locale.wttr.in/${args}"
+  if _weather_compact; then
+    # Strip any ?params the caller appended; the format string replaces them.
+    httpGet "$locale.wttr.in/${args%%\?*}?format=${WEATHER_COMPACT_FORMAT}"
+  else
+    httpGet "$locale.wttr.in/${args}"
+  fi
 }
 
 usage()
