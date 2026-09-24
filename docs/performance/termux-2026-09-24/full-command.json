@@ -1,0 +1,25 @@
+{
+  "before": [
+    {
+      "seconds": 6.923747385997558,
+      "returncode": 0
+    }
+  ],
+  "after": [
+    {
+      "seconds": 0.946366999996826,
+      "returncode": 0
+    },
+    {
+      "seconds": 0.9945196150219999,
+      "returncode": 0
+    },
+    {
+      "seconds": 0.9147028459992725,
+      "returncode": 0
+    }
+  ],
+  "tests": "test_catalog_handles_missing_fields_and_empty_directory (schema_tests.SchemaTests.test_catalog_handles_missing_fields_and_empty_directory) ... ok\ntest_catalog_is_sorted_and_skips_incomplete_tools (schema_tests.SchemaTests.test_catalog_is_sorted_and_skips_incomplete_tools) ... ok\ntest_manifest_fields_keep_existing_scalar_behavior (schema_tests.SchemaTests.test_manifest_fields_keep_existing_scalar_behavior) ... ok\ntest_missing_field_succeeds_with_empty_output (schema_tests.SchemaTests.test_missing_field_succeeds_with_empty_output) ... ok\ntest_missing_manifest_returns_failure (schema_tests.SchemaTests.test_missing_manifest_returns_failure) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 0.205s\n\nOK\n",
+  "applied": true,
+  "backup": "/data/data/com.termux/files/home/.gathm/performance-backups/2026-09-24-schema/schema.bash"
+}

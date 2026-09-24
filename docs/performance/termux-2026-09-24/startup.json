@@ -1,0 +1,59 @@
+{
+  "root": "/data/data/com.termux/files/home/gathm",
+  "python": "3.13.13 (main, Apr 10 2026, 13:09:22) [Clang 21.0.0 (https://android.googlesource.com/toolchain/llvm-project 5e96669f0",
+  "platform": "Android-16-aarch64-64bit-ELF",
+  "cpu_count": 8,
+  "samples": {
+    "cli_version": [
+      {
+        "seconds": 0.16824646102031693,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 0.18833346100291237,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 0.18169692301307805,
+        "returncode": 0,
+        "stderr": ""
+      }
+    ],
+    "tool_catalog": [
+      {
+        "seconds": 5.583708000020124,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 5.643757768993964,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 5.366770846012514,
+        "returncode": 0,
+        "stderr": ""
+      }
+    ],
+    "pilot_import": [
+      {
+        "seconds": 16.87003600099706,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 4.422372616012581,
+        "returncode": 0,
+        "stderr": ""
+      },
+      {
+        "seconds": 4.303897768986644,
+        "returncode": 0,
+        "stderr": ""
+      }
+    ]
+  }
+}

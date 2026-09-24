@@ -1,0 +1,82 @@
+[
+  {
+    "version": "before",
+    "iteration": 0,
+    "seconds": 5.878206077002687,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "after",
+    "iteration": 0,
+    "seconds": 0.10795476898783818,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "before",
+    "iteration": 1,
+    "seconds": 5.410015383997234,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "after",
+    "iteration": 1,
+    "seconds": 0.09409084697836079,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "before",
+    "iteration": 2,
+    "seconds": 5.549343922990374,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "after",
+    "iteration": 2,
+    "seconds": 0.10806184602552094,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "before",
+    "iteration": 3,
+    "seconds": 5.426666770013981,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "after",
+    "iteration": 3,
+    "seconds": 0.09187792299780995,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "before",
+    "iteration": 4,
+    "seconds": 5.337608615984209,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  },
+  {
+    "version": "after",
+    "iteration": 4,
+    "seconds": 0.09317538401228376,
+    "returncode": 0,
+    "identical_output": true,
+    "tools": 55
+  }
+]

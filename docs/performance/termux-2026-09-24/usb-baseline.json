@@ -1,0 +1,149 @@
+[
+  {
+    "label": "direct_model_0",
+    "seconds": 7.6839,
+    "data": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Ready."
+          }
+        }
+      ],
+      "created": 1790232059,
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M",
+      "system_fingerprint": "b0-unknown",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 3,
+        "prompt_tokens": 41,
+        "total_tokens": 44,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "id": "chatcmpl-ysIogNIiXDxg4UU9FqTIRcEhythPEeMZ",
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 41,
+        "prompt_ms": 6975.7,
+        "prompt_per_token_ms": 170.1390243902439,
+        "prompt_per_second": 5.877546339435469,
+        "predicted_n": 3,
+        "predicted_ms": 213.29,
+        "predicted_per_token_ms": 71.09666666666666,
+        "predicted_per_second": 14.065357025645834
+      }
+    }
+  },
+  {
+    "label": "direct_model_1",
+    "seconds": 1.736,
+    "data": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Ready."
+          }
+        }
+      ],
+      "created": 1790232061,
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M",
+      "system_fingerprint": "b0-unknown",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 3,
+        "prompt_tokens": 41,
+        "total_tokens": 44,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "id": "chatcmpl-E69zZnHHyTdtjFwioqsanUR8zCjHbOiZ",
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 41,
+        "prompt_ms": 1474.372,
+        "prompt_per_token_ms": 35.960292682926834,
+        "prompt_per_second": 27.80844997056374,
+        "predicted_n": 3,
+        "predicted_ms": 208.006,
+        "predicted_per_token_ms": 69.33533333333334,
+        "predicted_per_second": 14.422660884782168
+      }
+    }
+  },
+  {
+    "label": "direct_model_2",
+    "seconds": 1.7416,
+    "data": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Ready."
+          }
+        }
+      ],
+      "created": 1790232063,
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M",
+      "system_fingerprint": "b0-unknown",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 3,
+        "prompt_tokens": 41,
+        "total_tokens": 44,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "id": "chatcmpl-QliTLpZrx9cJbdSzoMudxqYahM0lVFYT",
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 41,
+        "prompt_ms": 1511.217,
+        "prompt_per_token_ms": 36.8589512195122,
+        "prompt_per_second": 27.13045181466328,
+        "predicted_n": 3,
+        "predicted_ms": 200.284,
+        "predicted_per_token_ms": 66.76133333333333,
+        "predicted_per_second": 14.978730203111581
+      }
+    }
+  },
+  {
+    "label": "gathm_hello_0",
+    "seconds": 20.1435,
+    "data": {
+      "reply": "It's great to see you again! How's your day starting out today?",
+      "backend": "llamacpp",
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M"
+    }
+  },
+  {
+    "label": "gathm_hello_1",
+    "seconds": 21.0234,
+    "data": {
+      "reply": "How's your day going so far?",
+      "backend": "llamacpp",
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M"
+    }
+  },
+  {
+    "label": "gathm_hello_2",
+    "seconds": 15.4115,
+    "data": {
+      "reply": "How's your day going so far?",
+      "backend": "llamacpp",
+      "model": "Llama-3.2-1B-Instruct-Q4_K_M"
+    }
+  }
+]

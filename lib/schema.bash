@@ -138,7 +138,16 @@ parse_manifest() {
         return 1
     fi
 
-    grep "^${field}:" "$manifest" | sed "s/^${field}: *//" | tr -d '"' | tr -d "'"
+    local line value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == "$field:"* ]] || continue
+        value="${line#*:}"
+        value="${value#"${value%%[! ]*}"}"
+        value="${value//\"/}"
+        value="${value//\'/}"
+        printf '%s\n' "$value"
+    done < "$manifest"
+    return 0
 }
 
 # Get tool description from manifest
@@ -163,7 +172,8 @@ list_tools_json() {
 
     for dir in "$SCRIPT_DIR_SCHEMA"/tools/*/; do
         local tool_name
-        tool_name=$(basename "$dir")
+        tool_name="${dir%/}"
+        tool_name="${tool_name##*/}"
         if [[ ! -f "$dir/$tool_name" ]]; then continue; fi
 
         local manifest="$dir/tool.yaml"
@@ -172,13 +182,25 @@ list_tools_json() {
         if ! $first; then result+=","; fi
         first=false
 
-        local desc version category
-        desc=$(get_tool_description "$tool_name")
-        version=$(get_tool_version "$tool_name")
-        category=$(get_tool_category "$tool_name")
+        # Read each manifest once, without spawning a pipeline for every
+        # field. Hundreds of short-lived processes cost seconds on Termux.
+        local desc="" version="" category="" line field value
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            field="${line%%:*}"
+            case "$field" in description|version|category) ;; *) continue ;; esac
+            [[ "$line" == *:* ]] || continue
+            value="${line#*:}"
+            value="${value#"${value%%[! ]*}"}"
+            value="${value//\"/}"
+            value="${value//\'/}"
+            case "$field" in
+                description) desc="$value" ;;
+                version) version="$value" ;;
+                category) category="$value" ;;
+            esac
+        done < "$manifest"
 
-        result+=$(printf '{"name":"%s","description":"%s","version":"%s","category":"%s"}' \
-            "$tool_name" "$desc" "$version" "$category")
+        result+="{\"name\":\"$tool_name\",\"description\":\"$desc\",\"version\":\"$version\",\"category\":\"$category\"}"
     done
 
     result+="]"
