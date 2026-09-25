@@ -1,6 +1,6 @@
 name: weather
 version: "3.0.0"
-description: "Provides a 3 day forecast on your current location or a specified location"
+description: "Weather at your location or a specified city. Use weather -f [location] for forecasts; compact mode otherwise returns current conditions."
 category: data
 requires_internet: true
 
@@ -24,6 +24,8 @@ input_schema:
       required: false
       description: "City, country, or location to check weather for"
   flags:
+    - flag: "-f"
+      description: "Full forecast, even in compact mode"
     - flag: "m"
       description: "Metric units"
     - flag: "i"
@@ -50,4 +52,10 @@ output_schema:
       type: array
 
 fallback_tool: null
-tags: [data, weather, forecast, temperature, climate]
+environment:
+  - name: GATHM_TOOL_COMPACT
+    description: "1 returns one line of current conditions instead of the full report — what Pilot asks for, so the model reads 70 characters rather than 9,000"
+    required: false
+
+tags: [data, weather, forecast, temperature, climate, rain, raining, hot,
+       cold, sunny, snow, humidity, umbrella, outside]

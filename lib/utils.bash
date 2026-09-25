@@ -137,8 +137,32 @@ httpJsonError() {
     echo "       Reproduce with: curl -sS -D - '$url' | head -20"
 }
 
+# Is there a network? A HEAD request, bounded, body discarded.
+#
+# This used to be `httpGet github.com`, which fetches GitHub's entire homepage
+# — several hundred kilobytes — to answer a yes/no question. Every tool calls
+# it before it starts, so every tool paid for it. Measured on a phone:
+# `gathm run weather Mumbai` took 22 seconds, of which wttr.in accounted for 2.
+# The other 20 were spent downloading a web page nobody reads.
+#
+# GATHM_NET_CHECK_URL points it somewhere else (an air-gapped mirror, a
+# corporate proxy's own probe); GATHM_NET_CHECK_TIMEOUT bounds it. The bound
+# matters as much as the method: without one, a captive portal that accepts the
+# connection and never answers hangs the tool instead of failing it.
 checkInternet() {
-    httpGet github.com > /dev/null 2>&1 || return 1
+    local url="${GATHM_NET_CHECK_URL:-https://github.com}"
+    local seconds="${GATHM_NET_CHECK_TIMEOUT:-5}"
+    case "$configuredClient" in
+        wget)   wget -q --spider --timeout="$seconds" --tries=1 "$url" >/dev/null 2>&1 ;;
+        httpie) http --headers --timeout "$seconds" HEAD "$url" >/dev/null 2>&1 ;;
+        fetch)  fetch -q -s -T "$seconds" "$url" >/dev/null 2>&1 ;;
+        *)      curl -A curl -sS -I --max-time "$seconds" -o /dev/null "$url" >/dev/null 2>&1 ;;
+    esac
+    # Normalised to 0/1. curl distinguishes "could not connect" (7) from a
+    # transfer that died mid-flight (56) and a dozen others; callers of this
+    # only ever ask yes or no, and leaking the client's own codes invites a
+    # caller to test for one of them.
+    [[ $? -eq 0 ]]
 }
 
 # Returns "online" or "offline" on stdout (never fails)

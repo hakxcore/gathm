@@ -25,4 +25,5 @@ input_schema:
 output_schema:
   text: "Conversion results including rate and total amount"
 
-tags: [finance, currency, money, conversion]
+tags: [finance, currency, money, conversion, exchange, rate, forex, convert,
+       dollar, euro, rupee, yen, pound]

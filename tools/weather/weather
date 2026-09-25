@@ -10,6 +10,32 @@ LANG="${LANG:-en}"
 locale=$(echo "$LANG" | cut -c1-2)
 [[ $(echo "$locale" | grep -Eo "[a-z A-Z]*" | wc -c) != 3 ]] && locale="en"
 
+# What the agent asks for, as opposed to what a person reads.
+#
+# The full report is 9,026 characters of ASCII cloud art and box-drawing
+# tables. A person in a terminal wants that. A model does not: after cleaning
+# and truncation it reads ~740 tokens of it, and on a phone prefilling at 26
+# tokens per second that is twenty-seven seconds spent looking at pictures of
+# clouds to find out it is 29 degrees.
+#
+# wttr.in will just tell us, on the same endpoint and in the same 2 seconds:
+#
+#   https://wttr.in/Mumbai              9026 chars
+#   https://wttr.in/Mumbai?format=...     ~70 chars
+#
+# %C rather than %c on purpose — the text condition, not the emoji. An emoji
+# costs several tokens and tells a text model nothing the words do not.
+#
+# Set GATHM_TOOL_COMPACT=1 to get it. Pilot sets it for every tool it runs;
+# a human never does, so `gathm run weather` in a terminal is unchanged.
+#
+# Compact mode returns current conditions. Use -f for the full forecast.
+WEATHER_COMPACT_FORMAT="%l:+%C,+%t+(feels+%f),+humidity+%h,+wind+%w,+precip+%p"
+
+_weather_compact() {
+  [[ "${GATHM_TOOL_COMPACT:-0}" == "1" ]]
+}
+
 getIPWeather()
 {
   local params="$1"
@@ -19,17 +45,34 @@ getIPWeather()
     local city=$(httpGet ipinfo.io/city)
     local region=$(httpGet ipinfo.io/region)
     [[ $(echo "$region" | wc -w) -eq 2 ]] && region=$(echo "$region" | grep -Eo "[A-Z]*" | tr -d "[:space:]")
-    httpGet "$locale.wttr.in/${city},${region}${params}"
+    httpGet "$locale.wttr.in/${city},${region}$(_weather_params "$params")"
   else
     local location=$(httpGet ipinfo.io/loc)
-    httpGet "$locale.wttr.in/${location}${params}"
+    httpGet "$locale.wttr.in/${location}$(_weather_params "$params")"
+  fi
+}
+
+# Preserve unit flags when requesting the compact format.
+_weather_params() {
+  if _weather_compact; then
+    local params="${1:-?}"
+    [[ "$params" != "?" ]] && params="${params}&"
+    printf '%sformat=%s\n' "$params" "${WEATHER_COMPACT_FORMAT}"
+  else
+    echo "$1"
   fi
 }
 
 getLocationWeather()
 {
   local args=$(echo "$@" | tr " " +)
-  httpGet "$locale.wttr.in/${args}"
+  if _weather_compact && [[ "$args" != "Moon" && "$args" != "moon" ]]; then
+    local params=""
+    [[ "$args" == *\?* ]] && params="?${args#*\?}"
+    httpGet "$locale.wttr.in/${args%%\?*}$(_weather_params "$params")"
+  else
+    httpGet "$locale.wttr.in/${args}"
+  fi
 }
 
 usage()
@@ -38,7 +81,8 @@ usage()
 Weather (v$currentVersion)
 Description: Provides a 3-day forecast on your current location or a specified location.
 
-Usage: weather [location] [units/flags]
+Usage: weather [-f] [location] [units/flags]
+  -f             Full forecast, including when compact mode is enabled.
   [location]     City, country, or IP address. Defaults to current IP.
   [units/flags]  
                  m   - Metric units
@@ -55,14 +99,17 @@ EOF
 }
 
 # --- Option Parsing ---
-while getopts "uvh" opt; do
+while getopts "fuvh" opt; do
   case "$opt" in
+    f) GATHM_TOOL_COMPACT=0 ;;
     v) echo "Version $currentVersion"; exit 0 ;;
     h) usage; exit 0 ;;
     u) # Legacy update flag, ignored in Gathm
        exit 0 ;;
+    *) usage >&2; exit 2 ;;
   esac
 done
+shift $((OPTIND - 1))
 
 getConfiguredClient || exit 1
 checkInternet || { echo "Error: No internet connection"; exit 1; }

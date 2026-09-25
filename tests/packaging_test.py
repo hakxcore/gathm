@@ -114,7 +114,9 @@ def test_every_runtime_directory_is_packaged():
            destination.startswith("gathmcli/_bundle/"))
 
     # Anything on disk that looks like runtime but is not mapped is a trap.
-    skip = {"tests", "docs", "engineer", "dist", "gathmcli", "node_modules", "bench"}
+    # Benchmarks and tests are development tools, not installed runtime files.
+    skip = {"tests", "docs", "engineer", "dist", "gathmcli", "node_modules",
+            "bench"}
     for entry in sorted(os.listdir(ROOT)):
         if not os.path.isdir(os.path.join(ROOT, entry)):
             continue

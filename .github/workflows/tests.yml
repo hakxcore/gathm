@@ -56,7 +56,8 @@ jobs:
           python3 tests/speech_stream_test.py
           python3 tests/reply_stream_test.py
           python3 tests/llamacpp_test.py
-          python3 tests/test_schema.py
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 bench/route_bench_test.py
 
       - name: JavaScript suites
         run: |
@@ -64,9 +65,20 @@ jobs:
           node tests/markdown_test.js
           node tests/chunker_test.js
           node tests/vad_test.js
+          node tests/speech_browser_test.js
 
       - name: Launcher suite
         run: bash tests/launcher_test.sh
+
+      # The connectivity check runs before every tool, so its cost is on every
+      # command. Against a local stub, so it needs no network of its own.
+      - name: Connectivity-check suite
+        run: bash tests/netcheck_test.sh
+
+      # Tools render for humans; the agent asks for data. Stubs the fetch, so
+      # it asserts the URL without touching the network.
+      - name: Compact tool-output suite
+        run: bash tests/compact_tool_test.sh
 
       # The llama.cpp half of the installer: which release archive it picks,
       # which GGUF it picks, and what it does with what arrives. Runs against

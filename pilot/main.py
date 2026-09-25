@@ -304,10 +304,24 @@ def describe_agent_failure(exc: BaseException) -> str:
         or "all connection attempts failed" in text
         or "cannot connect to host" in text
     )
+    backend = LLM_BACKEND
+
+    if _is_recursion_limit(exc):
+        return (
+            "the model reached the step limit before answering. Try a simpler "
+            "question or raise GATHM_AGENT_MAX_STEPS for longer tasks."
+        )
+    if backend in ("llamacpp", "ollama") and any(marker in text for marker in (
+        "context length", "context window", "exceeds the available context",
+        "exceed_context_size",
+    )):
+        return (
+            "the request exceeds the model's context window. Shorten the "
+            "conversation or increase the local server's context size."
+        )
     if not refused:
         return "agent error: %s" % exc
 
-    backend = LLM_BACKEND
     if backend == "llamacpp":
         url = (getattr(_llm_config, "base_url", None)
                or os.environ.get("GATHM_LLAMACPP_BASE_URL")
@@ -526,7 +540,9 @@ def run_gathm_tool_raw(command: str) -> str:
     if not tool_path.is_file():
         return f"Error: Tool '{tool_name}' not found."
     try:
-        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1"}
+        # Request compact data where supported; weather -f retains forecasts.
+        env = {**os.environ, "TERM": "xterm-256color", "GATHM_NON_INTERACTIVE": "1",
+               "GATHM_TOOL_COMPACT": "1"}
         shell_cmd = 'source "$1/lib/utils.bash" && shift && command "$@"'
         result = subprocess.run(
             ["bash", "-c", shell_cmd, "gathm-tool", str(GATHM_ROOT), str(tool_path), *tool_args],
@@ -890,8 +906,35 @@ _CATALOGUE_RE = re.compile(
     r"your tools|available tools|capabilit(y|ies)|help me with)\b", re.I)
 
 
+# What a question is ABOUT, as opposed to what it is asking. A domain, URL,
+# e-mail address, IP or filename is the operand — the thing to act on — and its
+# pieces are not routing signal. Splitting them into words actively misroutes:
+# "what nameservers does example.org use" scored `newton`, because the tokens
+# of example.org include "example" and newton's own description says "For
+# example: 'newton derive x^2'". The tool that the question names outright is
+# still matched against the raw query, so "run dns on example.org" is unharmed.
+#
+# A bare dotted name has to end in a TLD to count as a domain. Treating every
+# dotted token as an operand was too greedy: "what does the robots.txt on this
+# site disallow" lost the word that routes it, and answered about TLS ciphers.
+# A domain ends in a TLD; a filename ends in an extension. Anything this list
+# misses simply keeps today's behaviour of splitting into words.
+_TLDS = ("com|org|net|io|dev|ai|co|edu|gov|mil|int|info|biz|me|xyz|app|cloud"
+         "|tech|site|online|store|blog|news|tv|cc|ly|gg|in|uk|us|ca|au|de|fr"
+         "|nl|es|it|se|no|fi|pl|ru|br|jp|cn|kr|sg|nz|za|ie|ch|at|be|dk|pt|mx")
+_OPERAND_RE = re.compile(
+    r"""(
+        (?:https?://|www\.)\S+              # URLs
+      | [\w.+-]+@[\w-]+\.[\w.-]+           # e-mail addresses
+      | \d{1,3}(?:\.\d{1,3}){3}            # IPv4, with or without a /mask
+      | [\w-]+(?:\.[\w-]+)*\.(?:""" + _TLDS + r""")\b   # domains
+    )""",
+    re.VERBOSE | re.IGNORECASE)
+
+
 def _query_terms(query: str) -> set:
-    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    without_operands = _OPERAND_RE.sub(" ", query or "")
+    words = re.findall(r"[a-z0-9]+", without_operands.lower())
     return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
 
 
@@ -942,12 +985,29 @@ def _tool_index() -> dict:
         tags: set = set()
         manifest = TOOLS_DIR / name / "tool.yaml"
         try:
+            # A bracketed YAML list may wrap across lines, and reading only the
+            # first one silently dropped every tag after the wrap — a tool
+            # could lose half its vocabulary by being edited to fit 80 columns,
+            # with nothing to show for it but worse routing. Keep taking lines
+            # until the bracket closes.
+            #
+            # Still hand-parsed rather than pulled through PyYAML: Pilot does
+            # not import yaml, and adding a dependency to read one line of
+            # metadata would cost more than it saves.
+            collected = ""
             for line in manifest.read_text().splitlines():
-                if line.startswith("tags:"):
-                    tags = {t.strip().strip("\"'") for t in
-                            line.split(":", 1)[1].strip(" []").split(",")}
-                    tags = {t for t in tags if t}
-                    break
+                if not collected and line.startswith("tags:"):
+                    collected = line.split(":", 1)[1].strip()
+                    if "[" not in collected or "]" in collected:
+                        break
+                elif collected:
+                    collected += " " + line.strip()
+                    if "]" in line:
+                        break
+            if collected:
+                tags = {t.strip().strip("\"'") for t in
+                        collected.strip(" []").split(",")}
+                tags = {t for t in tags if t}
         except Exception:  # noqa: BLE001 - a tool without a manifest still works
             tags = set()
         tags |= BUILTIN_TAGS.get(name, set())
@@ -1007,16 +1067,63 @@ def _shortlist_tools(query: str, tools: list) -> list:
     picked = [name for _score, name in scored[:TOOL_SHORTLIST]]
 
     if not picked:
-        # No signal at all: the common cases, so "how hot is it" still finds a
-        # way. `system` is in here because a question with no other signal is
-        # at least as likely to be about the machine in front of the user as
-        # about the weather, and without it the model cannot even see which
-        # platform it is on.
-        fallback = ["weather", "websearch", "system", "dns", "ipinfo",
+        # No signal at all. `websearch` leads because that is what a question
+        # with no recognisable domain usually is — general knowledge, like "who
+        # won the cricket world cup in 2011". `system` is second because a
+        # question with no other signal is at least as likely to be about the
+        # machine in front of the user, and without it the model cannot even
+        # see which platform it is on.
+        #
+        # `weather` used to lead, to keep "how hot is it" working. That made
+        # every unrecognised question a weather question, and it was never the
+        # right fix: the words people use for weather — hot, cold, rain,
+        # umbrella — simply were not in the tool's tags. They are now, so those
+        # questions route directly and never reach this list.
+        fallback = ["websearch", "system", "weather", "dns", "ipinfo",
                     "define", "news", "browser", "stocks", "cryptocurrency",
                     "currency"]
         picked = [t for t in fallback if t in tools][:TOOL_SHORTLIST]
     return picked
+
+
+# A tool's output comes back into the conversation as a HumanMessage, because
+# that is what the ReAct loop feeds the model next. So "the last HumanMessage"
+# is the OBSERVATION once a tool has run, not the question — and everything
+# downstream that asked for "what the user wants" was handed the weather report
+# instead.
+#
+# Two things went wrong with that, one of them expensive:
+#
+#   * the tool shortlist was recomputed against the tool's own output, so step
+#     two of a turn offered a different set of tools than step one; and
+#   * because the tool list is part of the system prompt, that made the prompt
+#     DIFFERENT on every step of a single question. llama.cpp could not reuse
+#     the prefix it had just cached, so a 1,505-token prompt was prefilled from
+#     scratch — 53 seconds on a phone — to answer a question it had already
+#     read 1,198 tokens of.
+#
+# The question is what the shortlist and the small-talk check should see, so
+# observations are skipped when looking for it.
+_OBSERVATION_PREFIXES = ("Observation:", "Error: Could not parse tool input.")
+
+
+def _last_user_question(messages) -> str:
+    """The most recent thing the USER asked, ignoring fed-back tool output.
+
+    Duck-typed on the message's own `type` rather than isinstance: without
+    LangChain installed the names at the top of this file are aliased to
+    typing.Any, and isinstance against that raises. LangChain's own
+    HumanMessage.type is "human", so this is the same test without the
+    dependency on the class being a real class.
+    """
+    for message in reversed(messages or []):
+        if getattr(message, "type", None) != "human":
+            continue
+        text = str(getattr(message, "content", "") or "")
+        if text.lstrip().startswith(_OBSERVATION_PREFIXES):
+            continue
+        return text
+    return ""
 
 
 _SYSTEM_HELP = """13. To INSPECT OR CONTROL THIS MACHINE use the 'system' tool with a shell
@@ -1070,11 +1177,7 @@ def call_model(state: AgentState):
 
     # Small talk never needs a tool. Answer with the short prompt and finish,
     # skipping tool discovery and the long rule list entirely.
-    _last = ""
-    for _m in reversed(state.get("messages") or []):
-        if isinstance(_m, HumanMessage):
-            _last = str(getattr(_m, "content", "") or "")
-            break
+    _last = _last_user_question(state.get("messages"))
     if _is_small_talk(_last):
         from langchain_core.messages import AIMessage as _AIMsg
         _llm = _build_llm()
@@ -1130,13 +1233,29 @@ Tools you CAN use offline: {usable}.
                    "DISABLED — say so and stop; do not retry"),
         )
 
+    # ORDER MATTERS, and it is not cosmetic.
+    #
+    # llama.cpp caches the KV state of a prompt PREFIX and reuses it when the
+    # next prompt starts with the same tokens. Everything from the first
+    # differing token onward has to be prefilled again — on a phone, at ~26
+    # tokens per second.
+    #
+    # This block used to open with the tool list, which changes with every
+    # question (the shortlist picks different tools), so the cacheable prefix
+    # ended after about fifteen tokens and the ~690-token rules below it were
+    # re-read every single time. Ask about the weather and then about DNS, and
+    # that was twenty-six seconds spent re-reading text that had not changed.
+    #
+    # So: everything constant first, everything question-dependent last. The
+    # rules, which are the largest part by far, are now a stable prefix shared
+    # by every question. Keep it that way — moving a variable section above a
+    # constant one silently costs a full prefill per turn.
     system_prompt = f"""You are Pilot, a helpful AI assistant for the Gathm ecosystem.
-You have access to the following gathm tools:
-{tool_descriptions}
-{offline_notice}
+You have access to a set of gathm tools, listed at the end of these rules.
+
 CRITICAL RULES:
-0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed above.
-0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the list above. Never run a tool to answer a question about tools.
+0. CONVERSATIONAL RESPONSES: For greetings (hi, hello, hey, thanks), questions about yourself, or any message that does not require fetching data, respond in plain conversational text with NO Action/Thought format at all. Only use the Action format when you genuinely need to call one of the tools listed below.
+0a. QUESTIONS ABOUT YOUR TOOLS ARE NOT TOOL CALLS. If the user asks what tools exist, what you can do, whether some other tool is available, or which tool to use, ANSWER IN TEXT from the AVAILABLE TOOLS list below. Never run a tool to answer a question about tools.
 0b. NEVER call a tool without the arguments it needs. If a tool requires a target (a domain, a query, a file) and the user has not given one, ask for it instead of running the tool bare.
 0bb. NEVER CLAIM YOU RAN SOMETHING YOU DID NOT RUN. You only know a command's result if an Observation gave it to you. If you did not call the tool, say what you would run and that you have not run it — do not report output, numbers, or "the file was created". An invented result is worse than no answer, because the user cannot tell the difference.
 0c. DO IT, DO NOT DESCRIBE IT. If the user asks for something you have a tool for, call the tool. Never answer with the command they could type themselves — "you can list them with ls ~/Desktop" is a failure, running it and showing the result is the answer. They are talking to you because they do not want to type it.
@@ -1155,11 +1274,14 @@ Action Input: [tool_name] [arguments]
 9. Never output "Action: <tool>" directly. Always use "Action: gathm" with "Action Input:".
 10. Refuse requests that ask to find exposed/publicly accessible cameras, FTP servers, or similar reconnaissance targets.
 11. If a tool fails, say in one sentence WHAT failed and quote the error text you were given, then add that the engineer has been notified. Never replace the error with a generic message — the user cannot fix what they cannot see.
-12. ONLY use tool names from the list above. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+12. ONLY use tool names from the AVAILABLE TOOLS list below. Never invent tool names like 'define', 'help', 'done', 'exit', etc.
+When you have a final answer, provide it directly without the Action format.
+
+AVAILABLE TOOLS — these are the only tool names you may use:
+{tool_descriptions}
 {system_help}
 {browser_help}
-When you have a final answer, provide it directly without the Action format.
-"""
+{offline_notice}"""
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
     response = _invoke_spoken(llm, messages)
@@ -1200,6 +1322,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 _BOX_RE = re.compile(r"[\u2500-\u257f\u2580-\u259f]+")
 OBS_MAX_CHARS = int(os.getenv("GATHM_OBS_MAX_CHARS", "1500"))
 
+# LangGraph counts node executions, not complete think/act cycles. Six leaves
+# room for two tool calls and their answers while bounding on-device latency.
+AGENT_MAX_STEPS = int(os.getenv("GATHM_AGENT_MAX_STEPS", "6"))
+
 
 def _clean_observation(output: str) -> str:
     """Reduce a tool's terminal output to what a model can actually use."""
@@ -1230,6 +1356,82 @@ def _looks_like_tool_failure(output: str) -> bool:
             or '"error"' in lowered)
 
 
+_OBSERVATION_LEAD = "Observation:"
+
+
+def _is_recursion_limit(exc: BaseException) -> bool:
+    """Whether the graph gave up because it went round too many times.
+
+    Matched on the message rather than the class: langgraph has moved
+    GraphRecursionError between modules across versions, and an ImportError
+    here would be a worse failure than the one it is trying to describe.
+    """
+    text = "%s %s" % (type(exc).__name__, exc)
+    lowered = text.lower()
+    return "recursion" in lowered and "limit" in lowered
+
+
+def _current_turn_messages(messages) -> list:
+    """Exclude earlier turns from duplicate detection and fallback answers."""
+    messages = list(messages or [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        text = str(getattr(message, "content", "") or "")
+        if (getattr(message, "type", None) == "human"
+                and not text.lstrip().startswith(_OBSERVATION_PREFIXES)):
+            return messages[index + 1:]
+    return messages
+
+
+def _last_observation(messages, command=None) -> str:
+    """Latest result in this turn, optionally for a particular command."""
+    previous_command = None
+    result = ""
+    for message in _current_turn_messages(messages):
+        text = str(getattr(message, "content", "") or "")
+        if getattr(message, "type", None) == "ai":
+            previous_command = extract_tool_input(text)
+            if previous_command:
+                previous_command = _command_for_question(previous_command,
+                                                        _last_user_question(messages))
+        elif (getattr(message, "type", None) == "human"
+              and text.startswith(_OBSERVATION_LEAD)
+              and (command is None or previous_command == command)):
+            result = text[len(_OBSERVATION_LEAD):].strip()
+            result = result.split("\nTell the user what failed and quote that error,", 1)[0]
+    return result
+
+
+def _command_for_question(command: str, question: str) -> str:
+    """Keep forecast requests out of weather's current-conditions shortcut."""
+    command = normalize_tool_command(command)
+    if _is_raw_shell_command(command):
+        return command
+    parts = shlex.split(command)
+    if (parts and parts[0] == "weather" and "-f" not in parts
+            and re.search(r"\b(forecast|tomorrow|tonight|weekend|next|"
+                          r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+                          question, re.I)):
+        parts.insert(1, "-f")
+    return shlex.join(parts)
+
+
+def _invocations_already_run(messages) -> list:
+    """Commands with results in this turn; earlier answers do not count."""
+    seen = []
+    question = _last_user_question(messages)
+    turn = _current_turn_messages(messages)
+    for message, following in zip(turn, turn[1:]):
+        if (getattr(message, "type", None) != "ai"
+                or getattr(following, "type", None) != "human"
+                or not str(getattr(following, "content", "")).startswith(_OBSERVATION_LEAD)):
+            continue
+        command = extract_tool_input(str(getattr(message, "content", "") or ""))
+        if command:
+            seen.append(_command_for_question(command, question))
+    return seen
+
+
 def tool_node(state: AgentState):
     last_message = state["messages"][-1]
     content = last_message.content
@@ -1238,9 +1440,38 @@ def tool_node(state: AgentState):
     tool_input = extract_tool_input(content)
     if tool_input:
         try:
-            normalized_input = normalize_tool_command(tool_input)
+            normalized_input = _command_for_question(
+                tool_input, _last_user_question(state["messages"]))
         except Exception:
             normalized_input = tool_input
+
+        # A small model that has already been given an answer will often ask
+        # for it again — observed on a phone as six `weather` calls for one
+        # question, five of them identical and argument-less, ending in a
+        # context overflow nine minutes later.
+        #
+        # Running it again cannot produce new information, and it is not free:
+        # each repeat costs its own network round trip and adds another ~740
+        # tokens of observation to a context that is already the reason the
+        # turn is about to fail. Refuse, and say plainly that the answer is
+        # already above.
+        if normalized_input in _invocations_already_run(state["messages"]):
+            # Telling the model "you already ran that" was not enough: a 1B
+            # model reads the refusal, does not know what to do with it, and
+            # asks again — six times, until the recursion limit threw a
+            # LangGraph stack trace at the user seven seconds in.
+            #
+            # It has the answer; it just cannot get to it. So end the turn and
+            # give the user the observation, rather than another round of
+            # asking a model that has already demonstrated it will not stop.
+            from langchain_core.messages import AIMessage as _AIMsg
+            previous = _last_observation(state["messages"], normalized_input)
+            if previous:
+                return {"messages": [_AIMsg(content=previous)], "next_step": "end"}
+            return {"messages": [_AIMsg(content=(
+                f"I ran `{normalized_input}` but could not turn its output into "
+                f"an answer."))], "next_step": "end"}
+
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
 
@@ -1273,7 +1504,12 @@ if LANGCHAIN_AVAILABLE:
     workflow.add_node("action", tool_node)
     workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", should_continue, {"action": "action", "end": END})
-    workflow.add_edge("action", "agent")
+    # The tool node can finish the turn too. Without this it always handed
+    # control back to the model, so a model that kept asking for a tool it had
+    # already run went round until the recursion limit threw — which is what a
+    # 1B model does with a refusal it does not understand. Now the refusal ends
+    # the turn with the answer already in hand.
+    workflow.add_conditional_edges("action", should_continue, {"action": "agent", "end": END})
     app = workflow.compile()
 else:
     llm = None
@@ -1493,26 +1729,40 @@ def main():
             _reply_speech = start_reply_stream()
             _set_token_sink(_ReplySpeech(_reply_speech) if _reply_speech else None)
             start_waiting()
+            _last_tool_output = ""
             try:
-                for output in app.stream(state, config={"recursion_limit": 25}):
+                for output in app.stream(state, config={"recursion_limit": AGENT_MAX_STEPS}):
                     for key, value in output.items():
-                        if key == "agent" and value.get("next_step") == "end":
-                            final_agent_reply = value["messages"][-1].content  # type: ignore[index]
+                        messages = value.get("messages") or []
+                        # Remember the data as it goes past, so a loop that
+                        # never converges can still be answered from it.
+                        if messages:
+                            seen = str(getattr(messages[-1], "content", "") or "")
+                            if seen.startswith(_OBSERVATION_LEAD):
+                                _last_tool_output = seen[len(_OBSERVATION_LEAD):].strip()
+                        # The tool node can end the turn now, not just the
+                        # agent — checking only "agent" dropped its answer.
+                        if value.get("next_step") == "end" and messages:
+                            final_agent_reply = messages[-1].content  # type: ignore[index]
             except KeyboardInterrupt:
                 # Ctrl+C during AI processing — cancel the current query, not the app
                 stop_waiting()
                 console.print("\n  [color(208)]\\[*][/color(208)] Query cancelled.")
                 continue
             except Exception as e:
-                # The TUI used to print the raw exception, so a stopped Ollama
-                # server read as "[Errno 111] Connection refused" with no hint
-                # that `ollama serve` is the fix. Same describer as the API path.
-                described = describe_agent_failure(e)
-                report_to_engineer(str(e), user_input)
-                _stream_error = True
-                stop_waiting()
-                render_error(described)
-                final_agent_reply = described
+                # A loop that will not converge is not an error to show the
+                # user. The tool ran, its output is in hand, and a LangGraph
+                # stack trace with a docs URL is a worse answer than the data.
+                if _is_recursion_limit(e) and _last_tool_output:
+                    stop_waiting()
+                    final_agent_reply = _last_tool_output
+                else:
+                    described = describe_agent_failure(e)
+                    report_to_engineer(str(e), user_input)
+                    _stream_error = True
+                    stop_waiting()
+                    render_error(described)
+                    final_agent_reply = described
             finally:
                 stop_waiting()
                 _sink = _TOKEN_SINK

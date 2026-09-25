@@ -161,6 +161,94 @@ def with_stub(fn):
     return wrapper
 
 
+def test_flaky_synthesis_is_retried() -> None:
+    """A sentence that fails once must still be spoken.
+
+    This is the bug behind "it sometimes skips words": the worker dropped a
+    chunk whose synthesis failed and moved on, with quiet=True hiding the
+    reason. A dropped sentence is indistinguishable from one the model never
+    wrote, which is why it took a user noticing to find it.
+    """
+    print("\nSpeechStream: a failed sentence is retried, not dropped")
+
+    state = {"failures": 1}
+    rec = Recorder()
+
+    def flaky(text, out_path):
+        if state["failures"] > 0:
+            state["failures"] -= 1
+            return False, "stub failure"
+        return rec.synthesize(text, out_path)
+
+    saved = (speech.synthesize, speech.play, speech.engine, speech.enabled)
+    speech.synthesize = flaky
+    speech.play = rec.play
+    speech.engine = lambda: "audio.cpp"
+    speech.enabled = lambda: True
+    try:
+        stream = speech.SpeechStream().start()
+        sentence = "This sentence fails the first time it is rendered, then works."
+        stream.feed(sentence + " ")
+        stream.close()
+        ok("stream finishes", stream.wait(timeout=10))
+        spoken = " ".join(rec.spoken())
+        ok("the sentence survived the failure", "fails the first time" in spoken)
+        check("and nothing was recorded as dropped", stream._dropped, 0)
+    finally:
+        (speech.synthesize, speech.play, speech.engine, speech.enabled) = saved
+
+
+def test_permanent_failure_is_reported() -> None:
+    """When retrying does not help, the drop is counted rather than hidden."""
+    print("\nSpeechStream: a permanent failure is counted, not silent")
+
+    rec = Recorder()
+    saved = (speech.synthesize, speech.play, speech.engine, speech.enabled)
+    speech.synthesize = lambda text, out: (False, "engine is gone")
+    speech.play = rec.play
+    speech.engine = lambda: "audio.cpp"
+    speech.enabled = lambda: True
+    try:
+        stream = speech.SpeechStream().start()
+        stream.feed("A sentence long enough to be worth speaking aloud here. ")
+        stream.close()
+        ok("stream still finishes", stream.wait(timeout=10))
+        ok("nothing was played", rec.spoken() == [])
+        ok("and the drop was counted", stream._dropped >= 1)
+    finally:
+        (speech.synthesize, speech.play, speech.engine, speech.enabled) = saved
+
+
+def test_budget_truncation_is_announced() -> None:
+    """Stopping at GATHM_SPEAK_MAX_CHARS is deliberate; doing it silently is not.
+
+    A reply cut at the budget sounds complete and is not, which a user reports
+    as skipped words. The stream now says so once.
+    """
+    print("\nSpeechStream: the length budget announces itself")
+
+    @with_stub
+    def run(rec):
+        saved_budget = os.environ.get("GATHM_SPEAK_MAX_CHARS")
+        os.environ["GATHM_SPEAK_MAX_CHARS"] = "80"
+        try:
+            stream = speech.SpeechStream().start()
+            for _ in range(6):
+                stream.feed("Another sentence that pushes past the budget. ")
+            stream.close()
+            ok("stream finishes", stream.wait(timeout=10))
+            ok("the budget was applied", stream._truncated)
+            ok("but something was still spoken", len(rec.spoken()) >= 1)
+        finally:
+            if saved_budget is None:
+                os.environ.pop("GATHM_SPEAK_MAX_CHARS", None)
+            else:
+                os.environ["GATHM_SPEAK_MAX_CHARS"] = saved_budget
+        return rec
+
+    run()
+
+
 def test_stream_order() -> None:
     print("\nSpeechStream: order and completeness")
 
@@ -318,6 +406,9 @@ def main() -> int:
     test_pipelining()
     test_cancel()
     test_budget()
+    test_flaky_synthesis_is_retried()
+    test_permanent_failure_is_reported()
+    test_budget_truncation_is_announced()
     test_speakable_unchanged()
     test_unfenced_code_is_not_read_aloud()
     print("=" * 60)

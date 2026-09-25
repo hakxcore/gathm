@@ -129,9 +129,9 @@ def resolve() -> dict:
     }
 
 
-# Speech engines that need no build and no pip. audio.cpp exists because Android
-# has nothing like these; macOS and most desktop Linux do, and using them means
-# Gathm speaks on those platforms without a compiler or a 250 MB download.
+# Speech engines that need no build and no pip. Android's system voice is
+# available through Termux:API; macOS and many Linux desktops provide their own
+# commands. These can speak without downloading an audio.cpp voice model.
 # Each entry is (binary, args...) where {t} is replaced by the text.
 _SYSTEM_VOICES = [
     ("say", "{t}"),                       # macOS, built in
@@ -322,8 +322,8 @@ def _needs_system_voice(text: str) -> bool:
 
     The bundled PocketTTS voice is English. Devanagari, kana, Arabic and the
     rest are not something it renders badly — it renders nothing useful at all.
-    True only when the OS actually has a voice for that script, so Termux
-    (where there is no OS voice) still uses audio.cpp rather than failing.
+    True only when the OS has an enumerated voice for that script. Android's
+    voice is not enumerated here, so Termux keeps the configured engine.
     """
     if script_of(text) == "latin":
         return False
@@ -350,6 +350,10 @@ def find_system_voice() -> list | None:
         if shutil.which(parts[0]):
             return parts + (["{t}"] if "{t}" not in forced else [])
         return None
+    if _is_termux() and shutil.which("termux-tts-speak"):
+        # End option parsing before text; the existing tracked runner supplies
+        # the timeout and passes the phrase as one argument without a shell.
+        return ["termux-tts-speak", "--", "{t}"]
     for entry in _SYSTEM_VOICES:
         if shutil.which(entry[0]):
             return list(entry)
@@ -357,7 +361,7 @@ def find_system_voice() -> list | None:
 
 
 # Not every system voice can write a file, and the API needs bytes to hand the
-# browser. `say` and espeak can; spd-say cannot, so it stays playback-only.
+# browser. `say` and espeak can; spd-say and termux-tts-speak are playback-only.
 _SYSTEM_VOICE_FILE_ARGS = {
     # LEI16 PCM in a WAV container is what the browser and the ASR models read.
     "say": ["-o", "{f}", "--data-format=LEI16@22050", "{t}"],
@@ -372,6 +376,12 @@ def system_voice_to_file() -> str:
     if not voice:
         return ""
     name = voice[0]
+    if name == "termux-tts-speak" and not os.environ.get("GATHM_SPEAK_COMMAND"):
+        # Native Android playback must not hide an installed WAV renderer.
+        # Keep an explicit command override's existing behavior unchanged.
+        for entry in _SYSTEM_VOICES:
+            if entry[0] in _SYSTEM_VOICE_FILE_ARGS and shutil.which(entry[0]):
+                return entry[0]
     return name if name in _SYSTEM_VOICE_FILE_ARGS else ""
 
 
@@ -386,8 +396,9 @@ def can_synthesize_file() -> bool:
 def engine() -> str:
     """Which engine would speak: "audio.cpp", "system", or "" for none.
 
-    audio.cpp is the on-device path Gathm builds for Termux, where nothing else
-    works. On macOS the OS voice wins even when audio.cpp IS installed: `say`
+    audio.cpp is the preferred on-device path Gathm builds for Termux; Android's
+    system voice is a fallback when Termux:API is installed. On macOS the OS
+    voice wins even when audio.cpp IS installed: `say`
     is a resident system service with no model to load, no wav to write and no
     player to spawn, so it starts talking in milliseconds where PocketTTS takes
     a second or more. audio.cpp is still installed on a Mac — for listening,
@@ -943,6 +954,8 @@ class SpeechStream:
         self._buf = ""
         self._spoken = 0                 # characters handed to the engine
         self._emitted = 0                # utterances handed to the engine
+        self._dropped = 0                # utterances that failed to render
+        self._truncated = False          # the budget cut the reply short
         self._closed = False
         self._lock = threading.Lock()
         self._budget = _speak_env_int("GATHM_SPEAK_MAX_CHARS", 600)
@@ -1014,6 +1027,13 @@ class SpeechStream:
     def _drain(self, final: bool) -> None:
         """Move whatever is speakable from the buffer onto the queue."""
         if self._budget and self._spoken >= self._budget:
+            # Deliberate: reading a 3,000-character answer aloud takes minutes
+            # on a phone. But stopping without a word is why a truncated reply
+            # gets reported as "it skipped some of it" — say so once.
+            if self._buf.strip() and not self._truncated:
+                self._truncated = True
+                print("[speech] reply longer than GATHM_SPEAK_MAX_CHARS=%d — "
+                      "read the first part only" % self._budget, file=sys.stderr)
             self._buf = ""
             return
         chunks, self._buf = split_speech_chunks(
@@ -1023,6 +1043,11 @@ class SpeechStream:
         )
         for chunk in chunks:
             if self._budget and self._spoken >= self._budget:
+                if not self._truncated:
+                    self._truncated = True
+                    print("[speech] reply longer than GATHM_SPEAK_MAX_CHARS=%d — "
+                          "read the first part only" % self._budget,
+                          file=sys.stderr)
                 break
             self._spoken += len(chunk)
             self._emitted += 1
@@ -1056,20 +1081,39 @@ class SpeechStream:
             text = self._next_text()
             if text is None:
                 break
+            # Tried twice. A sentence that fails to render is skipped, and a
+            # skipped sentence sounds exactly like one the model never wrote —
+            # which is what "it sometimes misses words" turned out to be. On a
+            # phone the renderer fails intermittently under memory pressure, so
+            # one retry recovers most of them.
+            #
+            # What is still lost is reported even when quiet. A line on stderr
+            # is untidy; a reply that silently drops a sentence is worse, and
+            # there was no way to tell the two apart before.
             tmp = None
-            try:
-                fd, tmp = tempfile.mkstemp(prefix="gathm-speak-", suffix=".wav")
-                os.close(fd)
-                ok, msg = synthesize(text, tmp)
-                if not ok:
-                    if not self.quiet and not self._cancelled():
-                        print(f"[speech] {msg}", file=sys.stderr)
-                    _unlink(tmp)
-                    continue
-            except Exception as exc:  # noqa: BLE001 - speech never breaks a reply
-                if not self.quiet:
-                    print(f"[speech] {exc}", file=sys.stderr)
+            failure = ""
+            for attempt in range(2):
+                tmp = None
+                try:
+                    fd, tmp = tempfile.mkstemp(prefix="gathm-speak-", suffix=".wav")
+                    os.close(fd)
+                    ok, msg = synthesize(text, tmp)
+                    if ok:
+                        failure = ""
+                        break
+                    failure = msg
+                except Exception as exc:  # noqa: BLE001 - speech never breaks a reply
+                    failure = str(exc)
                 _unlink(tmp)
+                tmp = None
+                if self._cancelled():
+                    break
+            if failure or tmp is None:
+                if not self._cancelled():
+                    self._dropped += 1
+                    print("[speech] skipped a sentence (%s): %s"
+                          % (failure or "no audio produced", text[:60]),
+                          file=sys.stderr)
                 continue
             # put() blocks while the player is behind, which is the throttle.
             while True:

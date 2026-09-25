@@ -214,6 +214,102 @@ let asrReason      = '';          // why transcription is unavailable, if it is
 let speakEnabled    = localStorage.getItem('gathmSpeak') !== '0';
 let currentAudio    = null;
 
+// One audio element for the whole session, unlocked by a real user gesture.
+//
+// Android Chrome refuses to play audio that a gesture did not start, and
+// "start" means the play() call happens inside the gesture's own task. Ours
+// never did: the tap on Send goes through a fetch and two awaits before any
+// Audio object exists, by which point the user activation is spent. Every clip
+// was rejected, the rejection was swallowed by .catch(), and the reply came out
+// silent with nothing logged anywhere — which is exactly how this looked on the
+// phone while the server was rendering perfectly good wavs.
+//
+// Playing silence on one element inside a genuine tap unlocks that element for
+// the rest of the page's life. Afterwards its .src can be set and played from
+// anywhere, await chains included.
+let audioEl       = null;
+let audioUnlocked = false;
+let audioBlocked  = false;        // told the user once; do not nag
+let audioPriming  = false;
+
+/** A real 100 ms silent clip, using the blob: source permitted by our CSP. */
+function silentAudioUrl() {
+    const sampleRate = 8000;
+    const dataBytes = (sampleRate / 10) * 2;   // mono, 16-bit PCM
+    const buffer = new ArrayBuffer(44 + dataBytes);
+    const view = new DataView(buffer);
+    function tag(offset, text) {
+        for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+    }
+    tag(0, 'RIFF');
+    view.setUint32(4, 36 + dataBytes, true);
+    tag(8, 'WAVE');
+    tag(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);              // PCM
+    view.setUint16(22, 1, true);              // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    tag(36, 'data');
+    view.setUint32(40, dataBytes, true);
+    return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+}
+
+function audioElement() {
+    if (!audioEl) {
+        audioEl = new Audio();
+        audioEl.preload = 'auto';
+    }
+    return audioEl;
+}
+
+/** Unlock playback. Must be called from inside a user gesture handler. */
+function primeAudio() {
+    if (audioUnlocked || audioPriming || currentAudio) return;
+    let url = null;
+    const cleanup = function () {
+        audioPriming = false;
+        if (url) URL.revokeObjectURL(url);
+    };
+    try {
+        const el = audioElement();
+        url = silentAudioUrl();
+        audioPriming = true;
+        el.src = url;
+        const started = el.play();
+        const unlocked = function () {
+            audioUnlocked = true;
+            // A reply may have replaced the primer while play() was pending.
+            // Its playback must not be paused by this older promise.
+            if (el.src === url) {
+                try { el.pause(); el.currentTime = 0; } catch (_) { /* already stopped */ }
+            }
+            cleanup();
+        };
+        if (started && started.then) {
+            started.then(unlocked).catch(cleanup); // retry a rejected unlock on the next tap
+        } else {
+            unlocked();
+        }
+    } catch (_) { cleanup(); /* no audio support at all */ }
+}
+
+// Any tap anywhere counts, so the unlock usually happens before the first
+// reply — the user has to touch something to ask a question in the first place.
+document.addEventListener('pointerdown', primeAudio, { passive: true });
+document.addEventListener('keydown', primeAudio);
+
+/** Say once, in the transcript, that the browser is refusing to play. */
+function reportAudioBlocked() {
+    if (audioBlocked) return;
+    audioBlocked = true;
+    addMessage('Your browser blocked audio playback. Tap the speaker button, ' +
+               'then ask again and replies will be spoken.',
+               'system', 'system-message');
+}
+
 async function checkSpeech() {
     try {
         const res = await fetch(API_BASE + '/api/v1/speech/status',
@@ -253,30 +349,40 @@ function stopSpeaking() {
     if (!voiceActive) setOrbState('idle');
 }
 
-/** Render one utterance. Returns an object URL, or null if it failed. */
+/** Render one utterance. Returns an object URL, or null if it failed.
+ *
+ * Tried twice. A sentence that fails to synthesise is skipped, and a skipped
+ * sentence is indistinguishable from one the model never wrote — which is what
+ * "it sometimes misses words" turned out to be. On a loaded phone the renderer
+ * fails intermittently, so one retry recovers most of them, and whatever is
+ * still lost says so in the console instead of vanishing.
+ */
 async function fetchSpeech(text) {
-    try {
-        const res = await fetch(API_BASE + '/api/v1/speech', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: text }),
-        });
-        if (!res.ok) return null;             // silence is the right failure
-        return URL.createObjectURL(await res.blob());
-    } catch (_) {
-        return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const res = await fetch(API_BASE + '/api/v1/speech', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text }),
+            });
+            if (res.ok) return URL.createObjectURL(await res.blob());
+            if (res.status >= 400 && res.status < 500) break;   // will not improve
+        } catch (_) { /* network hiccup; worth one more go */ }
     }
+    console.warn('[speech] could not render, sentence skipped:', text);
+    return null;
 }
 
 /** Play one clip to the end. Resolves on end, error, or a barge-in pause. */
 function playClip(url) {
     return new Promise(function (resolve) {
-        const audio = new Audio(url);
+        const audio = audioElement();         // the element a gesture unlocked
         currentAudio = audio;
         let settled = false;
         const done = function () {
             if (settled) return;
             settled = true;
+            audio.onended = audio.onerror = audio.onpause = null;
             URL.revokeObjectURL(url);
             if (currentAudio === audio) currentAudio = null;
             resolve();
@@ -286,7 +392,13 @@ function playClip(url) {
         // stopSpeaking() pauses rather than ends; the waiter has to be
         // released or a barge-in would hang the conversation loop.
         audio.onpause = done;
-        audio.play().catch(done);             // autoplay may need a tap first
+        audio.src = url;
+        audio.play().catch(function (err) {
+            // A rejection here is almost always the autoplay policy. Saying so
+            // once beats a reply that is silent for no stated reason.
+            if (!err || err.name === 'NotAllowedError') reportAudioBlocked();
+            done();
+        });
     });
 }
 
@@ -359,6 +471,7 @@ function isSpeakingNow() { return speakingActive || currentAudio !== null; }
 
 if (speakBtn) {
     speakBtn.addEventListener('click', function() {
+        primeAudio();                         // this tap is a gesture; use it
         speakEnabled = !speakEnabled;
         localStorage.setItem('gathmSpeak', speakEnabled ? '1' : '0');
         if (!speakEnabled) stopSpeaking();
