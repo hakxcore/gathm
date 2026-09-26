@@ -994,10 +994,8 @@ setup_termux_storage() {
 #   4. a source build with CMake, when there is a toolchain and no binary
 #      matches this machine
 #
-# Termux is deliberately NOT in that list. The Android path is verified
-# end-to-end on Ollama, on-device compiles cost the better part of an hour,
-# and none of the prebuilt archives target Bionic — so phones keep the path
-# that works. Everything else gets llama.cpp.
+# Termux reuses an existing runtime or installs its native llama-cpp package.
+# Desktop release archives target other C libraries and cannot run on Bionic.
 #
 # Knobs:
 #   GATHM_INSTALL_LLAMACPP=0     skip llama.cpp entirely (keeps Ollama)
@@ -1026,7 +1024,7 @@ _GATHM_LLAMACPP_BIN=""
 _llamacpp_supported() {
     local p="${_GATHM_PLATFORM:-$(detect_platform)}"
     case "$p" in
-        macos|darwin|linux|wsl|windows) return 0 ;;
+        macos|darwin|linux|debian|fedora|arch|alpine|opensuse|wsl|windows) return 0 ;;
         # Termux packages llama.cpp itself — `pkg install llama-cpp`, ~26 MB
         # against Ollama's several hundred, and the same engine underneath
         # without the supervisor. That is a better trade on a phone than
@@ -1037,19 +1035,78 @@ _llamacpp_supported() {
     esac
 }
 
-# An existing llama-server, wherever it is. Checked before anything is
-# downloaded: a user who already runs llama.cpp should not get a second copy.
+# Read a single saved setting as data. Never source .env: paths may contain
+# shell syntax, and a configuration file must not execute during installation.
+_llamacpp_setting() {
+    local key="$1" value="${!1:-}"
+    if [[ -n "$value" ]]; then printf '%s\n' "$value"; return 0; fi
+    [[ -f "$SCRIPT_DIR/.env" ]] || return 0
+    python3 - "$SCRIPT_DIR/.env" "$key" <<'ENV'
+import re, sys
+from pathlib import Path
+value = ""
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    match = re.match(r"^\s*(?:export\s+)?" + re.escape(sys.argv[2]) + r"\s*=\s*(.*?)\s*$", line)
+    if not match:
+        continue
+    raw = match.group(1)
+    if raw.startswith(("'", '"')):
+        quote = raw[0]
+        match = re.fullmatch(quote + r"((?:\\.|[^" + quote + r"])*)" + quote + r"\s*(?:#.*)?", raw)
+        if not match:
+            continue
+        raw = match.group(1)
+        escapes = {"\\": "\\", "'": "'"} if quote == "'" else {
+            "\\": "\\", '"': '"', "n": "\n", "r": "\r", "t": "\t", "a": "\a",
+            "b": "\b", "f": "\f", "v": "\v",
+        }
+        raw = re.sub(r"\\(.)", lambda m: escapes.get(m[1], m[0]), raw)
+    else:
+        raw = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+    value = raw
+print(value)
+ENV
+}
+
+_llamacpp_expand_path() {
+    # Match a literal tilde before expanding it ourselves.
+    # shellcheck disable=SC2088
+    case "$1" in
+        '~') printf '%s\n' "$HOME" ;;
+        '~/'*) printf '%s/%s\n' "$HOME" "${1#\~/}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+_llamacpp_load_dirs() {
+    local value
+    value=$(_llamacpp_setting GATHM_LLAMACPP_DIR)
+    if [[ -n "$value" ]]; then
+        LLAMACPP_DIR=$(_llamacpp_expand_path "$value")
+        LLAMACPP_BIN_DIR="$LLAMACPP_DIR/bin"
+    fi
+    value=$(_llamacpp_setting GATHM_LLAMACPP_MODEL_DIR)
+    [[ -z "$value" ]] || LLAMACPP_MODELS_DIR=$(_llamacpp_expand_path "$value")
+    return 0
+}
+
+# Match runtime discovery: explicit setting, saved pointer, standard paths.
 _llamacpp_existing_bin() {
-    local candidate
-    if [[ -n "${GATHM_LLAMACPP_BIN:-}" && -x "${GATHM_LLAMACPP_BIN}" ]]; then
-        echo "$GATHM_LLAMACPP_BIN"; return 0
-    fi
-    for candidate in "$LLAMACPP_BIN_DIR/llama-server" "$LLAMACPP_BIN_DIR/llama-server.exe"; do
-        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+    local candidate configured recorded=""
+    configured=$(_llamacpp_setting GATHM_LLAMACPP_BIN)
+    [[ ! -r "$HOME/.gathm/llamacpp_bin" ]] || IFS= read -r recorded < "$HOME/.gathm/llamacpp_bin" || true
+    _llamacpp_load_dirs
+    for candidate in "$configured" "$recorded" \
+            "$LLAMACPP_BIN_DIR/llama-server" "$LLAMACPP_BIN_DIR/llama-server.exe" \
+            "$LLAMACPP_DIR/llama-server" "$LLAMACPP_DIR/llama-server.exe" \
+            "$(command -v llama-server 2>/dev/null || true)" \
+            "$(command -v llama-server.exe 2>/dev/null || true)"; do
+        [[ -n "$candidate" ]] || continue
+        candidate=$(_llamacpp_expand_path "$candidate")
+        if [[ -x "$candidate" ]] && _llamacpp_binary_runs "$candidate"; then
+            printf '%s\n' "$candidate"; return 0
+        fi
     done
-    if command -v llama-server &>/dev/null; then
-        command -v llama-server; return 0
-    fi
     return 1
 }
 
@@ -1442,6 +1499,8 @@ _llamacpp_save_config() {
 
 install_llamacpp() {
     local platform="$1"
+    _GATHM_LLAMACPP_BIN=""
+    _llamacpp_load_dirs
 
     if [[ "${GATHM_INSTALL_LLAMACPP:-1}" == "0" ]]; then
         step_skip "llama.cpp skipped (GATHM_INSTALL_LLAMACPP=0)"
@@ -1487,9 +1546,9 @@ install_llamacpp() {
 
     # Termux gets the package or nothing. No prebuilt archive targets Bionic,
     # and an on-device CMake build costs the better part of an hour for a
-    # binary `pkg` already has — so fall back to Ollama rather than burn that.
+    # binary `pkg` already has. The caller decides whether fallback is needed.
     if (( installed != 0 )) && _is_termux; then
-        warn "No llama.cpp package available — keeping Ollama on this device."
+        warn "No usable llama.cpp package is available on this device."
         warn "Try: pkg install llama-cpp   (then re-run ./install)"
         return 1
     fi
@@ -1533,7 +1592,7 @@ install_llamacpp() {
         return 0
     fi
 
-    step_fail "llama.cpp could not be installed after $(_format_elapsed $elapsed) — falling back to Ollama"
+    step_fail "llama.cpp could not be installed after $(_format_elapsed $elapsed)"
     return 1
 }
 
@@ -1743,13 +1802,72 @@ _llamacpp_is_gguf() {
     [[ "$magic" == "GGUF" ]]
 }
 
-# Any GGUF already on this machine, so a re-install never re-downloads.
+# Resolve a configured file or a model directory without executing its contents.
+_llamacpp_model_at() {
+    local path; path=$(_llamacpp_expand_path "$1")
+    if [[ -f "$path" ]]; then
+        _llamacpp_is_gguf "$path" && { printf '%s\n' "$path"; return 0; }
+        return 1
+    fi
+    [[ -d "$path" ]] || return 1
+    python3 - "$path" <<'GGUF'
+import re, sys
+from pathlib import Path
+
+def valid(path):
+    try:
+        with path.open("rb") as file:
+            return file.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+candidates = []
+for path in sorted(Path(sys.argv[1]).glob("*.gguf")):
+    if any(word in path.name.lower() for word in ("mmproj", "projector")) or not valid(path):
+        continue
+    shard = re.fullmatch(r"(.+)-(\d{5})-of-(\d{5})\.gguf", path.name)
+    if shard:
+        total = int(shard[3])
+        if shard[2] != "00001" or not 1 <= total <= 99999:
+            continue
+        if not all(valid(path.with_name("%s-%05d-of-%05d.gguf" % (shard[1], i, total)))
+                   for i in range(1, total + 1)):
+            continue
+    candidates.append(path)
+if not candidates:
+    raise SystemExit(1)
+print(max(candidates, key=lambda p: p.stat().st_size))
+GGUF
+}
+
 _llamacpp_existing_model() {
-    local candidate
-    for candidate in "$LLAMACPP_MODELS_DIR"/*.gguf; do
-        [[ -f "$candidate" ]] && _llamacpp_is_gguf "$candidate" && { echo "$candidate"; return 0; }
+    local candidate configured recorded="" found
+    configured=$(_llamacpp_setting GATHM_LLAMACPP_MODEL)
+    [[ ! -r "$HOME/.gathm/llamacpp_model" ]] || IFS= read -r recorded < "$HOME/.gathm/llamacpp_model" || true
+    _llamacpp_load_dirs
+    for candidate in "$configured" "$recorded" "$LLAMACPP_MODELS_DIR" \
+            "$HOME/.gathm/models" "$LLAMACPP_DIR/models"; do
+        [[ -n "$candidate" ]] || continue
+        if found=$(_llamacpp_model_at "$candidate"); then
+            printf '%s\n' "$found"; return 0
+        fi
     done
     return 1
+}
+
+# An existing GGUF is a llama.cpp installation to repair, not a reason to
+# download a second runtime and model. An explicit opt-out still selects Ollama.
+_llamacpp_selected() {
+    [[ "${GATHM_INSTALL_LLAMACPP:-1}" != "0" ]] || return 1
+    [[ -n "$_GATHM_LLAMACPP_BIN" ]] || _llamacpp_existing_model >/dev/null
+}
+
+_install_ollama_fallback() {
+    if _llamacpp_selected && [[ "${GATHM_INSTALL_OLLAMA:-0}" != "1" ]]; then
+        step_skip "Keeping llama.cpp and existing weights; Ollama is not needed"
+    else
+        install_ollama "$1"
+    fi
 }
 
 # A model already pulled by Ollama, served straight to llama.cpp.
@@ -1840,6 +1958,7 @@ _llamacpp_adopt_ollama_model() {
 
 # Pick a model, make sure it fits, download it, and record the choice.
 select_and_download_llamacpp_model() {
+    _llamacpp_load_dirs
     local existing
     if existing=$(_llamacpp_existing_model); then
         ok "Using the model already on disk: $(basename "$existing")"
@@ -1848,8 +1967,10 @@ select_and_download_llamacpp_model() {
         return 0
     fi
 
+    # An existing Ollama GGUF is reusable even when online and storage is ample.
+    _llamacpp_adopt_ollama_model && return 0
+
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        _llamacpp_adopt_ollama_model && return 0
         warn "Offline and no GGUF on disk — Pilot will have no model to answer with."
         note_missing "A local model (GGUF)" "re-run ./install while online"
         return 1
@@ -2386,14 +2507,18 @@ _pull_ollama_model() {
 #   3. $HOME/.gathm/model        (sticky choice from a previous run)
 #   4. _recommend_model_for_hardware (RAM-tier heuristic)
 select_and_pull_llm_model() {
-    # When llama.cpp is the runtime, the model is a GGUF file on disk rather
-    # than an Ollama tag, and the two ladders have nothing to say to each
-    # other. Only fall through to Ollama if the download could not happen.
-    if [[ -n "$_GATHM_LLAMACPP_BIN" ]]; then
+    if _llamacpp_selected; then
+        _save_backend_config "llamacpp"
+        if [[ -z "$_GATHM_LLAMACPP_BIN" ]]; then
+            warn "Existing GGUF preserved, but llama-server is unavailable."
+            note_missing "llama.cpp runtime" "install llama-cpp or set GATHM_LLAMACPP_BIN, then re-run ./install"
+            return 1
+        fi
         if select_and_download_llamacpp_model; then
             return 0
         fi
-        warn "No GGUF model available — trying Ollama for the model instead"
+        warn "No usable GGUF available; keeping llama.cpp. Re-run ./install to retry."
+        return 1
     fi
 
     if [[ "$GATHM_ONLINE" != "true" ]]; then
@@ -2491,35 +2616,20 @@ select_and_pull_llm_model() {
     _pull_ollama_model "$recommended"
 }
 
-# Save selected model to config
-# Usage: _save_model_config <model> [backend]   backend defaults to "ollama"
-_save_model_config() {
-    local model="$1"
-    local backend="${2:-ollama}"
-    local config_dir="$HOME/.gathm"
-    mkdir -p "$config_dir" 2>/dev/null || true
-    echo "$model"   > "$config_dir/model"
-    echo "$backend" > "$config_dir/llm_backend"
-    ok "LLM config saved: backend=$backend model=$model"
+_save_backend_config() {
+    mkdir -p "$HOME/.gathm"
+    printf '%s\n' "$1" > "$HOME/.gathm/llm_backend"
+    _audiocpp_write_env GATHM_LLM_BACKEND "$1"
+}
 
-    # Also write to .env for Pilot to pick up
-    local env_file="$SCRIPT_DIR/.env"
-    if [[ -f "$env_file" ]]; then
-        if grep -q '^GATHM_OLLAMA_MODEL=' "$env_file" 2>/dev/null; then
-            sed -i "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || \
-                sed -i '' "s|^GATHM_OLLAMA_MODEL=.*|GATHM_OLLAMA_MODEL=$model|" "$env_file" 2>/dev/null || true
-        else
-            echo "GATHM_OLLAMA_MODEL=$model" >> "$env_file"
-        fi
-        if grep -q '^GATHM_LLM_BACKEND=' "$env_file" 2>/dev/null; then
-            sed -i "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file" 2>/dev/null || \
-                sed -i '' "s|^GATHM_LLM_BACKEND=.*|GATHM_LLM_BACKEND=$backend|" "$env_file" 2>/dev/null || true
-        else
-            echo "GATHM_LLM_BACKEND=$backend" >> "$env_file"
-        fi
-    else
-        printf 'GATHM_OLLAMA_MODEL=%s\nGATHM_LLM_BACKEND=%s\n' "$model" "$backend" > "$env_file"
-    fi
+# Save the selected model and backend using the same inert .env writer as paths.
+_save_model_config() {
+    local model="$1" backend="${2:-ollama}"
+    mkdir -p "$HOME/.gathm"
+    printf '%s\n' "$model" > "$HOME/.gathm/model"
+    _audiocpp_write_env GATHM_OLLAMA_MODEL "$model"
+    _save_backend_config "$backend"
+    ok "LLM config saved: backend=$backend model=$model"
 }
 
 # --- Setup files and permissions ---
@@ -3510,16 +3620,23 @@ _audiocpp_save_config() {
     ok "Speech runtime registered: $bin"
 }
 
-# Upsert KEY=VALUE in the repo .env (GNU sed first, then BSD's -i '' form).
+# Upsert a literal dotenv value; sed replacement would corrupt '&', '|', and
+# backslashes in model paths. Preserve unrelated settings without evaluating them.
 _audiocpp_write_env() {
-    local key="$1" value="$2"
-    local env_file="$SCRIPT_DIR/.env"
-    if [[ -f "$env_file" ]] && grep -q "^${key}=" "$env_file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || \
-            sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file" 2>/dev/null || true
-    else
-        echo "${key}=${value}" >> "$env_file" 2>/dev/null || true
-    fi
+    python3 - "$SCRIPT_DIR/.env" "$1" "$2" <<'ENV'
+import re, sys
+from pathlib import Path
+path, key, value = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+    raise SystemExit("invalid configuration key")
+if not re.fullmatch(r"[A-Za-z0-9_./:@+-]*", value):
+    value = "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+pattern = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=")
+lines = [line for line in lines if not pattern.match(line)]
+lines.append(key + "=" + value)
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+ENV
 }
 
 # Echo the directory holding the PocketTTS weights, or nothing.
@@ -4754,21 +4871,17 @@ main() {
     install_llamacpp "$platform" || true
     # install_llamacpp emits step_done / step_skip / step_fail itself.
 
-    # Ollama remains the fallback: it is the verified path on Termux, and the
-    # answer when llama.cpp could not be installed. Downloading it as well on
-    # a machine where llama.cpp works costs the user ~700 MB for a second copy
-    # of the same engine, so that only happens when asked.
-    step_begin "Installing Ollama (local LLM runtime)"
-    if [[ -n "$_GATHM_LLAMACPP_BIN" && "${GATHM_INSTALL_OLLAMA:-0}" != "1" ]]; then
-        step_skip "Ollama not needed — llama.cpp is the runtime (GATHM_INSTALL_OLLAMA=1 installs it anyway)"
-    else
-        install_ollama "$platform"
-        # install_ollama emits step_done / step_skip / step_fail itself.
-    fi
+    # Install the fallback only when there is no llama.cpp setup to reuse or
+    # repair, or when explicitly requested alongside it.
+    step_begin "Installing Ollama (optional fallback runtime)"
+    _install_ollama_fallback "$platform"
 
     step_begin "Selecting LLM model"
-    select_and_pull_llm_model
-    step_done "LLM model configuration complete"
+    if select_and_pull_llm_model; then
+        step_done "LLM model configuration complete"
+    else
+        step_fail "Local model setup needs attention; existing weights were preserved"
+    fi
 
     # TODO(engineer): temporarily disabled — re-enable when resuming the
     # engineer agent. Uncomment the line below to restore engineer setup.

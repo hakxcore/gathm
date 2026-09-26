@@ -172,7 +172,7 @@ question with `[Errno 111] Connection refused`.
 | Pilot, and `rich` | **fatal** — `pilot/main.py` exits at import without it |
 | `langchain`/`langgraph` | warning — the TUI opens and tools run, AI answers do not |
 | `fastapi`/`uvicorn` | warning — Pilot starts, the GUI is skipped |
-| The model server | warning — **and it is started for you**: `llama-server` on macOS/Linux/Windows, `ollama serve` on Termux |
+| The model server | warning — **and it is started for you**: `llama-server` on supported platforms including Termux, or `ollama serve` when Ollama is selected |
 | The model itself | warning — names what is missing and the command that fixes it |
 | `jq` | warning — several tools need it |
 
@@ -623,8 +623,17 @@ and both paths are written to `~/.gathm/llamacpp_bin` and
 Ollama is no longer downloaded on a machine where llama.cpp works — set
 `GATHM_INSTALL_OLLAMA=1` if you want it as well.
 
-An existing `llama-server` on your `PATH` is used as-is; Gathm does not install
-a second copy.
+Reinstalling reuses a working `llama-server` and valid GGUF weights. The installer
+checks exported `GATHM_LLAMACPP_BIN` / `GATHM_LLAMACPP_MODEL`, the same settings in
+the checkout's `.env`, saved paths under `~/.gathm`, and standard locations.
+`GATHM_LLAMACPP_MODEL_DIR` can point to a directory of existing models. Paths
+with spaces are supported; `.env` is read as data, never executed as a script.
+
+An existing GGUF is preserved if the runtime needs repair. A failed model
+download reports the problem and keeps llama.cpp selected instead of pulling a
+second model through Ollama. Existing compatible Ollama model files can also be
+reused directly before downloading new weights. To deliberately choose Ollama,
+run the installer with `GATHM_INSTALL_LLAMACPP=0`.
 
 The distro package comes first on Linux for the same reason Homebrew does on
 macOS: it is built against the system's own libraries, so it cannot land in the

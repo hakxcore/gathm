@@ -86,6 +86,9 @@ jobs:
       - name: Installer llama.cpp suite
         run: bash tests/llamacpp_install_test.sh
 
+      - name: Installer reuses existing runtimes and models
+        run: bash tests/install_reuse_test.sh
+
       - name: Installer self-check
         run: ./install --check
 
