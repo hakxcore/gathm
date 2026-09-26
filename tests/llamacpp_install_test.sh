@@ -150,6 +150,10 @@ _llamacpp_model_filename bartowski/Does-Not-Exist >/dev/null 2>&1
 check "a missing repo fails cleanly" "$?" "1"
 
 echo "== the RAM ladder =="
+# Exercise the real platform predicate with an explicit fixture platform.
+# Otherwise a run on Termux takes the phone ladder for these desktop cases.
+_GATHM_PLATFORM=linux
+_is_termux; check "the desktop fixture is not Termux" "$?" "1"
 check "an explicit repo wins" \
     "$(GATHM_LLAMACPP_MODEL_REPO=me/my-gguf _llamacpp_recommend_repo)" "me/my-gguf"
 _detect_total_ram_mb() { echo "$FAKE_RAM"; }
@@ -167,7 +171,8 @@ FAKE_RAM=0;     contains "unknown RAM is cautious"  "$(_llamacpp_recommend_repo)
 # A phone is not a small desktop. The desktop tiers would hand an 8 GB phone
 # the 8B model — 5 GB of weights on a device that throttles within a minute and
 # whose low-memory killer takes the biggest process first.
-_is_termux() { return 0; }
+_GATHM_PLATFORM=termux
+_is_termux; check "the phone fixture is Termux" "$?" "0"
 FAKE_RAM=8192;  contains "an 8 GB phone gets the 1B model" \
     "$(_llamacpp_recommend_repo)" "Llama-3.2-1B"
 FAKE_RAM=12000; contains "a 12 GB phone gets the 3B model" \
@@ -178,7 +183,7 @@ check "the phone threshold is the one Ollama uses" \
     "$GATHM_TERMUX_LARGE_MIN_RAM_MB" "11000"
 contains "an explicit repo still wins on a phone" \
     "$(GATHM_LLAMACPP_MODEL_REPO=me/mine _llamacpp_recommend_repo)" "me/mine"
-_is_termux() { return 1; }
+_GATHM_PLATFORM=linux
 
 echo "== the storage gate =="
 check "a model that fits is kept" \
