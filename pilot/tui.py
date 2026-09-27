@@ -1,16 +1,7 @@
-"""
-Gathm Pilot — TUI v3.0  (OpenClaw-inspired)
+"""Gathm's terminal conversation, with optional voice and tool activity.
 
-Visual design reverse-engineered from openclaw/openclaw:
-  • Lobster-palette mapped to gathm tricolor
-  • Shimmer waiting animation with whimsical phrases + elapsed timer
-  • Rich-powered markdown / syntax-highlighted AI responses
-  • Tool execution blocks with pending / success / error states
-  • OSC8 clickable hyperlinks in responses
-  • prompt_toolkit input with persistent history (optional dep)
-
-Hard deps : rich >= 13
-Soft deps : prompt_toolkit >= 3  (falls back to input() if absent)
+Rich renders replies; prompt_toolkit adds input history when available.
+The terminal remains usable without speech or prompt_toolkit installed.
 """
 
 from __future__ import annotations
@@ -94,104 +85,55 @@ def stop_speaking() -> None:
 
 # ══════════════════════════════════════════════════════════════════
 # Palette
-# Gathm tricolor mapped to OpenClaw's lobster-inspired semantic palette:
-#   accent      ← saffron orange  (openclaw accent/accentSoft)
-#   success     ← indian green    (openclaw success / toolSuccessBg)
-#   warn        ← gold            (openclaw accent)
-#   error       ← red             (openclaw error)
-#   muted       ← dim grey        (openclaw dim)
-#   user_bg     ← dark blue-grey  (openclaw userBg)
+# Warm saffron for Gathm, neutral text, and color only where it adds meaning.
 # ══════════════════════════════════════════════════════════════════
 
 # Rich color tokens (used in markup strings)
 _C_ACCENT   = "color(208)"   # saffron orange
-_C_SUCCESS  = "color(40)"    # indian green
-_C_WARN     = "color(214)"   # gold
-_C_ERROR    = "color(196)"   # red
-_C_CYAN     = "color(80)"    # info cyan
-_C_MUTED    = "color(244)"   # gray
-_C_USER_BG  = "on color(236)"  # user message background
+_C_SUCCESS  = "color(114)"   # soft green
+_C_ERROR    = "color(203)"   # red
+_C_MUTED    = "color(246)"   # readable gray
 
 # Raw ANSI sequences (used in the waiting animation to avoid rich overhead)
 _A_ACCENT  = "\033[38;5;208m"
-_A_GREEN   = "\033[38;5;40m"
 _A_BOLD    = "\033[1m"
 _A_DIM     = "\033[2m"
 _A_RESET   = "\033[0m"
 
-PILOT_VERSION = "2.0.0"
-
-GATHM_ASCII = r"""   ___      _   _
-  / _ \__ _| |_| |__  _ __ ___
- / /_\/ _` | __| '_ \| '_ ` _ \
-/ /_\\ (_| | |_| | | | | | | | |
-\____/\__,_|\__|_| |_|_| |_| |_|"""
-
-# ── Whimsical waiting phrases (openclaw-inspired, gathm-flavored) ─
-_WAITING_PHRASES = [
-    "flibbertigibbeting",
-    "kerfuffling",
-    "summoning the oracle",
-    "weaving the threads",
-    "consulting the archive",
-    "scanning the horizon",
-    "chasing the signal",
-    "decoding the noise",
-    "tracing the path",
-    "connecting the dots",
-]
-
-_SPINNER = "◜◠◝◞◡◟"
+_SPINNER = "◜◝◞◟"
 
 # ── Console ──────────────────────────────────────────────────────
 console = Console(highlight=False, markup=True)
 
 
 # ══════════════════════════════════════════════════════════════════
-# Waiting animation  (shimmer + elapsed, runs in background thread)
-# Mirrors openclaw/src/tui/tui-waiting.ts  buildWaitingStatusMessage()
+# Waiting indicator (elapsed time, runs in background thread)
 # ══════════════════════════════════════════════════════════════════
 
 _wait_stop   = threading.Event()
 _wait_thread: Optional[threading.Thread] = None
 
 
-def _shimmer(text: str, tick: int) -> str:
-    """Moving bright-band shimmer over plain text (openclaw shimmerText)."""
-    width = 5
-    pos = tick % (len(text) + width * 2) - width
-    out = ""
-    for i, ch in enumerate(text):
-        if pos <= i < pos + width:
-            out += _A_BOLD + ch + _A_RESET
-        else:
-            out += _A_DIM + ch + _A_RESET
-    return out
-
-
 def _waiting_loop() -> None:
     start = time.monotonic()
     tick  = 0
-    while not _wait_stop.wait(timeout=0.1):
+    while not _wait_stop.wait(timeout=0.2):
         elapsed = int(time.monotonic() - start)
-        phrase  = _WAITING_PHRASES[(tick // 15) % len(_WAITING_PHRASES)]
         frame   = _SPINNER[tick % len(_SPINNER)]
-        shimmer = _shimmer(phrase, tick)
         line = (
-            f"  {_A_ACCENT}{frame}{_A_RESET}"
-            f" {shimmer}"
-            f"  {_A_DIM}{elapsed}s{_A_RESET}"
+            f" {_A_ACCENT}{frame}{_A_RESET} Working"
+            f" {_A_DIM}· {elapsed}s{_A_RESET}"
         )
-        sys.stdout.write(f"\r{line}   ")
+        sys.stdout.write(f"\r\033[2K{line}")
         sys.stdout.flush()
         tick += 1
     # Clear the animation line
-    sys.stdout.write("\r" + " " * 64 + "\r")
+    sys.stdout.write("\r\033[2K")
     sys.stdout.flush()
 
 
 def start_waiting() -> None:
-    """Start the waiting shimmer in a background thread."""
+    """Start the waiting indicator in a background thread."""
     global _wait_thread
     _wait_stop.clear()
     _wait_thread = threading.Thread(target=_waiting_loop, daemon=True)
@@ -199,7 +141,7 @@ def start_waiting() -> None:
 
 
 def stop_waiting() -> None:
-    """Stop the waiting shimmer and join the thread."""
+    """Stop the waiting indicator and join the thread."""
     global _wait_thread
     _wait_stop.set()
     if _wait_thread is not None:
@@ -225,56 +167,64 @@ def check_connectivity() -> str:
 # Welcome screen
 # ══════════════════════════════════════════════════════════════════
 
+def _terminal_width() -> int:
+    """Respect both the terminal and an explicitly sized Rich console."""
+    return min(console.width, shutil.get_terminal_size((80, 24)).columns)
+
+
+def _print_panel(content, *, title: str = "", width: int = 76,
+                 border_style: str = _C_MUTED) -> None:
+    """Use one column of breathing room, including on narrow Termux screens."""
+    console.print(
+        Padding(
+            Panel(
+                content,
+                title=title or None,
+                title_align="left",
+                border_style=border_style,
+                box=rich_box.ROUNDED,
+                padding=(1, 2),
+                width=max(1, min(_terminal_width() - 2, width)),
+            ),
+            (0, 1),
+        )
+    )
+
+
 def render_welcome(model_name: str, tool_count: int, platform: str,
                    connectivity: str = "") -> None:
-    """Clear screen and render the welcome panel (openclaw-inspired header)."""
+    """Introduce the conversation before model and tool details."""
     if not connectivity:
         connectivity = check_connectivity()
 
-    net_style = _C_SUCCESS if connectivity == "online" else _C_ERROR
-    net_label = "● Online"  if connectivity == "online" else "● Offline"
-
     content = Text()
-    content.append("\n")
-    content.append("🐚  Gathm Pilot ", style="bold white")
-    content.append(f"v{PILOT_VERSION}\n\n", style=f"bold {_C_ACCENT}")
-
-    for art_line in GATHM_ASCII.splitlines():
-        content.append(art_line + "\n", style=_C_SUCCESS)
-    content.append("\n")
-
-    for style, label, value in [
-        (_C_ACCENT,     "Model",    model_name),
-        ("bold white",  "Tools",    f"{tool_count} available"),
-        (_C_SUCCESS,    "Platform", platform),
-        (net_style,     "Network",  net_label),
-    ]:
-        content.append(f"  {label:<10}", style=style)
-        content.append(": ")
-        content.append(f"{value}\n", style="white")
-
-    content.append("\n")
-    content.append("  Tips:\n", style="dim")
-    for tip in [
-        '"weather Paris" — check the weather',
-        '"pwned user@email.com" — breach lookup',
-        '"crypto" — live cryptocurrency prices',
-        "/tools to list all,  /help for commands",
-    ]:
-        content.append(f"    • {tip}\n", style="dim")
-    content.append("\n")
-
-    w = shutil.get_terminal_size((80, 24)).columns
-    os.system("clear" if os.name != "nt" else "cls")
-    console.print(
-        Panel(
-            content,
-            border_style=_C_ACCENT,
-            box=rich_box.ROUNDED,
-            expand=False,
-            width=min(w - 2, 70),
-        )
+    content.append("Gathm\n", style=f"bold {_C_ACCENT}")
+    content.append("Your personal AI assistant\n\n", style="bold default")
+    content.append(
+        "Plan, write, learn, or talk things through.\n\n", style="default"
     )
+    content.append("Start anywhere\n", style="bold default")
+    for example in [
+        "Help me plan my day",
+        "Help me write a kind reply",
+        "Explain something new to me",
+    ]:
+        content.append(f"  {example}\n", style="default")
+
+    content.append("\nTry /listen for voice, or type a message.\n", style="default")
+    content.append("Voice settings: /speak\n\n", style=_C_MUTED)
+    content.append("Tools when useful\n", style="bold default")
+    content.append(
+        f"{tool_count} available for current information and actions. /tools to explore.\n\n",
+        style=_C_MUTED,
+    )
+    content.append(f"{model_name}\n{platform} · ", style=_C_MUTED)
+    content.append(
+        "Online" if connectivity == "online" else "Offline",
+        style=_C_SUCCESS if connectivity == "online" else _C_MUTED,
+    )
+    os.system("clear" if os.name != "nt" else "cls")
+    _print_panel(content, border_style=_C_ACCENT)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -282,23 +232,21 @@ def render_welcome(model_name: str, tool_count: int, platform: str,
 # ══════════════════════════════════════════════════════════════════
 
 def print_status_bar() -> None:
-    """Print a right-aligned dim hint line (openclaw footer concept)."""
-    hint = "? for help  •  /model  •  /tools"
-    w    = shutil.get_terminal_size((80, 24)).columns
-    console.print(f"[{_C_MUTED}]{hint:>{w - 1}}[/{_C_MUTED}]")
+    """Keep everyday conversation and voice controls easy to discover."""
+    console.print(Text(" /speak · /listen · /help", style=_C_MUTED))
 
 
 # ══════════════════════════════════════════════════════════════════
-# User message  (openclaw UserMessageComponent)
+# User message
 # ══════════════════════════════════════════════════════════════════
 
 def print_user_message(text: str) -> None:
-    """Render the user's query as a styled sent-message (dark bg, right-ish)."""
+    """Keep the user's words readable and separate from Gathm's reply."""
     msg = Text()
-    msg.append("  🐚  ", style=f"bold {_C_ACCENT}")
-    msg.append(f" {text} ", style=f"white {_C_USER_BG}")
+    msg.append("You\n", style=f"bold {_C_MUTED}")
+    msg.append(text, style="default")
     console.print()
-    console.print(Padding(msg, (0, 2)))
+    console.print(Padding(msg, (0, 1)))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -350,7 +298,7 @@ def get_user_input() -> str:
         # prompt_toolkit does not interpret raw ANSI escape sequences in prompt
         # strings — it displays them literally as ^[[...m.  Wrapping with ANSI()
         # tells it to parse and render the escape codes as intended colors/styles.
-        prompt_str = f"\n{_A_ACCENT}🐚{_A_RESET} {_A_BOLD}›{_A_RESET} "
+        prompt_str = f"\n{_A_ACCENT}You{_A_RESET} {_A_BOLD}›{_A_RESET} "
         try:
             text = session.prompt(_PT_ANSI(prompt_str)).strip()  # type: ignore[union-attr]
         except RuntimeError:
@@ -368,63 +316,40 @@ def get_user_input() -> str:
 
 def print_prompt() -> None:
     """Print the bare input prompt (fallback path without prompt_toolkit)."""
-    sys.stdout.write(f"\n{_A_ACCENT}🐚{_A_RESET} {_A_BOLD}›{_A_RESET} ")
+    sys.stdout.write(f"\n{_A_ACCENT}You{_A_RESET} {_A_BOLD}›{_A_RESET} ")
     sys.stdout.flush()
 
 
 # ══════════════════════════════════════════════════════════════════
-# Tool execution  (openclaw ToolExecutionComponent)
-# Pending ▶ blue-dim,  Success ✓ green,  Error ✗ red
+# Tool activity
 # ══════════════════════════════════════════════════════════════════
 
 def print_tool_exec(tool_command: str) -> None:
-    """
-    Display tool execution indicator.
-    Automatically pauses the waiting animation while printing, then restarts it
-    — mirrors openclaw's inline tool state blocks inside the chat log.
-    """
+    """Show tool activity without interrupting the conversation layout."""
     was_waiting = _wait_thread is not None and _wait_thread.is_alive()
     if was_waiting:
         stop_waiting()
 
-    console.print(
-        f"  [{_C_CYAN} dim]▶ running:[/{_C_CYAN} dim]  [dim]{tool_command}[/dim]"
-    )
+    activity = Text(" Using tool · ", style=_C_MUTED)
+    activity.append(tool_command)
+    console.print(activity)
 
     if was_waiting:
         start_waiting()
 
 
 # ══════════════════════════════════════════════════════════════════
-# AI response   (openclaw AssistantMessageComponent + markdownTheme)
+# Assistant reply
 # ══════════════════════════════════════════════════════════════════
 
 def render_response(text: str, speak: bool = True) -> None:
-    """
-    Render the assistant reply with full markdown support inside a panel.
-
-    Mirrors openclaw's AssistantMessageComponent + HyperlinkMarkdown:
-      • monokai code blocks (openclaw uses VS Dark-like theme)
-      • headings in accent color
-      • code in warn gold
-      • OSC8 hyperlinks where the terminal supports them
-    """
-    w  = shutil.get_terminal_size((80, 24)).columns
+    """Render markdown and optionally speak the reply."""
     md = Markdown(text, code_theme="monokai", justify="left")
     console.print()
-    console.print(
-        Padding(
-            Panel(
-                md,
-                title=f"[{_C_ACCENT}]🐚  Pilot[/{_C_ACCENT}]",
-                title_align="left",
-                border_style=_C_ACCENT,
-                box=rich_box.ROUNDED,
-                padding=(0, 1),
-                width=min(w - 4, 78),
-            ),
-            (0, 2),
-        )
+    _print_panel(
+        md,
+        title=f"[{_C_ACCENT}]Gathm[/{_C_ACCENT}]",
+        border_style=_C_ACCENT,
     )
 
     # Say it out loud too. This is the single choke point for assistant replies
@@ -442,49 +367,27 @@ def render_response(text: str, speak: bool = True) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def render_help() -> None:
-    """Render the slash-command help panel (openclaw /help output)."""
-    w = shutil.get_terminal_size((80, 24)).columns
-
-    content = Text("\n")
+    """Present conversation controls before optional tool controls."""
+    content = Text("Ask naturally. Gathm can help you think, write, and learn, "
+                   "and use tools when useful.\n\n")
     for cmd, desc in [
-        ("/help",   "Show this help screen"),
-        ("/tools",  "List all available Gathm tools"),
-        ("/clear",  "Clear screen and redraw welcome"),
-        ("/model",  "Show current model / backend info"),
-        ("/speak",  "Voice status; /speak on|off, or /speak <text> to test"),
-        ("/listen", "Record from the mic and ask what you said (/listen 5)"),
-        ("/quit",   "Exit Pilot"),
-        ("?",       "Show this help screen"),
+        ("/speak", "Voice status; /speak on or off for spoken replies"),
+        ("/listen", "Record a voice message if supported; /listen 5 records 5 seconds"),
+        ("/clear", "Redraw the welcome screen; keeps this conversation"),
+        ("/model", "Show the model in use"),
+        ("/tools", "Explore tools for information and actions"),
+        ("/help or ?", "Show this guide"),
+        ("/quit", "Leave Gathm"),
     ]:
-        content.append(f"  {cmd:<14}", style=_C_SUCCESS)
-        content.append(f"{desc}\n", style="white")
+        content.append(f"{cmd}\n", style=f"bold {_C_ACCENT}")
+        content.append(f"{desc}\n\n", style="default")
 
-    content.append("\n  ", style="")
-    content.append(
-        "You can also type naturally — Pilot will route to the right tool.\n",
-        style="dim",
-    )
-    content.append(
-        "  Prefix with ! to run a raw bash command (e.g. !ls -la).\n",
-        style="dim",
-    )
-    content.append("\n")
+    content.append("Advanced\n", style="bold default")
+    content.append("Use ! before a shell command, for example !ls -la. "
+                   "Shell access must be enabled.", style=_C_MUTED)
 
     console.print()
-    console.print(
-        Padding(
-            Panel(
-                content,
-                title=f"[{_C_ACCENT}]Gathm Pilot — Commands[/{_C_ACCENT}]",
-                title_align="left",
-                border_style=f"{_C_ACCENT} dim",
-                box=rich_box.ROUNDED,
-                expand=False,
-                width=min(w - 4, 66),
-            ),
-            (0, 2),
-        )
-    )
+    _print_panel(content, title="Gathm · Help")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -492,61 +395,29 @@ def render_help() -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def render_tools_list(tools: List[Tuple[str, str]]) -> None:
-    """Render tool catalog with tricolor row rotation."""
-    w      = shutil.get_terminal_size((80, 24)).columns
-    colors = [_C_ACCENT, "white", _C_SUCCESS]
-
-    content = Text("\n")
-    for i, (name, desc) in enumerate(tools):
-        content.append(f"  {name:<18}", style=colors[i % 3])
-        content.append(f"{desc}\n",      style="dim")
-    content.append("\n")
+    """Keep tools available as optional capabilities, with readable wrapping."""
+    content = Text("Ask for what you need in your own words. "
+                   "Gathm can use these tools to help.\n")
+    if not tools:
+        content.append("\nNo tools are available in this installation.", style=_C_MUTED)
+    for name, desc in tools:
+        content.append(f"\n{name}\n", style=f"bold {_C_ACCENT}")
+        content.append(desc + "\n", style="default")
 
     console.print()
-    console.print(
-        Padding(
-            Panel(
-                content,
-                title=f"[{_C_ACCENT}]🐚  Available Tools ({len(tools)})[/{_C_ACCENT}]",
-                title_align="left",
-                border_style=f"{_C_ACCENT} dim",
-                box=rich_box.ROUNDED,
-                expand=False,
-                width=min(w - 4, 82),
-            ),
-            (0, 2),
-        )
-    )
+    _print_panel(content, title=f"Tools · {len(tools)} available")
 
 
 # ══════════════════════════════════════════════════════════════════
-# Error display  (openclaw error state)
+# Error display
 # ══════════════════════════════════════════════════════════════════
 
 def render_error(message: str) -> None:
-    """Render an error panel (red border, engineer hand-off note)."""
-    content = Text()
-    content.append("\n  ")
-    content.append(message + "\n\n  ", style="white")
-    content.append(
-        "The Engineer will take care of this shortly.\n",
-        style=_C_SUCCESS,
-    )
+    """Show the actual error without promising a background repair."""
+    content = Text(message)
 
     console.print()
-    console.print(
-        Padding(
-            Panel(
-                content,
-                title=f"[{_C_ACCENT} bold][!] Issue Detected[/{_C_ACCENT} bold]",
-                title_align="left",
-                border_style=_C_ERROR,
-                box=rich_box.ROUNDED,
-                expand=False,
-            ),
-            (0, 2),
-        )
-    )
+    _print_panel(content, title="Something went wrong", border_style=_C_ERROR)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -554,6 +425,4 @@ def render_error(message: str) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def render_goodbye() -> None:
-    console.print(
-        f"\n[{_C_SUCCESS}]🐚  Jai Hind! Gathm Pilot signing off.[/{_C_SUCCESS}]\n"
-    )
+    console.print(Text("\n Take care. — Gathm\n", style=_C_ACCENT))

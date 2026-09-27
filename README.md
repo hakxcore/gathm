@@ -1,13 +1,19 @@
-# Gathm Framework
+# Gathm
 
 Formerly **Termux-Snippets**.
 
-Gathm is a modular, local-first command intelligence framework for security, networking, and operator workflows. It combines:
+Gathm is a personal AI assistant for everyday conversation, writing, planning,
+and learning. Talk to Gathm or type alongside your voice conversation. When you
+need current information or an action, it can use tools to help.
 
-- A large tool catalog (55 tools in this branch)
-- An orchestration layer (`gathm`) with planning, health, retry, recovery, and caching
-- Multiple user interfaces (CLI, TUI, API server, GUI)
-- Cross-platform support (Linux, macOS, Termux, WSL/Git Bash/MSYS2)
+- A voice-first browser interface with visible chat, plus a terminal assistant
+- Conversation context for follow-up questions and ideas
+- Local models through llama.cpp or Ollama, with optional hosted model backends
+- Tools for current information, system tasks, and existing automation workflows
+- Support for Linux, macOS, Termux, and Windows through WSL/Git Bash/MSYS2
+
+Voice input and spoken replies depend on the speech capabilities installed on
+your device. Text chat is available alongside them.
 
 ## Documentation
 
@@ -18,13 +24,16 @@ Gathm is a modular, local-first command intelligence framework for security, net
 
 ## Why Gathm
 
-Gathm is built for practical operations work:
+Start with what you need help with:
 
-- Run one tool quickly
-- Ask in natural language and route to the right tool
-- Chain or parallelize workflows
-- Monitor health and auto-heal common failures
-- Expose capabilities over HTTP for automation/integration
+- Talk through an idea or make a practical plan for your day
+- Draft a message, revise a paragraph, or find the right words
+- Ask questions and learn through follow-up conversation
+- Get current information or carry out a task with tools when needed
+- Keep direct tool commands and the API for scripts and automation
+
+Run `gathm` to open the browser interface and terminal assistant together,
+`gathm gui` for the browser, or `gathm tui` for the terminal.
 
 ## Architecture
 

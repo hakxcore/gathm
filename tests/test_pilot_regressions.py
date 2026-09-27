@@ -76,19 +76,20 @@ class TestPilotRegressions(unittest.TestCase):
         else in this suite would notice.
         """
         template = PILOT_MAIN_PATH.read_text().split(
-            'system_prompt = f"""', 1)[1].split('"""', 1)[0]
+            'system_prompt = _ASSISTANT_PROMPT + f"""', 1)[1].split('"""', 1)[0]
 
         first_variable = re.search(r"\{[a-z_]+\}", template)
         self.assertIsNotNone(first_variable, "the template has no substitutions")
         prefix = template[: first_variable.start()]
 
-        self.assertIn("CRITICAL RULES:", prefix,
-                      "CRITICAL RULES moved below a variable field — prefix cache dead")
-        self.assertGreater(len(prefix), 2000,
-                           "stable prefix is only %d chars; a variable field moved up"
-                           % len(prefix))
+        self.assertIn("TOOL RULES:", prefix,
+                      "TOOL RULES moved below a variable field — prefix cache dead")
+        self.assertIn("Give a final answer directly", prefix,
+                      "the final constant instruction moved below a variable field")
+        # A shorter prompt is desirable on phones; protect ordering instead of
+        # requiring thousands of characters of instructions to remain forever.
         self.assertGreater(template.index("{tool_descriptions}"),
-                           template.index("CRITICAL RULES:"),
+                           template.index("TOOL RULES:"),
                            "the tool list is above the rules again")
         # The rules point at the list; with the list below them, so must the text.
         self.assertNotIn("list above", template,

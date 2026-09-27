@@ -305,13 +305,13 @@ check_pilot() {
     # Checking only for main.py would refuse to start an install that launches
     # perfectly well through run.sh.
     if [[ ! -f "$INSTALL_DIR/pilot/run.sh" && ! -f "$INSTALL_DIR/pilot/main.py" ]]; then
-        pf_fail "Pilot is missing from $INSTALL_DIR/pilot" "Re-run the installer: $(setup_advice)"
+        pf_fail "The terminal assistant is missing from $INSTALL_DIR/pilot" "Re-run the installer: $(setup_advice)"
         return 1
     fi
     # run.sh brings its own environment (the installer's venv), so the module
     # checks below only speak for a direct main.py launch.
     if [[ ! -f "$INSTALL_DIR/pilot/main.py" ]]; then
-        pf_ok "Pilot"
+        pf_ok "Terminal assistant"
         return 0
     fi
     # Two tiers, because they fail differently. Without `rich`, pilot/main.py
@@ -333,7 +333,7 @@ print(" ".join(missing))
 PY
 )"
     if [[ -n "${hard// }" ]]; then
-        pf_fail "Pilot cannot start — missing: ${hard}" \
+        pf_fail "The terminal assistant cannot start — missing: ${hard}" \
                 "Install it with: $(deps_advice)"
         return 1
     fi
@@ -351,11 +351,11 @@ print(" ".join(missing))
 PY
 )"
     if [[ -n "${soft// }" ]]; then
-        pf_warn "AI runtime missing: ${soft} — Pilot will open but cannot answer" \
+        pf_warn "AI runtime missing: ${soft} — Gathm cannot answer yet" \
                 "Install it with: $(deps_advice)"
         return 0
     fi
-    pf_ok "Pilot dependencies"
+    pf_ok "Terminal assistant dependencies"
     return 0
 }
 
@@ -376,7 +376,7 @@ print(" ".join(missing))
 PY
 )"
     if [[ -n "${missing// }" ]]; then
-        pf_warn "GUI dependencies missing: ${missing} — starting Pilot only" \
+        pf_warn "GUI dependencies missing: ${missing} — starting the terminal assistant only" \
                 "Install them with: $(if [[ "${GATHM_INSTALL_KIND:-}" == "pipx" ]]; then echo "pipx install --force 'gathm[gui]'"; else echo "./install"; fi)"
         START_GUI=0
         return 1
@@ -408,13 +408,13 @@ check_llamacpp() {
         # and the message is the only thing the user has to go on.
         case "$out" in
             *"not installed"*)
-                pf_warn "llama.cpp is not installed — Pilot cannot answer questions" \
+                pf_warn "llama.cpp is not installed — Gathm cannot answer questions" \
                         "Install it with: $(setup_advice)" ;;
             *"no GGUF"*)
-                pf_warn "No local model found — Pilot cannot answer questions" \
+                pf_warn "No local model found — Gathm cannot answer questions" \
                         "Download one with: $(setup_advice)" ;;
             *)
-                pf_warn "llama.cpp is not usable — Pilot cannot answer questions" \
+                pf_warn "llama.cpp is not usable — Gathm cannot answer questions" \
                         "${out:-Run: $(setup_advice)}" ;;
         esac
         return 1
@@ -426,7 +426,7 @@ check_llamacpp() {
             pf_ok "llama.cpp  started at $(llamacpp_cli url 2>/dev/null | tail -1)"
             return 0
         fi
-        pf_warn "llama.cpp would not start — Pilot cannot answer questions" \
+        pf_warn "llama.cpp would not start — Gathm cannot answer questions" \
                 "Start it yourself with: gathm llm start   (log: $GATHM_STATE_DIR/llamacpp.log)"
         return 1
     fi
@@ -455,7 +455,7 @@ check_llm() {
         local key="${GATHM_LLM_API_KEY:-${OPENAI_API_KEY:-${GEMINI_API_KEY:-}}}"
         if [[ -z "$key" ]]; then
             pf_warn "LLM backend '$backend' has no API key set" \
-                    "Pilot will not be able to answer. Set the key for $backend."
+                    "Gathm cannot answer yet. Set the key for $backend."
             return 1
         fi
         pf_ok "LLM  $backend ($model)"
@@ -465,7 +465,7 @@ check_llm() {
     if ollama_responding 2; then
         pf_ok "Ollama  running at $(ollama_root)"
     elif ! command -v ollama >/dev/null 2>&1; then
-        pf_warn "Ollama is not installed — Pilot cannot answer questions" \
+        pf_warn "Ollama is not installed — Gathm cannot answer questions" \
                 "Install it from https://ollama.com, then: ollama pull $model"
         return 1
     elif (( OLLAMA_AUTOSTART )); then
@@ -473,7 +473,7 @@ check_llm() {
         if start_ollama; then
             pf_ok "Ollama  started at $(ollama_root)"
         else
-            pf_warn "Ollama would not start — Pilot cannot answer questions" \
+            pf_warn "Ollama would not start — Gathm cannot answer questions" \
                     "Start it yourself with: ollama serve   (log: $OLLAMA_LOG)"
             return 1
         fi
@@ -548,7 +548,7 @@ start_gui() {
 
     local server_script="$INSTALL_DIR/api/server.py"
     if [[ ! -f "$server_script" ]]; then
-        echo -e "${ORANGE}[!]${RESETBG} API server not found at $server_script — starting Pilot only." >&2
+        echo -e "${ORANGE}[!]${RESETBG} API server not found at $server_script — starting the terminal assistant only." >&2
         return 1
     fi
 
@@ -668,12 +668,12 @@ launch_pilot() {
     if [[ -f "$pilot_main" ]]; then
         local py
         py="$(pick_python)" || {
-            echo -e "${RED}Error: Python 3 not found — cannot start Pilot.${RESETBG}" >&2
+            echo -e "${RED}Error: Python 3 not found — cannot start the terminal assistant.${RESETBG}" >&2
             exit 1
         }
         exec "$py" "$pilot_main" "$@"
     fi
-    echo -e "${RED}Error: Pilot not found at $pilot_main${RESETBG}" >&2
+    echo -e "${RED}Error: Terminal assistant not found at $pilot_main${RESETBG}" >&2
     echo "Re-run the installer: ./install" >&2
     exit 1
 }
@@ -713,12 +713,12 @@ cmd_start() {
                 echo -e "${GREEN}[*]${RESETBG} Opening ${CYAN}${GUI_URL}${RESETBG} in your browser..."
                 open_url "$GUI_URL"
             fi
-            echo "    The GUI keeps running after you leave Pilot. Stop it with: gathm stop"
+            echo "    The GUI keeps running after you leave the terminal. Stop it with: gathm stop"
         fi
     fi
 
     echo ""
-    echo -e "${BOLD}Starting Pilot...${RESETBG}  ${ORANGE}(/exit or Ctrl+C to quit)${RESETBG}"
+    echo -e "${BOLD}Starting Gathm...${RESETBG}  ${ORANGE}(/exit or Ctrl+C to quit)${RESETBG}"
     echo ""
     launch_pilot
 }
@@ -811,9 +811,9 @@ show_help() {
 Gathm v$currentVersion
 
 Usage:
-  gathm                          Start the web GUI in your browser and Pilot here
-  gathm tui                      Pilot only (no GUI server, no browser)
-  gathm gui                      GUI server + browser only (no Pilot)
+  gathm                          Start Gathm in your browser and this terminal
+  gathm tui                      Terminal assistant only (no GUI server, no browser)
+  gathm gui                      GUI server + browser only (no terminal assistant)
   gathm doctor                   Check your setup: Python, deps, the LLM, model
   gathm llm <cmd>                Manage the local llama.cpp server
                                  (status|start|stop|restart|doctor|url|model|log)

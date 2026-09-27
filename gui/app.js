@@ -1,4 +1,4 @@
-// Gathm AI -- app.js
+// Gathm — voice and text conversation.
 
 // The page is served BY the API server, so its own origin is the right
 // default. Hardcoding 8080 meant `gathm gui --port 9090` opened a page that
@@ -8,9 +8,7 @@ const API_BASE = window.GATHM_API_URL ||
         ? location.origin
         : 'http://127.0.0.1:8080');
 
-// Icons come from a CDN, and Gathm is meant to work offline — on a phone with
-// no signal the script simply is not there. Every call goes through this so a
-// missing library costs you the icons, not the buttons.
+// Icons are bundled locally, so the interface works without a network.
 function refreshIcons() {
     try {
         if (window.gathmIcons) window.gathmIcons();
@@ -30,6 +28,19 @@ const sendBtn      = document.getElementById('sendBtn');
 const micBtn       = document.getElementById('micBtn');
 const speakBtn     = document.getElementById('speakBtn');
 const convoBtn     = document.getElementById('convoBtn');
+const clearBtn     = document.getElementById('clearBtn');
+const emptyState   = document.getElementById('emptyState');
+const voiceHint    = document.getElementById('voiceHint');
+const connectionStatus = document.getElementById('connectionStatus');
+let isSending = false;
+let isTranscribing = false;
+let voiceActive = false;
+let voiceStarting = false;
+let voiceGeneration = 0;
+let convoMode = false;
+let turnBusy = false;
+let conversationGeneration = 0;
+let assistantState = 'idle';
 
 // -- Conversation memory ---------------------------------------------------
 // Declared up here because both persistence and sending touch it.
@@ -38,7 +49,11 @@ const HISTORY_MAX = 12;           // keep the last N turns
 
 // -- Orb state -------------------------------------------------------------
 function setOrbState(state) {
+    assistantState = state;
     if (aiOrb) aiOrb.className = 'ai-orb ' + state;
+    const labels = { idle: 'Ready when you are', thinking: 'Thinking it through…',
+                     listening: 'Listening…', speaking: 'Speaking…' };
+    if (botStatus) botStatus.textContent = labels[state] || labels.idle;
 }
 
 // -- Connectivity ----------------------------------------------------------
@@ -47,21 +62,34 @@ let isOnline = false;
 async function checkConnectivity() {
     // Try /ping first (instant). Fall back to /api/v1/tools for older
     // servers that pre-date the /ping endpoint.
-    isOnline = false;
+    let connected = false;
     for (const p of ['/api/v1/ping', '/api/v1/tools']) {
         try {
             const res = await fetch(API_BASE + p, { signal: AbortSignal.timeout(4000) });
-            if (res.ok) { isOnline = true; break; }
+            if (res.ok) { connected = true; break; }
         } catch (_) { /* try next */ }
     }
-    botStatus.textContent = isOnline ? 'Online - Voice & Text' : 'Offline - API not reachable';
+    isOnline = connected;
+    if (connectionStatus) {
+        connectionStatus.textContent = connected ? 'Connected' : 'Disconnected';
+        connectionStatus.dataset.connected = String(connected);
+    }
+    if (assistantState === 'idle' && !voiceActive) {
+        botStatus.textContent = connected ? 'Ready when you are' : 'Waiting for Gathm to connect';
+    }
 }
 
 // Re-checked whenever connectivity is: a server that starts later, or one
 // rebuilt with the ASR family, should light the features up without a reload.
 async function refreshCapabilities() {
     await checkConnectivity();
-    if (!isOnline) return;
+    if (!isOnline) {
+        asrAvailable = false;
+        speechAvailable = false;
+        updateConvoBtn();
+        updateSpeakBtn();
+        return;
+    }
     await Promise.all([checkSpeech(), checkTranscribe()]);
     updateConvoBtn();
 }
@@ -91,6 +119,17 @@ const STORE_KEY = 'gathmChat';
 const STORE_MAX = 200;            // messages kept; older ones are dropped
 let transcript = [];              // [{text, sender, cssClass, time}]
 
+function syncConversationView(forceVisible) {
+    const hasMessages = !!forceVisible || transcript.length > 0;
+    if (emptyState) emptyState.hidden = hasMessages;
+    chatArea.hidden = !hasMessages;
+    document.querySelector('.app')?.classList.toggle('has-messages', hasMessages);
+}
+
+function updateComposerState() {
+    if (clearBtn) clearBtn.disabled = isSending || isTranscribing || voiceActive || voiceStarting || convoMode || turnBusy;
+}
+
 function saveChat() {
     try {
         localStorage.setItem(STORE_KEY, JSON.stringify({
@@ -108,8 +147,11 @@ function restoreChat() {
         saved = null;
     }
     if (!saved || !Array.isArray(saved.transcript) || !saved.transcript.length) return;
-    transcript = saved.transcript;
-    history = Array.isArray(saved.history) ? saved.history : [];
+    transcript = saved.transcript.filter(m => m && typeof m.text === 'string' &&
+        (m.sender === 'user' || m.sender === 'bot' || m.sender === 'system')).slice(-STORE_MAX);
+    history = Array.isArray(saved.history) ? saved.history.filter(m => m &&
+        (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string').slice(-HISTORY_MAX * 2) : [];
+    syncConversationView();
     transcript.forEach(function(m) { renderMessage(m); });
     scrollToBottom();
 }
@@ -119,6 +161,7 @@ function clearChat() {
     history = [];
     chatArea.innerHTML = '';
     try { localStorage.removeItem(STORE_KEY); } catch (_) { /* nothing to do */ }
+    syncConversationView();
 }
 
 // -- Messages --------------------------------------------------------------
@@ -128,6 +171,12 @@ function renderMessage(m) {
 
     const msg = document.createElement('div');
     msg.className = 'message ' + (m.cssClass || m.sender + '-text');
+    if (m.sender === 'bot') {
+        const author = document.createElement('div');
+        author.className = 'message-author';
+        author.textContent = 'Gathm';
+        msg.appendChild(author);
+    }
 
     // Only replies get Markdown. What the user typed is shown exactly as they
     // typed it — nobody wants their asterisks silently turned into italics.
@@ -159,6 +208,7 @@ function renderMessage(m) {
 function addMessage(text, sender, cssClass) {
     const m = { text: text, sender: sender, cssClass: cssClass, time: formatTime() };
     transcript.push(m);
+    syncConversationView();
     renderMessage(m);
     scrollToBottom();
     saveChat();
@@ -174,6 +224,8 @@ function showTyping() {
     wrapper.id = 'typingWrapper';
     const indicator = document.createElement('div');
     indicator.className = 'typing-indicator';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-label', 'Gathm is thinking');
     indicator.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
     wrapper.appendChild(indicator);
     chatArea.appendChild(wrapper);
@@ -187,22 +239,11 @@ function hideTyping() {
 }
 
 // -- Format API response ---------------------------------------------------
-// The /agent/chat endpoint returns {reply} from the LLM agent. If the agent
-// is unavailable the server falls back to the keyword router, so we still
-// handle those shapes gracefully.
+// Conversation failures stay visible; they are never retried as tool commands.
 function formatAgentReply(data) {
-    if (data.reply) return data.reply;                    // LLM agent answer
-    if (data.status === 'success' && data.output) return data.output;
-    if (data.matched_tool && data.matched_tool !== 'null') {
-        return 'I can help with that using the "' + data.matched_tool + '" tool.' +
-               (data.description ? '\n\n' + data.description : '');
-    }
-    if (data.error && /no matching tool/i.test(data.error)) {
-        return "I couldn't find a tool for that. Try: weather in Tokyo, " +
-               "dns github.com, ip info 8.8.8.8, define serendipity.";
-    }
-    return data.raw_output || data.output || data.result || data.error
-        || JSON.stringify(data, null, 2);
+    if (data && typeof data.reply === 'string' && data.reply.trim()) return data.reply;
+    if (data && typeof data.error === 'string') return data.error;
+    return 'I couldn’t get a reply from the assistant. Please try again.';
 }
 
 // -- Spoken replies --------------------------------------------------------
@@ -325,10 +366,12 @@ function updateSpeakBtn() {
     if (!speakBtn) return;
     speakBtn.hidden = !speechAvailable;      // no voice runtime → no control
     speakBtn.classList.toggle('active', speakEnabled);
+    speakBtn.setAttribute('aria-pressed', String(speakEnabled));
     speakBtn.setAttribute('aria-label', speakEnabled ? 'Mute replies' : 'Speak replies');
     speakBtn.innerHTML = '<i data-lucide="' + (speakEnabled ? 'volume-2' : 'volume-x') +
                          '" class="btn-icon"></i>';
     refreshIcons();
+    if (typeof updateVoiceHint === 'function') updateVoiceHint();
 }
 
 // Bumped by stopSpeaking(); an in-flight queue notices and abandons the rest.
@@ -482,9 +525,7 @@ if (speakBtn) {
 checkSpeech();
 
 // -- Send via API ----------------------------------------------------------
-let isSending = false;
-
-async function sendMessage() {
+async function sendMessage(options = {}) {
     const text = messageInput.value.trim();
     if (!text || isSending) return;
 
@@ -492,6 +533,10 @@ async function sendMessage() {
 
     // The transcript is persistent now, so there has to be a way to drop it.
     if (text === '/clear' || text === '/reset') {
+        if (voiceActive || voiceStarting || convoMode || isTranscribing || turnBusy) {
+            botStatus.textContent = 'End voice capture before clearing this conversation.';
+            return;
+        }
         clearChat();
         messageInput.value = '';
         messageInput.style.height = 'auto';
@@ -504,6 +549,7 @@ async function sendMessage() {
     messageInput.value = '';
     messageInput.style.height = 'auto';
     isSending = true;
+    updateComposerState();
     sendBtn.disabled = true;
     showTyping();
 
@@ -527,7 +573,10 @@ async function sendMessage() {
         addMessage(reply, 'bot');
         // Not awaited: the text is already on screen and the composer should
         // come back immediately. Conversation mode awaits `speaking` instead.
-        speaking = speakReply(reply);
+        if (options.conversationGeneration === undefined ||
+            (convoMode && options.conversationGeneration === conversationGeneration)) {
+            speaking = speakReply(reply);
+        }
 
         // Remember this turn so follow-ups have context
         history.push({ role: 'user', content: text });
@@ -540,23 +589,40 @@ async function sendMessage() {
     } catch (err) {
         hideTyping();
         addMessage(
-            isOnline ? 'Connection error: ' + err.message
-                     : 'Cannot reach Gathm API. Start the server: gathm-api --port 8080',
+            'I can’t reach Gathm right now. Check that it is running, then try again.',
             'bot', 'bot-error'
         );
     } finally {
         isSending = false;
+        updateComposerState();
         sendBtn.disabled = false;
-        messageInput.focus();
+        if (!convoMode) messageInput.focus();
     }
 }
 
 sendBtn.addEventListener('click', sendMessage);
 
+if (clearBtn) clearBtn.addEventListener('click', function() {
+    if (clearBtn.disabled) return;
+    stopSpeaking();
+    clearChat();
+    messageInput.value = '';
+    autoGrow();
+    messageInput.focus();
+});
+
+document.querySelectorAll('[data-prompt]').forEach(function(button) {
+    button.addEventListener('click', function() {
+        messageInput.value = button.dataset.prompt;
+        autoGrow();
+        messageInput.focus();
+    });
+});
+
 // The input is a textarea now, so Enter has to be handled deliberately:
 // Enter sends, Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
 messageInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    if (e.key === 'Enter' && !e.isComposing && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         sendMessage();
     }
@@ -580,7 +646,6 @@ let audioCtx    = null;
 let analyser    = null;
 let micStream   = null;
 let rafId       = null;
-let voiceActive = false;
 
 // Recording rides along on the same graph that drives the visualiser, so voice
 // input needs no second getUserMedia and no second permission prompt.
@@ -605,9 +670,10 @@ async function checkTranscribe() {
         asrAvailable = false;
         asrReason = 'cannot reach the API';
     }
+    updateConvoBtn();
 }
 
-checkTranscribe().then(function() { updateConvoBtn(); });
+checkTranscribe();
 
 // The API wants 16 kHz mono 16-bit WAV — what the ASR models read. MediaRecorder
 // would give webm/opus and need ffmpeg on the server, so the PCM is captured
@@ -663,6 +729,7 @@ let recEl = null;
 let recTimer = null;
 
 function showRecording() {
+    syncConversationView(true);
     const wrapper = document.createElement('div');
     wrapper.className = 'message-wrapper user';
     wrapper.id = 'recordingWrapper';
@@ -709,6 +776,7 @@ function setRecordingLabel(text) {
 function hideRecording() {
     if (recTimer) { clearInterval(recTimer); recTimer = null; }
     if (recEl) { recEl.remove(); recEl = null; }
+    syncConversationView();
 }
 
 function chunkSeconds(chunks) {
@@ -720,6 +788,8 @@ function chunkSeconds(chunks) {
  * with something the user can act on. Shared by both voice modes.
  */
 async function transcribeChunks(chunks) {
+    isTranscribing = true;
+    updateComposerState();
     try {
         const res = await fetch(API_BASE + '/api/v1/transcribe', {
             method: 'POST',
@@ -734,6 +804,9 @@ async function transcribeChunks(chunks) {
         return text ? { text: text } : { error: '' };   // '' = heard nothing
     } catch (err) {
         return { error: err.message };
+    } finally {
+        isTranscribing = false;
+        updateComposerState();
     }
 }
 
@@ -782,115 +855,143 @@ async function startVoice() {
     // Re-entry would orphan the previous AudioContext and mic stream: the
     // globals below are the only handles on them, and starting again
     // overwrites both.
-    if (voiceActive) return;
+    if (voiceActive || voiceStarting) return;
+    const generation = ++voiceGeneration;
+    voiceStarting = true;
+    updateConvoBtn();
+    try {
+        stopSpeaking();               // don't record ourselves talking
 
-    stopSpeaking();               // don't record ourselves talking
-
-    // navigator.mediaDevices exists only in a secure context. Over plain HTTP
-    // that means localhost/127.0.0.1 ONLY — opening the GUI on the phone's LAN
-    // address gives an undefined mediaDevices and an inscrutable dead button.
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        const where = location.protocol + '//' + location.host;
-        addMessage('The browser will not give this page a microphone, because ' +
-                   where + ' is not a secure origin. Open the GUI as ' +
-                   'http://127.0.0.1:8080 (or over HTTPS) and the mic will work.',
-                   'bot', 'bot-error');
-        return;
-    }
-
-    // Say why voice input cannot work, rather than recording into a void.
-    if (!asrAvailable) {
-        await checkTranscribe();
-        if (!asrAvailable) {
-            // The server's reason is platform-specific — it knows whether a
-            // Termux rebuild is the fix or whether this platform has no
-            // transcription at all. Do not append advice of our own.
-            addMessage('Voice input is unavailable: ' +
-                       (asrReason || 'the server reports no speech-to-text engine') +
-                       '.', 'bot', 'bot-error');
+        // navigator.mediaDevices exists only in a secure context. Over plain HTTP
+        // that means localhost/127.0.0.1 ONLY — opening the GUI on the phone's LAN
+        // address gives an undefined mediaDevices and an inscrutable dead button.
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const where = location.protocol + '//' + location.host;
+            addMessage('The browser will not give this page a microphone, because ' +
+                       where + ' is not a secure origin. Open the GUI as ' +
+                       'http://127.0.0.1:8080 (or over HTTPS) and the mic will work.',
+                       'bot', 'bot-error');
             return;
         }
-    }
 
-    try {
-        micStream = await navigator.mediaDevices.getUserMedia({
-            // Without echo cancellation the mic hears the reply and the
-            // endpointer treats it as the user talking, so hands-free mode
-            // would interrupt itself on every answer.
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
-            video: false,
-        });
+        // Say why voice input cannot work, rather than recording into a void.
+        if (!asrAvailable) {
+            await checkTranscribe();
+            if (!asrAvailable) {
+                // The server's reason is platform-specific — it knows whether a
+                // Termux rebuild is the fix or whether this platform has no
+                // transcription at all. Do not append advice of our own.
+                addMessage('Voice input is unavailable: ' +
+                           (asrReason || 'the server reports no speech-to-text engine') +
+                           '.', 'bot', 'bot-error');
+                return;
+            }
+        }
+
+        if (generation !== voiceGeneration) return;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                // Without echo cancellation the mic hears the reply and the
+                // endpointer treats it as the user talking, so hands-free mode
+                // would interrupt itself on every answer.
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                },
+                video: false,
+            });
+            if (generation !== voiceGeneration) {
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
+            micStream = stream;
+        } catch (err) {
+            if (generation !== voiceGeneration) return;
+            addMessage('Microphone blocked: ' + (err && err.name ? err.name : 'denied') +
+                       '. Allow mic access for this site in the browser\'s site settings.',
+                       'bot', 'bot-error');
+            botStatus.textContent = 'Microphone access denied';
+            setTimeout(checkConnectivity, 3000);
+            return;
+        }
+
+        const context = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx = context;
+        // Mobile browsers hand back a suspended context; a suspended context runs
+        // no ScriptProcessor, so capture would silently produce zero samples.
+        if (context.state === 'suspended') {
+            try { await context.resume(); } catch (_) { /* best effort */ }
+        }
+        if (generation !== voiceGeneration) return;
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.75;
+
+        const src = audioCtx.createMediaStreamSource(micStream);
+        src.connect(analyser);
+
+        // Tap the same source for recording when the server can transcribe.
+        pcmChunks = [];
+        pcmRate = audioCtx.sampleRate;
+        if (asrAvailable && audioCtx.createScriptProcessor) {
+            recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
+            recorderNode.onaudioprocess = function(e) {
+                if (!voiceActive) return;
+                const frame = new Float32Array(e.inputBuffer.getChannelData(0));
+                if (convoMode) convoFrame(frame);
+                else pcmChunks.push(frame);
+            };
+            src.connect(recorderNode);
+            // A ScriptProcessor only runs while connected to the destination; the
+            // gain of zero keeps the mic from being played back through it.
+            const mute = audioCtx.createGain();
+            mute.gain.value = 0;
+            recorderNode.connect(mute);
+            mute.connect(audioCtx.destination);
+        }
+
+        voiceActive = true;
+        aiOrb.setAttribute('data-live', 'true');
+        setOrbState('listening');
+        micBtn.classList.add('active');
+        micBtn.setAttribute('aria-label', convoMode ? 'End voice conversation' : 'Send voice message');
+        micBtn.setAttribute('aria-pressed', 'true');
+        updateComposerState();
+        if (convoMode) {
+            botStatus.textContent = 'Listening… just talk.';
+        } else {
+            botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
+                                                 : 'Listening...';
+        }
+        if (recorderNode && !convoMode) {
+            // No bubble in conversation mode: its timer would count the whole
+            // session rather than one turn, and there is nothing to tap.
+            showRecording();
+        } else if (asrAvailable && !recorderNode) {
+            // ASR is available but this browser has no ScriptProcessor at all.
+            addMessage('This browser cannot capture audio for transcription ' +
+                       '(no ScriptProcessor support). The visualiser still works.',
+                       'bot', 'bot-error');
+        }
+
+        driveFrequency();
     } catch (err) {
-        addMessage('Microphone blocked: ' + (err && err.name ? err.name : 'denied') +
-                   '. Allow mic access for this site in the browser\'s site settings.',
-                   'bot', 'bot-error');
-        botStatus.textContent = 'Microphone access denied';
-        setTimeout(checkConnectivity, 3000);
-        return;
+        if (generation === voiceGeneration) {
+            stopVoice(true);
+            addMessage('Could not start voice capture. You can still type a message.', 'bot', 'bot-error');
+        }
+    } finally {
+        if (generation === voiceGeneration) {
+            voiceStarting = false;
+            updateConvoBtn();
+        }
     }
-
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    // Mobile browsers hand back a suspended context; a suspended context runs
-    // no ScriptProcessor, so capture would silently produce zero samples.
-    if (audioCtx.state === 'suspended') {
-        try { await audioCtx.resume(); } catch (_) { /* best effort */ }
-    }
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 64;
-    analyser.smoothingTimeConstant = 0.75;
-
-    const src = audioCtx.createMediaStreamSource(micStream);
-    src.connect(analyser);
-
-    // Tap the same source for recording when the server can transcribe.
-    pcmChunks = [];
-    pcmRate = audioCtx.sampleRate;
-    if (asrAvailable && audioCtx.createScriptProcessor) {
-        recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
-        recorderNode.onaudioprocess = function(e) {
-            if (!voiceActive) return;
-            const frame = new Float32Array(e.inputBuffer.getChannelData(0));
-            if (convoMode) convoFrame(frame);
-            else pcmChunks.push(frame);
-        };
-        src.connect(recorderNode);
-        // A ScriptProcessor only runs while connected to the destination; the
-        // gain of zero keeps the mic from being played back through it.
-        const mute = audioCtx.createGain();
-        mute.gain.value = 0;
-        recorderNode.connect(mute);
-        mute.connect(audioCtx.destination);
-    }
-
-    voiceActive = true;
-    aiOrb.setAttribute('data-live', 'true');
-    setOrbState(convoMode ? 'listening' : 'speaking');
-    micBtn.classList.add('active');
-    if (convoMode) {
-        botStatus.textContent = 'Listening… just talk.';
-    } else {
-        botStatus.textContent = asrAvailable ? 'Listening… tap the mic again to send'
-                                             : 'Listening...';
-    }
-    if (recorderNode && !convoMode) {
-        // No bubble in conversation mode: its timer would count the whole
-        // session rather than one turn, and there is nothing to tap.
-        showRecording();
-    } else if (asrAvailable && !recorderNode) {
-        // ASR is available but this browser has no ScriptProcessor at all.
-        addMessage('This browser cannot capture audio for transcription ' +
-                   '(no ScriptProcessor support). The visualiser still works.',
-                   'bot', 'bot-error');
-    }
-
-    driveFrequency();
 }
 
-function stopVoice() {
+function stopVoice(discard = false) {
+    voiceGeneration++;
+    voiceStarting = false;
     voiceActive = false;
     if (rafId) cancelAnimationFrame(rafId);
     if (micStream) micStream.getTracks().forEach(function(t) { t.stop(); });
@@ -900,7 +1001,7 @@ function stopVoice() {
         recorderNode = null;
     }
     const hadAudio = pcmChunks.length > 0;
-    if (audioCtx) audioCtx.close();
+    if (audioCtx) audioCtx.close().catch(() => {});
     audioCtx = null; analyser = null; micStream = null; rafId = null;
 
     mainOrb.style.transform = '';
@@ -909,8 +1010,10 @@ function stopVoice() {
     aiOrb.removeAttribute('data-live');
     setOrbState('idle');
     micBtn.classList.remove('active');
+    micBtn.setAttribute('aria-label', 'Dictate a message');
+    micBtn.setAttribute('aria-pressed', 'false');
 
-    if (convoMode) {
+    if (convoMode || discard) {
         // Conversation dispatches its own turns as they end; whatever is in the
         // buffer when the mic closes is a half-sentence, not a question.
         pcmChunks = [];
@@ -925,6 +1028,7 @@ function stopVoice() {
         }
         checkConnectivity();
     }
+    updateConvoBtn();
 }
 
 function driveFrequency() {
@@ -949,7 +1053,7 @@ function driveFrequency() {
 
 micBtn.addEventListener('click', function() {
     if (convoMode) { stopConversation(); return; }   // one voice mode at a time
-    if (voiceActive) stopVoice();
+    if (voiceActive || voiceStarting) stopVoice(voiceStarting);
     else startVoice();
 });
 
@@ -961,10 +1065,8 @@ micBtn.addEventListener('click', function() {
 // over an answer and it stops talking and listens instead.
 // =========================================================================
 
-let convoMode  = false;
 let convoVad   = null;
 let capturing  = false;     // inside a turn, keeping audio
-let turnBusy   = false;     // a turn is being transcribed/answered
 let preroll    = [];        // recent frames, so a turn does not lose its first
                             // syllable to the time it takes to be recognised
 
@@ -1026,13 +1128,16 @@ function convoFrame(frame) {
 
 async function handleTurn(chunks) {
     if (turnBusy) return;
+    const generation = conversationGeneration;
     turnBusy = true;
+    updateComposerState();
     try {
         if (chunkSeconds(chunks) < 0.4) return;     // not a sentence
         setOrbState('thinking');
         convoStatus('Transcribing…');
 
         const out = await transcribeChunks(chunks);
+        if (!convoMode || generation !== conversationGeneration) return;
         if (out.error) {
             convoStatus('Could not transcribe: ' + out.error);
             return;
@@ -1044,36 +1149,66 @@ async function handleTurn(chunks) {
 
         messageInput.value = out.text;
         autoGrow();
-        await sendMessage();
+        await sendMessage({ conversationGeneration: generation });
+        if (!convoMode || generation !== conversationGeneration) return;
         setOrbState('speaking');
         convoStatus('Speaking…');
         await speaking;                 // let the reply finish before listening
     } catch (err) {
-        convoStatus('Conversation error: ' + err.message);
+        if (generation === conversationGeneration) convoStatus('Conversation error: ' + err.message);
     } finally {
-        turnBusy = false;
-        capturing = false;
-        pcmChunks = [];
-        preroll = [];
-        if (convoMode && voiceActive) {
-            // rearm, not reset: re-measuring the room here would sample the
-            // user mid-sentence after a barge-in and go deaf to them.
-            convoVad.rearm();
-            setOrbState('listening');
-            convoStatus('Listening…');
+        if (generation === conversationGeneration) {
+            turnBusy = false;
+            capturing = false;
+            pcmChunks = [];
+            preroll = [];
+            updateComposerState();
+            if (convoMode && voiceActive) {
+                // rearm, not reset: re-measuring the room here would sample the
+                // user mid-sentence after a barge-in and go deaf to them.
+                convoVad.rearm();
+                setOrbState('listening');
+                convoStatus('Listening…');
+            }
         }
     }
 }
 
 function updateConvoBtn() {
     if (!convoBtn) return;
-    convoBtn.hidden = !asrAvailable;
+    convoBtn.hidden = false;
+    convoBtn.disabled = !convoMode && (!asrAvailable || voiceStarting);
     convoBtn.classList.toggle('active', convoMode);
+    convoBtn.setAttribute('aria-pressed', String(convoMode));
     convoBtn.setAttribute('aria-label',
         convoMode ? 'End voice conversation' : 'Start voice conversation');
     convoBtn.innerHTML = '<i data-lucide="' + (convoMode ? 'square' : 'radio') +
-                         '" class="btn-icon"></i>';
+                         '" class="btn-icon"></i><span>' +
+                         (convoMode ? 'End conversation' : 'Talk to Gathm') + '</span>';
+    micBtn.disabled = !asrAvailable && !voiceActive && !voiceStarting;
+    micBtn.setAttribute('aria-label', voiceStarting ? 'Cancel microphone request' :
+        voiceActive ? (convoMode ? 'End voice conversation' : 'Send voice message') : 'Dictate a message');
+    updateComposerState();
+    updateVoiceHint();
     refreshIcons();
+}
+
+function updateVoiceHint() {
+    if (!voiceHint) return;
+    if (voiceStarting) {
+        voiceHint.textContent = 'Waiting for microphone permission. You can cancel at any time.';
+    } else if (voiceActive) {
+        voiceHint.textContent = convoMode
+            ? 'Your microphone is on. Speak naturally, or end the conversation.'
+            : 'Your microphone is on. Tap the mic again to send your message.';
+    } else if (!asrAvailable) {
+        voiceHint.textContent = 'Voice is unavailable right now. You can still type below.';
+    } else if (!speechAvailable || !speakEnabled) {
+        voiceHint.textContent = 'Speak to Gathm; replies appear in chat' +
+            (speechAvailable ? ' while the speaker is muted.' : '. Spoken replies are unavailable.');
+    } else {
+        voiceHint.textContent = 'Your microphone stays off until you start.';
+    }
 }
 
 async function startConversation() {
@@ -1088,6 +1223,7 @@ async function startConversation() {
         }
     }
     convoMode = true;
+    const generation = ++conversationGeneration;
     convoVad = new GathmVAD.VAD();
     capturing = false;
     turnBusy = false;
@@ -1100,6 +1236,7 @@ async function startConversation() {
     // was never closed and never disconnected — an orphaned audio graph and a
     // live microphone with nothing holding a reference to stop them.
     if (!voiceActive) await startVoice();
+    if (!convoMode || generation !== conversationGeneration) return;
     if (!voiceActive) {                  // blocked mic, insecure origin, …
         convoMode = false;
         updateConvoBtn();
@@ -1118,12 +1255,13 @@ async function startConversation() {
 
 function stopConversation() {
     convoMode = false;
+    conversationGeneration++;
     capturing = false;
     turnBusy = false;
     preroll = [];
     convoVad = null;
     stopSpeaking();
-    if (voiceActive) stopVoice();
+    if (voiceActive || voiceStarting) stopVoice(true);
     updateConvoBtn();
     setOrbState('idle');
     checkConnectivity();

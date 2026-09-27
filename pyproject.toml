@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "gathm"
 version = "3.0.0"
-description = "Local-first command intelligence for security, networking and operator workflows"
+description = "A local-first personal AI assistant with voice, chat, and tools when needed"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "hakxcore" }]
-keywords = ["cli", "security", "networking", "llm", "llama.cpp", "ollama", "termux", "agent"]
+keywords = ["assistant", "voice", "chat", "cli", "llm", "llama.cpp", "ollama", "termux", "agent"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",

@@ -74,7 +74,7 @@ run() {
 echo "== dispatch =="
 out=$(run --version);              check "--version prints version" "$out" "gathm v"
 out=$(run help)
-check "help documents the GUI default"  "$out" "Start the web GUI"
+check "help documents the GUI default"  "$out" "Start Gathm in your browser"
 check "help documents stop"             "$out" "gathm stop"
 absent "help no longer mentions dialog" "$out" "dialog"
 out=$(run tui);                    check "tui execs Pilot" "$out" "PILOT_STARTED"
@@ -156,7 +156,7 @@ mv "$FIX/pilot/run.sh" "$FIX/pilot/run.sh.off"
 out=$(run tui)
 # Preflight now catches this before anything is started, so the wording is
 # its own rather than launch_pilot's later "Pilot not found".
-check "missing Pilot is reported"      "$out" "Pilot is missing"
+check "missing assistant is reported"  "$out" "terminal assistant is missing"
 absent "and nothing was started"       "$out" "PILOT_STARTED"
 mv "$FIX/pilot/run.sh.off" "$FIX/pilot/run.sh"
 
@@ -277,7 +277,7 @@ llm_env stop >/dev/null 2>&1
 
 # Nothing installed: a warning that names the fix, and Gathm still starts.
 out=$(HOME="$FIX/home" GATHM_GUI_PORT="$PORT" GATHM_CONFIG_DIR="$FIX/home/.gathm"       GATHM_LLM_BACKEND=llamacpp GATHM_LLAMACPP_BIN="$FIX/nope"       GATHM_LLAMACPP_MODEL_DIR="$FIX/empty"       timeout 60 bash "$FIX/gathm" --no-browser --no-gui 2>&1)
-check "missing runtime or weights is a warning" "$out" "Pilot cannot answer questions"
+check "missing runtime or weights is a warning" "$out" "Gathm cannot answer questions"
 check "and Gathm still starts"            "$out" "PILOT_STARTED"
 
 # Installed, but no weights — a different problem with a different fix.

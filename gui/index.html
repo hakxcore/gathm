@@ -2,79 +2,105 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gathm AI</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Plus+Jakarta+Sans:wght@700&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#131615">
+    <meta name="description" content="Gathm is your personal AI assistant. Talk something through, make a plan, learn, or get help with everyday tasks.">
+    <title>Gathm — Your personal assistant</title>
     <script src="icons.js"></script>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="app">
+        <header class="app-header">
+            <a class="brand" href="./" aria-label="Gathm home">
+                <span class="brand-mark" aria-hidden="true">g</span>
+                <span class="brand-name">gathm<span class="brand-description">Your personal AI assistant</span></span>
+            </a>
+            <span class="connection-status" id="connectionStatus" role="status">Connecting</span>
+        </header>
 
-        <!-- ── Orb hero ─────────────────────────────────────── -->
-        <div class="orb-scene">
-            <div class="ai-orb idle" id="aiOrb">
-                <div class="orb-ambient"></div>
-                <div class="orb-wrapper" id="orbWrapper">
-                    <div class="orb-ring ring-1"></div>
-                    <div class="orb-ring ring-2"></div>
-                    <div class="orb-ring ring-3"></div>
-                    <div class="main-orb" id="mainOrb">
-                        <div class="orb-swirl"></div>
-                        <div class="orb-gloss"></div>
+        <main class="workspace">
+            <section class="companion" aria-labelledby="companionTitle">
+                <div class="companion-intro">
+                    <p class="eyebrow">A little help. A clearer head.</p>
+                    <h1 id="companionTitle">What’s on<br>your mind?</h1>
+                    <p class="companion-description">Talk it through, find the words,<br>or work out your next step.</p>
+                </div>
+
+                <div class="orb-scene" aria-hidden="true">
+                    <div class="ai-orb idle" id="aiOrb">
+                        <div class="orb-ambient"></div>
+                        <div class="orb-wrapper" id="orbWrapper">
+                            <div class="orb-ring ring-1"></div>
+                            <div class="orb-ring ring-2"></div>
+                            <div class="main-orb" id="mainOrb"><div class="orb-gloss"></div></div>
+                        </div>
+                        <div class="freq-bars" id="freqBars">
+                            <div class="fb"></div><div class="fb"></div><div class="fb"></div><div class="fb"></div>
+                            <div class="fb"></div><div class="fb"></div><div class="fb"></div><div class="fb"></div>
+                        </div>
                     </div>
                 </div>
-                <div class="freq-bars" id="freqBars">
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
-                    <div class="fb"></div>
+
+                <p class="orb-status" id="botStatus" role="status" aria-live="polite">Getting ready…</p>
+                <div class="voice-controls">
+                    <button class="convo-btn" id="convoBtn" aria-label="Start voice conversation" aria-pressed="false" disabled>
+                        <i data-lucide="radio" class="btn-icon"></i><span>Talk to Gathm</span>
+                    </button>
+                    <button class="action-btn speak-btn" id="speakBtn" aria-label="Read replies aloud" aria-pressed="false" hidden>
+                        <i data-lucide="volume-2" class="btn-icon"></i>
+                    </button>
                 </div>
-            </div>
-            <h1 class="orb-name">Gathm AI</h1>
-            <p class="orb-status" id="botStatus">Checking…</p>
-        </div>
+                <p class="voice-hint" id="voiceHint">Checking voice availability…</p>
+                <p class="companion-note">Conversation comes first.<br>Tools lend a hand when you need them.</p>
+            </section>
 
-        <!-- ── Chat messages ────────────────────────────────── -->
-        <div class="messages-area" id="chatArea"></div>
+            <section class="conversation" aria-labelledby="conversationTitle">
+                <header class="conversation-header">
+                    <div><h2 id="conversationTitle">Our conversation</h2><p>A place for your thoughts and the next step.</p></div>
+                    <button class="quiet-btn" id="clearBtn" aria-label="Clear chat" title="Clear this conversation">
+                        <i data-lucide="rotate-ccw" class="btn-icon"></i><span>Clear</span>
+                    </button>
+                </header>
 
-        <!-- ── Input ────────────────────────────────────────── -->
-        <div class="input-area">
-            <div class="input-row">
-                <div class="text-input-wrapper">
-                    <!-- textarea, not input: a long prompt has to stay readable
-                         while it is being typed. Grows to a few lines, then
-                         scrolls. Enter sends, Shift+Enter makes a newline. -->
-                    <textarea id="messageInput" rows="1"
-                              placeholder="Ask anything…  (/clear to reset)"
-                              autocomplete="off"></textarea>
+                <div class="conversation-content">
+                    <div class="empty-state" id="emptyState">
+                        <span class="empty-mark" aria-hidden="true"><i data-lucide="sparkles" class="btn-icon"></i></span>
+                        <h3>Start anywhere.</h3>
+                        <p>A question, a rough idea, a little too much on your plate. We can take it one step at a time.</p>
+                        <div class="suggestions" aria-label="Conversation starters">
+                            <button class="suggestion" data-prompt="Help me make a simple plan for my day. Ask me what I need to get done first.">
+                                <i data-lucide="sun" class="btn-icon"></i><span><strong>Make room in my day</strong><small>Turn a busy mind into a simple plan</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span>
+                            </button>
+                            <button class="suggestion" data-prompt="Help me find the right words for a message. Ask me who it is for and what I want to say.">
+                                <i data-lucide="pen-line" class="btn-icon"></i><span><strong>Find the right words</strong><small>A message, an idea, a fresh start</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span>
+                            </button>
+                            <button class="suggestion" data-prompt="Help me understand something new. Ask me what I am curious about, then explain it simply.">
+                                <i data-lucide="lightbulb" class="btn-icon"></i><span><strong>Follow my curiosity</strong><small>Make something complicated feel clear</small></span><span class="suggestion-arrow" aria-hidden="true">↗</span>
+                            </button>
+                        </div>
+                        <p class="starter-hint">Choose a starting point, or just say hello.</p>
+                    </div>
+                    <div class="messages-area" id="chatArea" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" tabindex="0" hidden></div>
                 </div>
-                <button class="action-btn send-btn" id="sendBtn" aria-label="Send">
-                    <i data-lucide="send" class="btn-icon"></i>
-                </button>
-                <button class="action-btn mic-btn" id="micBtn" aria-label="Voice input">
-                    <i data-lucide="mic" class="btn-icon"></i>
-                </button>
-                <!-- Hands-free: listens, answers, listens again. Shown only
-                     when the server can both transcribe and speak. -->
-                <button class="action-btn convo-btn" id="convoBtn"
-                        aria-label="Start voice conversation" hidden>
-                    <i data-lucide="radio" class="btn-icon"></i>
-                </button>
-                <!-- Shown only when the server reports a working voice runtime -->
-                <button class="action-btn speak-btn" id="speakBtn"
-                        aria-label="Speak replies" hidden>
-                    <i data-lucide="volume-2" class="btn-icon"></i>
-                </button>
-            </div>
-        </div>
 
+                <div class="input-area">
+                    <div class="input-row">
+                        <label class="sr-only" for="messageInput">Message Gathm</label>
+                        <textarea id="messageInput" rows="1" placeholder="Or type what’s on your mind…" autocomplete="off"></textarea>
+                        <div class="composer-actions">
+                            <button class="action-btn mic-btn" id="micBtn" aria-label="Dictate a message" title="Dictate a message" disabled>
+                                <i data-lucide="mic" class="btn-icon"></i>
+                            </button>
+                            <button class="action-btn send-btn" id="sendBtn" aria-label="Send message" title="Send message">
+                                <i data-lucide="arrow-up" class="btn-icon"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <p class="input-hint"><span>Enter to send · Shift + Enter for a new line</span><span>Voice and text, together.</span></p>
+                </div>
+            </section>
+        </main>
     </div>
     <script src="markdown.js"></script>
     <script src="vad.js"></script>

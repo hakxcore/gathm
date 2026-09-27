@@ -86,13 +86,13 @@ function startStubServer(calls) {
             req.on('data', function (d) { body.push(d); });
             req.on('end', function () {
                 const raw = Buffer.concat(body);
-                let text = '';
-                if (url === '/api/v1/speech') {
-                    try { text = JSON.parse(raw.toString()).text || ''; }
-                    catch (_) { text = ''; }
-                }
+                let payload = {};
+                try { payload = JSON.parse(raw.toString()); }
+                catch (_) { /* audio and GET requests are not JSON */ }
+                const text = payload.text || '';
                 calls.push({ url: url, method: req.method, bytes: raw.length,
-                             text: text, at: Date.now() });
+                             text: text, query: payload.query, history: payload.history,
+                             at: Date.now() });
 
                 if (url === '/api/v1/ping') return json({ ok: true });
                 if (url === '/api/v1/transcribe/status')
@@ -138,6 +138,120 @@ function startStubServer(calls) {
             resolve({ server: server, port: server.address().port });
         });
     });
+}
+
+async function screenshot(page, name) {
+    const directory = process.env.GATHM_SCREENSHOT_DIR;
+    if (!directory) return;
+    fs.mkdirSync(directory, { recursive: true });
+    await page.screenshot({ path: path.join(directory, name + '.png'), fullPage: true });
+}
+
+/** Use isolated browser storage so these cases cannot affect voice counts. */
+async function assistantInterfaceChecks(browser, base, calls, errors) {
+    const page = await browser.newPage();
+    page.on('pageerror', function (error) { errors.push(String(error)); });
+    await page.addInitScript(function () { localStorage.setItem('gathmSpeak', '0'); });
+    const chatCalls = function () {
+        return calls.filter(function (call) { return call.url === '/api/v1/agent/chat'; });
+    };
+    try {
+        await page.goto(base + '/', { waitUntil: 'load' });
+        await page.waitForSelector('#convoBtn:not([disabled])');
+        for (const width of [375, 768, 1024, 1440]) {
+            await page.setViewportSize({ width: width, height: width === 375 ? 812 : 900 });
+            const fits = await page.evaluate(function () {
+                return Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+                    <= window.innerWidth + 1;
+            });
+            ok('the interface has no horizontal overflow at ' + width + ' px', fits);
+            await screenshot(page, 'assistant-empty-' + width);
+        }
+
+        const beforeStarters = chatCalls().length;
+        const starters = page.locator('[data-prompt]');
+        const count = await starters.count();
+        ok('conversation starters are offered', count > 0);
+        for (let i = 0; i < count; i++) {
+            const button = starters.nth(i);
+            const prompt = await button.getAttribute('data-prompt');
+            await button.click();
+            check('starter ' + (i + 1) + ' fills the composer',
+                  await page.inputValue('#messageInput'), prompt);
+        }
+        check('choosing starters does not send a request', chatCalls().length, beforeStarters);
+        check('choosing starters does not create transcript messages',
+              await page.locator('#chatArea .message-wrapper').count(), 0);
+        ok('the selected starter is ready to edit', await page.locator('#messageInput').evaluate(
+            function (element) { return document.activeElement === element; }));
+
+        const query = 'Help me make a small plan for tomorrow.';
+        await page.fill('#messageInput', query);
+        await page.click('#sendBtn');
+        await page.waitForFunction('!isSending && history.length === 2');
+        check('sending text makes one chat request', chatCalls().length, beforeStarters + 1);
+        check('the exact message reaches the assistant', chatCalls().slice(-1)[0].query, query);
+        check('the transcript shows user and assistant messages',
+              await page.locator('#chatArea .message-wrapper').count(), 2);
+        ok('sending replaces the starter view with the transcript',
+           await page.locator('#emptyState').isHidden() && await page.locator('#chatArea').isVisible());
+        await screenshot(page, 'assistant-chat-1440');
+        await page.setViewportSize({ width: 375, height: 812 });
+        await screenshot(page, 'assistant-chat-375');
+
+        await page.reload({ waitUntil: 'load' });
+        check('reload restores both transcript messages',
+              await page.locator('#chatArea .message-wrapper').count(), 2);
+        ok('reload preserves the user text', (await page.locator('#chatArea').innerText()).includes(query));
+        await page.fill('#messageInput', 'Make that simpler.');
+        await page.press('#messageInput', 'Enter');
+        await page.waitForFunction('!isSending && history.length === 4');
+        check('follow-up sends the restored context', chatCalls().slice(-1)[0].history,
+              [{ role: 'user', content: query }, { role: 'assistant', content: REPLY }]);
+
+        await page.click('#clearBtn');
+        check('clear removes transcript messages', await page.locator('#chatArea .message-wrapper').count(), 0);
+        ok('clear restores the starters', await page.locator('#emptyState').isVisible());
+        check('clear removes the saved conversation',
+              await page.evaluate(function () { return localStorage.getItem('gathmChat'); }), null);
+        await page.reload({ waitUntil: 'load' });
+        check('a cleared transcript stays empty after reload',
+              await page.locator('#chatArea .message-wrapper').count(), 0);
+        await page.fill('#messageInput', 'A fresh conversation.');
+        await page.click('#sendBtn');
+        await page.waitForFunction('!isSending && history.length === 2');
+        check('clear also removes model conversation context', chatCalls().slice(-1)[0].history, []);
+    } finally {
+        await page.close();
+    }
+
+    const textOnly = await browser.newPage();
+    textOnly.on('pageerror', function (error) { errors.push(String(error)); });
+    await textOnly.route(/\/api\/v1\/(speech|transcribe)\/status$/, function (route) {
+        return route.fulfill({ status: 200, contentType: 'application/json',
+                               body: JSON.stringify({ available: false, reason: 'No voice engine installed' }) });
+    });
+    try {
+        await textOnly.goto(base + '/', { waitUntil: 'load' });
+        await textOnly.waitForFunction(function () {
+            return document.getElementById('voiceHint').textContent.includes('unavailable');
+        });
+        ok('unavailable voice is shown without disabling text',
+           await textOnly.locator('#convoBtn').isDisabled() &&
+           await textOnly.locator('#micBtn').isDisabled() &&
+           await textOnly.locator('#messageInput').isEnabled() &&
+           await textOnly.locator('#sendBtn').isEnabled());
+        const beforeTextOnly = chatCalls().length;
+        await textOnly.fill('#messageInput', 'Explain photosynthesis simply.');
+        await textOnly.click('#sendBtn');
+        await textOnly.waitForFunction('!isSending && history.length === 2');
+        check('text still receives a reply when voice is unavailable',
+              chatCalls().length, beforeTextOnly + 1);
+        ok('the text-only reply is visible', (await textOnly.locator('#chatArea').innerText()).includes(REPLY));
+        await screenshot(textOnly, 'assistant-voice-unavailable');
+    } finally {
+        await textOnly.close();
+    }
 }
 
 async function main() {
@@ -213,29 +327,51 @@ async function main() {
                     ctx: ctx,
                     speak: function (on) { gain.gain.value = on ? LOUD : QUIET; },
                 };
-                return Promise.resolve(dest.stream);
+                // A synthetic microphone owns a second AudioContext. Resume it
+                // explicitly, as the app can only resume its capture context.
+                return ctx.resume().then(function () { return dest.stream; });
             };
         });
 
         await page.goto(base + '/', { waitUntil: 'load' });
         await page.waitForFunction('typeof GathmVAD !== "undefined"',
                                    null, { timeout: 5000 });
+        await page.evaluate(function () {
+            const push = GathmVAD.VAD.prototype.push;
+            window.__frames = 0;
+            window.__peakLevel = 0;
+            window.__vadEvents = [];
+            GathmVAD.VAD.prototype.push = function (level, now, speaking) {
+                window.__frames++;
+                window.__lastLevel = level;
+                window.__peakLevel = Math.max(window.__peakLevel, level);
+                const event = push.call(this, level, now, speaking);
+                if (event) window.__vadEvents.push(event);
+                return event;
+            };
+        });
         ok('the endpointer module loads in the page', true);
 
         // The conversation button appears once the server reports ASR.
-        await page.waitForSelector('#convoBtn:not([hidden])', { timeout: 5000 });
+        await page.waitForSelector('#convoBtn:not([hidden]):not([disabled])', { timeout: 5000 });
         ok('the conversation button is offered when ASR is available', true);
 
         await page.click('#convoBtn');
-        await page.waitForFunction('window.__mic && typeof convoMode !== "undefined" && convoMode',
-                                   null, { timeout: 5000 });
+        await page.waitForFunction(function () {
+            return window.__mic && convoMode && voiceActive && !voiceStarting &&
+                audioCtx.state === 'running' && window.__mic.ctx.state === 'running' &&
+                convoVad && convoVad.state === 'idle' && window.__frames >= 3;
+        }, null, { timeout: 10000 });
         ok('the conversation is live and the mic is open', true);
+        ok('clearing is disabled while live capture owns the transcript',
+           await page.locator('#clearBtn').isDisabled());
 
         // Let the endpointer measure the room, then say something, then stop.
         // Nothing is clicked from here on: this is the whole point of the mode.
-        await page.waitForTimeout(900);
         await page.evaluate(function () { window.__mic.speak(true); });
-        await page.waitForTimeout(1500);
+        await page.waitForFunction('capturing && convoVad.state === "speech"',
+                                   null, { timeout: 10000 });
+        await page.waitForTimeout(1200);
         await page.evaluate(function () { window.__mic.speak(false); });
         // Watch for the first moment audio is playing, to compare against the
         // server-side timestamps of the speech requests.
@@ -281,6 +417,10 @@ async function main() {
                                 ? window.__lastLevel : 'n/a',
                     frames: (typeof window.__frames !== 'undefined')
                                 ? window.__frames : 'n/a',
+                    peakLevel: window.__peakLevel,
+                    vadEvents: window.__vadEvents,
+                    sourceAudioState: window.__mic && window.__mic.ctx.state,
+                    captureAudioState: audioCtx && audioCtx.state,
                 };
             }).catch(function (e) { return { evalError: String(e) }; });
             console.log('       page state: ' + JSON.stringify(diag));
@@ -322,7 +462,7 @@ async function main() {
         ok('the reply was split into several requests, not one',
            speechCalls.length > 1);
         check('the first request is only the first sentence',
-              speechCalls[0].text, FIRST_SENTENCE);
+              speechCalls[0] && speechCalls[0].text, FIRST_SENTENCE);
         ok('every request is shorter than the whole reply',
            speechCalls.every(function (c) { return c.text.length < REPLY.length; }));
         ok('what has been requested so far is a prefix of the reply',
@@ -394,6 +534,8 @@ async function main() {
                                           function () { return false; });
         ok('stopping ends the conversation', stopped);
 
+        await page.close();
+        await assistantInterfaceChecks(browser, base, calls, errors);
         check('no page errors', errors, []);
     } finally {
         await browser.close();

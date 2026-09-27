@@ -464,8 +464,9 @@ def test_prompt_tells_the_model_the_platform():
        "sw_vers" in help_text and "pkg" in help_text)
     ok("and against chaining to dodge the prompt",
        "chaining" in help_text)
-    ok("the browser help was renumbered so both can coexist",
-       pilot_main._BROWSER_HELP.lstrip().startswith("14."))
+    ok("browser guidance is separate from device guidance",
+       pilot_main._BROWSER_HELP.lstrip().startswith("WEB ACCESS:")
+       and pilot_main._SYSTEM_HELP.lstrip().startswith("DEVICE ACCESS:"))
 
 
 def wtier(command):
@@ -782,19 +783,20 @@ def test_a_missing_system_prefix_is_recovered():
 
 
 def test_the_prompt_says_to_act_not_explain():
-    print("\nthe prompt tells the model to do it, not describe it")
+    print("\nthe prompt distinguishes requested actions from direct answers")
     pilot_main = pilot_main_module()
     if pilot_main is None:
         return
     src = pilot_main._SYSTEM_HELP + open(
         os.path.join(ROOT, "pilot", "main.py")).read()
-    ok("there is a do-not-describe rule", "DO IT, DO NOT DESCRIBE IT" in src)
+    ok("requested actions use their tool", "use its tool when available" in src)
     # gemma3:1b answered "33%" for free disk, "1" for cpu cores, and "the file
     # was created" for a mkdir it never ran — with an empty audit log proving
     # nothing executed. A fabricated result is worse than no answer.
     ok("and a rule against claiming to have run things",
-       "NEVER CLAIM YOU RAN SOMETHING YOU DID NOT RUN" in src)
-    ok("with the failing example in it", "ls ~/Desktop" in src)
+       "Never claim a lookup or action succeeded without its actual result" in src)
+    ok("proposals stay proposals until confirmed by a result",
+       "a proposed action as a proposal until a result confirms it" in src)
     ok("and a rule against arithmetic on command output",
        "do not do arithmetic on it" in pilot_main._SYSTEM_HELP)
 
@@ -949,8 +951,8 @@ def test_machine_questions_reach_the_system_tool():
     # because that is also where the platform line lives.
     picked = pilot_main._shortlist_tools("zzzz qqqq wwww", tools)
     ok("the no-signal fallback includes it", "system" in picked)
-    ok("...without dropping the everyday tools",
-       "weather" in picked and "websearch" in picked)
+    ok("...with web access and no guessed specialist lookup",
+       picked == ["websearch", "system"])
 
     ok("the extra vocabulary is index-only, not shown to the model",
        "macos" not in pilot_main.BUILTIN_TOOLS["system"].lower())

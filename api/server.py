@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gathm Enterprise - REST API Server (FastAPI)
-Exposes all Gathm tools via HTTP endpoints for programmatic access.
+Gathm Personal AI Assistant - REST API Server (FastAPI)
+Conversation, voice, and optional tools over HTTP.
 Cross-platform: Linux (all distros), macOS, Termux, Windows (WSL/Git Bash/MSYS2)
 
 Usage:
@@ -10,12 +10,15 @@ Usage:
     uvicorn api.server:app --port 8080
 
 Endpoints:
+    POST /api/v1/agent/chat             - Assistant conversation with history
+    POST /api/v1/transcribe             - Transcribe a voice message
+    POST /api/v1/speech                 - Speak an assistant reply
     GET  /api/v1/tools                  - List all tools
     GET  /api/v1/tools/{name}           - Get tool metadata
     POST /api/v1/tools/{name}/execute   - Execute a tool
     GET  /api/v1/health                 - System health check (authorized)
     GET  /api/v1/health/{tool}          - Tool health check
-    POST /api/v1/agent/ask              - Natural language query
+    POST /api/v1/agent/ask              - Legacy keyword-based tool query
     POST /api/v1/agent/plan             - Create execution plan
     POST /api/v1/agent/engineer         - Engineering agent task
     POST /api/v1/agent/chain            - Execute tool pipeline
@@ -428,7 +431,8 @@ def run_chat_agent(query: str, history: list = None, timeout: int | None = None)
 
     Shells out to pilot/chat_once.py using the Pilot venv's Python so the
     stdlib-only API server stays dependency-free. Returns {"reply": ...} on
-    success, or {"error": ...} which the caller can fall back on.
+    success, or {"error": ...} when the assistant is unavailable. Callers must
+    show that failure rather than retrying conversation through a tool router.
     """
     if timeout is None:
         timeout = CHAT_TIMEOUT
@@ -707,9 +711,9 @@ class BodyLimitMiddleware:
 
 
 app = FastAPI(
-    title="Gathm Enterprise API",
+    title="Gathm Assistant API",
     version=API_VERSION,
-    description="Orchestrate security, networking, and data tools via REST.",
+    description="Talk with your personal AI assistant, use voice, and call tools when needed.",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
@@ -953,12 +957,11 @@ async def agent_ask(body: QueryRequest, request: Request):
 
 @app.post("/api/v1/agent/chat", tags=["agent"])
 async def agent_chat(body: ChatRequest, request: Request):
-    """Talk to the real Pilot LLM agent for one turn, with history.
+    """Talk to the assistant for one turn, with conversation history.
 
-    run_chat_agent() and pilot/chat_once.py were both written for this route,
-    but the route itself was never registered — so the GUI's POST fell through
-    to the StaticFiles mount at "/", which only serves GET/HEAD, and came back
-    405 Method Not Allowed instead of a reply.
+    Model failures remain errors. Never interpret a failed conversation as a
+    keyword-based tool request: ordinary writing or planning can mention tools
+    without asking to execute them.
 
     Runs in a thread: run_chat_agent uses blocking subprocess.run, and calling
     it directly here would stall the event loop for the whole turn.
@@ -1300,18 +1303,19 @@ async def ping():
 @app.get("/api", tags=["meta"])
 async def api_info():
     return {
-        "name": "Gathm Enterprise API",
+        "name": "Gathm Assistant API",
         "version": API_VERSION,
         "auth": "Set GATHM_API_KEYS=token:role,... or GATHM_API_KEY=token (admin) to enable",
         "docs": "/api/docs",
         "endpoints": {
+            "POST /api/v1/agent/chat": "Assistant conversation with history and optional tools",
             "GET /api/v1/tools": "List all tools",
             "GET /api/v1/tools/{name}": "Get tool metadata",
             "POST /api/v1/tools/{name}/execute": "Execute a tool (synchronous)",
             "GET /api/v1/ping": "Liveness probe (public)",
             "GET /api/v1/health": "System health check (authorized)",
             "GET /api/v1/health/{tool}": "Tool health check",
-            "POST /api/v1/agent/ask": "Natural language query",
+            "POST /api/v1/agent/ask": "Legacy keyword-based tool query",
             "POST /api/v1/agent/plan": "Create execution plan",
             "POST /api/v1/agent/engineer": "Engineering agent task",
             "POST /api/v1/agent/chain": "Execute tool pipeline",
@@ -1370,7 +1374,7 @@ def main():
 
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║       Gathm Enterprise API Server v{API_VERSION}       ║
+║       Gathm Assistant API Server v{API_VERSION}        ║
 ╠══════════════════════════════════════════════════╣
 ║  Host: {host:<41s} ║
 ║  Port: {port:<41d} ║

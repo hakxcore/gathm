@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gathm Enterprise — Unified LLM Provider
+Gathm — Unified LLM Provider
 Single source of truth for model/backend resolution and client construction.
 
 Both Pilot (LangChain) and Engineer (AutoGen) import from here, keeping
@@ -9,10 +9,11 @@ model selection, API key lookup, and base-URL config in one place.
 Backends
 --------
   llamacpp   llama.cpp's own llama-server — the fast local path, and the
-             default on macOS, Linux and Windows once './install' has put a
-             binary and a GGUF in place. See lib/llamacpp.py.
-  ollama     the older local path. Still supported everywhere, and still the
-             default on Termux, where llama.cpp is not built.
+             preferred local default when a server is usable or './install'
+             has put a binary and a GGUF in place, including on Termux.
+             Explicit backend settings take priority. See lib/llamacpp.py.
+  ollama     an alternative local backend, used when nothing else is selected
+             and llama.cpp is unavailable.
   gemini     Google's hosted models (free tier)
   anthropic  Claude
 

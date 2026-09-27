@@ -66,6 +66,7 @@ jobs:
           node tests/chunker_test.js
           node tests/vad_test.js
           node tests/speech_browser_test.js
+          node tests/voice_lifecycle_test.js
 
       - name: Launcher suite
         run: bash tests/launcher_test.sh
