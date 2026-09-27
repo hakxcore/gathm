@@ -90,6 +90,7 @@ def stop_speaking() -> None:
 
 # Rich color tokens (used in markup strings)
 _C_ACCENT   = "color(208)"   # saffron orange
+_C_LOGO     = "color(40)"    # original Gathm green
 _C_SUCCESS  = "color(114)"   # soft green
 _C_ERROR    = "color(203)"   # red
 _C_MUTED    = "color(246)"   # readable gray
@@ -101,6 +102,12 @@ _A_DIM     = "\033[2m"
 _A_RESET   = "\033[0m"
 
 _SPINNER = "◜◝◞◟"
+
+GATHM_ASCII = r"""   ___      _   _
+  / _ \__ _| |_| |__  _ __ ___
+ / /_\/ _` | __| '_ \| '_ ` _ \
+/ /_\\ (_| | |_| | | | | | | | |
+\____/\__,_|\__|_| |_|_| |_| |_|"""
 
 # ── Console ──────────────────────────────────────────────────────
 console = Console(highlight=False, markup=True)
@@ -198,7 +205,13 @@ def render_welcome(model_name: str, tool_count: int, platform: str,
         connectivity = check_connectivity()
 
     content = Text()
-    content.append("Gathm\n", style=f"bold {_C_ACCENT}")
+    # Account for the panel border, padding, and outer margin so the original
+    # wordmark stays intact on phone terminals instead of wrapping its lines.
+    content_width = min(_terminal_width() - 2, 76) - 6
+    if content_width >= max(map(len, GATHM_ASCII.splitlines())):
+        content.append(GATHM_ASCII + "\n\n", style=_C_LOGO)
+    else:
+        content.append("Gathm\n", style=f"bold {_C_LOGO}")
     content.append("Your personal AI assistant\n\n", style="bold default")
     content.append(
         "Plan, write, learn, or talk things through.\n\n", style="default"
