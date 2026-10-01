@@ -1,9 +1,13 @@
 # Routing benchmark
 
-Pilot's slowest step is not writing the answer — it is deciding which tool the
-question needs. The agent has to describe its tools before the model can choose
-one, and on CPU that prefill is the wait. The repo's own figures put a vague
-question at ~2 KB / ~500 tokens of tool text, every turn.
+This harness measures the cost and accuracy of selecting a tool. Describing
+tools to a generative model adds prompt processing time, especially on a CPU.
+The benchmark isolates that decision; it does not measure a full conversation.
+
+**Laya is experimental and benchmark-only.** Neither the GUI nor the TUI calls
+it. Both use Pilot's keyword shortlist and configured LLM. Installing Laya
+enables this benchmark, not a new chat routing mode. Laya needs its own Python
+runtime dependencies and checkpoints; it does not reuse a llama.cpp GGUF.
 
 Tool selection is a classification problem being solved by a generative model.
 This harness measures whether something cheaper does it as well.
@@ -27,8 +31,10 @@ python3 bench/route_bench_test.py         # the harness's own arithmetic
 Every router sees the same questions and the same shortlist. Only the final
 pick differs — that is the only way the comparison means anything.
 
-A router that is unavailable is skipped with the reason, so the harness runs
-with no LLM, with no laya, or with neither.
+A router that is unavailable is skipped with the reason, so the harness can run
+the available alternatives. It exits unsuccessfully if none ran or if inference
+raised an error. Requested JSON output includes skipped reasons even when no
+router ran. Failed calls are excluded from latency statistics.
 
 ## Reading the result
 
@@ -48,16 +54,22 @@ neighbouring tool is a plausible answer — `dns`/`dnssec`/`rdns`,
 matters more than the total, because the three classes fail for different
 reasons and only one of them is fixed by a better model.
 
-Where a router reports calibrated confidence, the harness also prints what a
+Where a router reports answer confidence, the harness also prints what a
 **hybrid** would buy: route locally when the model is sure, spend the LLM only
 on the rest. That is the shape a real integration would take, so it is the
 number worth optimising.
 
+For Laya choices, the harness uses `answer_confidence`, or the selected label's
+probability for older releases. Its legacy `confidence` field measures
+normalized entropy and is not interchangeable with answer probability. See
+[Laya's answer implementation](https://github.com/NandhaKishorM/laya/blob/main/laya/agent.py).
+These scores still need calibration checks on Gathm requests before deployment.
+
 ## On a phone (Termux)
 
-The harness runs on Termux, and that is the most informative place to run it:
-a phone is where the ~500-token tool prefill hurts most, so it is where a
-cheaper router has the most to win.
+The keyword baseline can run on Termux. Laya inference also requires a compatible
+PyTorch installation and downloaded checkpoints; native Android inference has
+not been verified. Test on the intended phone before drawing latency conclusions.
 
 ```bash
 pkg install python
@@ -65,20 +77,21 @@ pip install rich                      # the minimum pilot/main.py needs
 python3 bench/route_bench.py --routers shortlist     # free, instant
 ```
 
-Two settings matter here and nowhere else:
+Laya loads lazily by default. To keep only one checkpoint resident:
 
 ```bash
 GATHM_BENCH_LAYA_PRELOAD=0 GATHM_BENCH_LAYA_MAX_LOADED=1     python3 bench/route_bench.py --routers laya
 ```
 
-`Router(preload=True)` holds two checkpoints resident, several hundred MB on
-top of whatever is already serving the LLM. Android's low-memory killer takes
-the biggest process without warning, which looks like a crashed benchmark
-rather than what it is. Loading lazily and keeping one checkpoint avoids that;
-an English question set never needs the multilingual one anyway.
+`GATHM_BENCH_LAYA_PRELOAD=1` explicitly opts into loading all configured
+checkpoints up front. Current Laya loads three and raises its resident limit to
+fit them, so `MAX_LOADED=1` does not constrain explicit preloading. Keep
+preloading off on memory-constrained devices. The English question set normally
+needs only the English checkpoint.
 
-For the `llm` router, start the backend first (`ollama serve` on Termux) — the
-harness makes one test call and skips with the reason if nothing answers.
+For the `llm` router, start the configured backend first (`gathm llm start` for
+llama.cpp, or `ollama serve` for an Ollama setup). The harness makes one test
+call and skips with the reason if nothing answers.
 
 Run the routers one at a time on a phone. Holding laya's checkpoint and the LLM
 in memory at once is the configuration most likely to get something killed, and

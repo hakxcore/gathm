@@ -4,10 +4,9 @@ Gathm — tool-routing benchmark
 
 The question this answers
 -------------------------
-Pilot's slowest step is not generating the answer, it is deciding which tool
-the question needs. The agent has to describe its tools before the model can
-choose one, and on CPU that prefill is the wait — README's own numbers put a
-vague question at ~2 KB / ~500 tokens of tool text, every turn.
+Describing tools to a generative model adds prompt processing time, especially
+on a CPU. This harness isolates tool selection, not a full conversation. Laya
+is experimental and benchmark-only; the live GUI and TUI do not call it.
 
 Tool selection is a classification problem being solved by a generative model.
 This harness measures whether something cheaper does it as well:
@@ -52,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import statistics
@@ -154,7 +154,7 @@ LLM_INSTRUCTIONS = (
 
 
 def make_llm_router(provider: Any) -> Callable:
-    def route(question: str, shortlist: list[str], descriptions: dict) -> str:
+    def route(question: str, shortlist: list[str], descriptions: dict) -> tuple[str, Optional[float]]:
         catalogue = "\n".join("%s: %s" % (n, descriptions[n]) for n in shortlist)
         messages = [
             {"role": "system", "content": LLM_INSTRUCTIONS},
@@ -182,8 +182,19 @@ def parse_tool_reply(reply: str, shortlist: list[str]) -> str:
     return matches[0] if len(matches) == 1 else ""
 
 
+def _validated_confidence(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("confidence must be a finite probability between 0 and 1")
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError("confidence must be a finite probability between 0 and 1")
+    return value
+
+
 def make_laya_router(model: Any) -> Callable:
-    def route(question: str, shortlist: list[str], descriptions: dict) -> str:
+    def route(question: str, shortlist: list[str], descriptions: dict) -> tuple[str, Optional[float]]:
         questions = {
             "tool": {
                 "type": "choice",
@@ -193,10 +204,16 @@ def make_laya_router(model: Any) -> Callable:
         }
         result = model.predict({"question": question}, questions)
         answer = result["answers"]["tool"]
-        # laya returns a calibrated confidence, which is the thing that makes a
-        # hybrid possible: route locally when it is sure, spend the LLM only on
-        # the rest. measure() reports what that trade would buy.
-        return answer["choice"], answer.get("confidence")
+        choice = answer["choice"]
+        if choice not in shortlist:
+            raise ValueError("Laya returned a choice outside the shortlist")
+        # For choice questions, legacy `confidence` is normalized entropy.
+        # Use answer probability for thresholding, including older releases
+        # that only exposed the per-label probability map.
+        confidence = answer.get("answer_confidence")
+        if confidence is None:
+            confidence = (answer.get("probabilities") or {}).get(choice)
+        return choice, _validated_confidence(confidence)
     return route
 
 
@@ -228,20 +245,12 @@ def build_laya_router() -> tuple[Optional[Callable], str]:
     except ImportError:
         return None, "not installed (pip install laya)"
 
-    # Defaults are laya's own recommendation and right on a laptop: preload
-    # both checkpoints so nothing reloads mid-run. On a phone they are wrong.
-    # Two resident checkpoints is several hundred MB on top of whatever is
-    # already holding the LLM, and Android's low-memory killer reaps the
-    # biggest process without ceremony — which would look like a crashed
-    # benchmark rather than what it is.
-    #
-    #   GATHM_BENCH_LAYA_PRELOAD=0   load on first use instead
-    #   GATHM_BENCH_LAYA_MAX_LOADED=1   keep one checkpoint, not two
-    #
-    # An English-only question set never needs the multilingual checkpoint, so
-    # max_loaded=1 costs nothing here beyond a reload if you mix languages in.
-    preload = (os.environ.get("GATHM_BENCH_LAYA_PRELOAD", "1").strip()
-               not in ("0", "false", "no"))
+    # Lazy loading avoids downloading unused checkpoints. The warm-up below
+    # pays the first load before timing. Explicit preload=True currently loads
+    # all three checkpoints and raises max_loaded to hold them, so it cannot
+    # be used as a memory cap even when MAX_LOADED=1 is set.
+    preload = (os.environ.get("GATHM_BENCH_LAYA_PRELOAD", "0").strip().lower()
+               not in ("", "0", "false", "no", "off"))
     try:
         max_loaded = int(os.environ.get("GATHM_BENCH_LAYA_MAX_LOADED", "") or 2)
     except ValueError:
@@ -326,19 +335,21 @@ def run(args: argparse.Namespace) -> int:
     }
 
     results: dict[str, dict] = {}
+    skipped: dict[str, str] = {}
     for name in wanted:
         if name not in builders:
             print("unknown router %r — choose from %s" % (name, ", ".join(builders)))
             return 2
         router, note = builders[name]()
         if router is None:
+            skipped[name] = note
             print("Router %-10s SKIPPED — %s" % (name, note))
             print("")
             continue
         results[name] = measure(name, note, router, questions, shortlists,
                                 descriptions, args)
 
-    if args.json and results:
+    if args.json:
         payload = {
             "catalogue": len(all_tools),
             "questions": len(questions),
@@ -346,11 +357,12 @@ def run(args: argparse.Namespace) -> int:
             "shortlist_recall": recall,
             "shortlist_median_ms": statistics.median(shortlist_ms),
             "routers": results,
+            "skipped": skipped,
         }
         Path(args.json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print("wrote %s" % args.json)
 
-    return 0
+    return 1 if not results or any(result["errors"] for result in results.values()) else 0
 
 
 def measure(name: str, note: str, router: Callable, questions: list[dict],
@@ -384,17 +396,17 @@ def measure(name: str, note: str, router: Callable, questions: list[dict],
             start = time.perf_counter()
             try:
                 best, confidence = router(question, shortlist, descriptions)
+                confidence = _validated_confidence(confidence)
             except Exception as exc:               # a router that throws is a miss
                 errors += 1
                 best = "error: %s" % str(exc)[:60]
                 confidence = None                 # discard a previous repeat's score
-                latencies.append((time.perf_counter() - start) * 1000)
                 break
             latencies.append((time.perf_counter() - start) * 1000)
 
         hit = int(best == gold)
         if confidence is not None:
-            confident.append((float(confidence), hit))
+            confident.append((confidence, hit))
         correct += hit
         by_kind.setdefault(row["kind"], []).append(hit)
         if gold in shortlist:
@@ -414,9 +426,12 @@ def measure(name: str, note: str, router: Callable, questions: list[dict],
         hits = by_kind[kind]
         print("      %-11s %.1f%% (%d/%d)"
               % (kind, 100 * sum(hits) / len(hits), sum(hits), len(hits)))
-    print("  latency   : p50 %.1f ms   p95 %.1f ms   total %.1f s"
-          % (percentile(latencies, 0.50), percentile(latencies, 0.95),
-             sum(latencies) / 1000))
+    if latencies:
+        print("  latency   : p50 %.1f ms   p95 %.1f ms   total %.1f s (successful calls)"
+              % (percentile(latencies, 0.50), percentile(latencies, 0.95),
+                 sum(latencies) / 1000))
+    else:
+        print("  latency   : no successful calls")
     if errors:
         print("  errors    : %d calls raised" % errors)
 
@@ -449,8 +464,10 @@ def measure(name: str, note: str, router: Callable, questions: list[dict],
         "top1_reachable": conditional,
         "correct": correct,
         "total": total,
-        "p50_ms": percentile(latencies, 0.50),
-        "p95_ms": percentile(latencies, 0.95),
+        "p50_ms": percentile(latencies, 0.50) if latencies else None,
+        "p95_ms": percentile(latencies, 0.95) if latencies else None,
+        "successful_calls": len(latencies),
+        "failed_calls": errors,
         "errors": errors,
         "by_kind": {k: sum(v) / len(v) for k, v in by_kind.items()},
         "confidence_thresholds": thresholds,
