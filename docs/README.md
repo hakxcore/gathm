@@ -16,6 +16,7 @@ This directory contains task-focused documentation for each interface, plus runn
 
 - [Examples](./examples/README.md)
 - [Use Cases](./use-cases/README.md)
+- [GUI/TUI compatibility checks](./testing/compatibility.md)
 
 ## Related Root Docs
 

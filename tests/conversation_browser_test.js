@@ -147,6 +147,56 @@ async function screenshot(page, name) {
     await page.screenshot({ path: path.join(directory, name + '.png'), fullPage: true });
 }
 
+const LAYOUTS = [
+    { width: 320, height: 640 },
+    { width: 375, height: 812 },
+    { width: 412, height: 915 },
+    { width: 768, height: 1024 },
+    { width: 812, height: 375 },
+    { width: 1024, height: 768 },
+    { width: 1440, height: 900 },
+];
+
+async function layoutChecks(page, state) {
+    for (const viewport of LAYOUTS) {
+        await page.setViewportSize(viewport);
+        const label = viewport.width + '×' + viewport.height + ' (' + state + ')';
+        const fits = await page.evaluate(function () {
+            return Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
+                <= window.innerWidth + 1;
+        });
+        ok('the interface has no horizontal overflow at ' + label, fits);
+        if (state === 'empty') {
+            const spacing = await page.evaluate(function () {
+                const header = document.querySelector('.app-header').getBoundingClientRect();
+                const intro = document.querySelector('.companion-intro').getBoundingClientRect();
+                const content = document.querySelector('.conversation-content').getBoundingClientRect();
+                return { separate: intro.top >= header.bottom, readable: content.height >= 120 };
+            });
+            ok('the companion title clears the header at ' + label, spacing.separate);
+            ok('the welcome conversation has readable space at ' + label, spacing.readable);
+        } else {
+            ok('the transcript has readable space at ' + label,
+               await page.locator('#chatArea').evaluate(function (element) {
+                   return element.getBoundingClientRect().height >= 120;
+               }));
+        }
+        for (const selector of ['#convoBtn', '#messageInput', '#sendBtn']) {
+            const control = page.locator(selector);
+            await control.scrollIntoViewIfNeeded();
+            // A control can have a nonempty bounding box while an ancestor's
+            // overflow clips it entirely (especially in phone landscape).
+            const reachable = await control.evaluate(function (element) {
+                const r = element.getBoundingClientRect();
+                const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                return !!hit && (hit === element || element.contains(hit));
+            });
+            ok(selector + ' remains reachable at ' + label, reachable);
+        }
+        await screenshot(page, 'assistant-' + state + '-' + viewport.width + 'x' + viewport.height);
+    }
+}
+
 /** Use isolated browser storage so these cases cannot affect voice counts. */
 async function assistantInterfaceChecks(browser, base, calls, errors) {
     const page = await browser.newPage();
@@ -158,15 +208,7 @@ async function assistantInterfaceChecks(browser, base, calls, errors) {
     try {
         await page.goto(base + '/', { waitUntil: 'load' });
         await page.waitForSelector('#convoBtn:not([disabled])');
-        for (const width of [375, 768, 1024, 1440]) {
-            await page.setViewportSize({ width: width, height: width === 375 ? 812 : 900 });
-            const fits = await page.evaluate(function () {
-                return Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)
-                    <= window.innerWidth + 1;
-            });
-            ok('the interface has no horizontal overflow at ' + width + ' px', fits);
-            await screenshot(page, 'assistant-empty-' + width);
-        }
+        await layoutChecks(page, 'empty');
 
         const beforeStarters = chatCalls().length;
         const starters = page.locator('[data-prompt]');
@@ -195,6 +237,7 @@ async function assistantInterfaceChecks(browser, base, calls, errors) {
               await page.locator('#chatArea .message-wrapper').count(), 2);
         ok('sending replaces the starter view with the transcript',
            await page.locator('#emptyState').isHidden() && await page.locator('#chatArea').isVisible());
+        await layoutChecks(page, 'chat');
         await screenshot(page, 'assistant-chat-1440');
         await page.setViewportSize({ width: 375, height: 812 });
         await screenshot(page, 'assistant-chat-375');
@@ -254,6 +297,59 @@ async function assistantInterfaceChecks(browser, base, calls, errors) {
     }
 }
 
+async function touchAndPermissionChecks(browser, base, calls, errors) {
+    // This exercises touch handling and the mobile viewport contract in the
+    // installed browser. It does not replace testing an Android/iOS device or
+    // its actual software keyboard and microphone permission UI.
+    const context = await browser.newContext({
+        viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true,
+    });
+    const page = await context.newPage();
+    page.on('pageerror', function (error) { errors.push(String(error)); });
+    await page.addInitScript(function () {
+        localStorage.setItem('gathmSpeak', '0');
+        navigator.mediaDevices.getUserMedia = function () {
+            return Promise.reject(new DOMException('Microphone permission denied', 'NotAllowedError'));
+        };
+    });
+    const count = function (url) { return calls.filter(function (call) { return call.url === url; }).length; };
+    try {
+        await page.goto(base + '/', { waitUntil: 'load' });
+        await page.waitForSelector('#convoBtn:not([disabled])');
+        const beforeAudio = count('/api/v1/transcribe');
+        await page.tap('#convoBtn');
+        await page.waitForFunction('!voiceStarting && !voiceActive && !convoMode');
+        ok('denied microphone permission gives a visible explanation',
+           /microphone|permission|denied/i.test(await page.locator('#chatArea').innerText()));
+        check('denied microphone permission never submits audio', count('/api/v1/transcribe'), beforeAudio);
+        ok('denied microphone permission leaves chat and retry available',
+           await page.locator('#messageInput').isEnabled() && await page.locator('#convoBtn').isEnabled());
+
+        await page.tap('#messageInput');
+        await page.fill('#messageInput', 'A touch-screen message.');
+        const beforeEnter = count('/api/v1/agent/chat');
+        await page.press('#messageInput', 'Shift+Enter');
+        check('Shift+Enter inserts a line break without sending', count('/api/v1/agent/chat'), beforeEnter);
+        ok('the mobile composer retains the line break', (await page.inputValue('#messageInput')).includes('\n'));
+        await page.locator('#messageInput').evaluate(function (input) {
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', bubbles: true, cancelable: true, isComposing: true,
+            }));
+        });
+        check('confirming composed text does not send early', count('/api/v1/agent/chat'), beforeEnter);
+        await page.tap('#sendBtn');
+        await page.waitForFunction('!isSending && history.length === 2');
+        check('tapping Send receives one reply after microphone denial', count('/api/v1/agent/chat'), beforeEnter + 1);
+        ok('mobile touch controls retain a 44 px target', await page.locator('#sendBtn, #micBtn, #convoBtn, #clearBtn').evaluateAll(
+            function (controls) { return controls.every(function (element) {
+                const r = element.getBoundingClientRect();
+                return r.width >= 44 && r.height >= 44;
+            }); }));
+    } finally {
+        await context.close();
+    }
+}
+
 async function main() {
     console.log('Conversation mode, in a browser');
     console.log('='.repeat(60));
@@ -290,16 +386,17 @@ async function main() {
             '--autoplay-policy=no-user-gesture-required',
         ],
     });
+    console.log('  Chromium ' + browser.version());
 
     const errors = [];
     try {
         const page = await browser.newPage();
         page.on('pageerror', function (e) { errors.push(String(e)); });
         page.on('console', function (m) {
-            // Failed loads of the CDN icon font/script are expected offline and
-            // are not what this test is about; real script errors are.
+            // Browsers may request a favicon which the stub does not serve;
+            // script errors and all other console errors still fail the run.
             if (m.type() === 'error' &&
-                m.text().indexOf('Failed to load resource') === -1) {
+                !m.location().url.endsWith('/favicon.ico')) {
                 errors.push(m.text());
             }
         });
@@ -536,6 +633,7 @@ async function main() {
 
         await page.close();
         await assistantInterfaceChecks(browser, base, calls, errors);
+        await touchAndPermissionChecks(browser, base, calls, errors);
         check('no page errors', errors, []);
     } finally {
         await browser.close();

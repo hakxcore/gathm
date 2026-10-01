@@ -1,15 +1,15 @@
-# Multi-stage build for smaller image
-# Supports: linux/amd64, linux/arm64, linux/arm/v7
+# Intended targets: linux/amd64 and linux/arm64.
+# The bundled Playwright dependency does not provide an ARMv7 distribution.
 FROM ubuntu:22.04 AS base
 
 LABEL maintainer="hakxcore"
-LABEL description="Gathm Enterprise - AI Agent Tool Framework"
+LABEL description="Gathm personal AI assistant with voice, chat, and optional tools"
 LABEL version="3.0.0"
 
 # Avoid interactive prompts during install
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies (works on all Ubuntu architectures: amd64, arm64, armv7)
+# Install system dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     curl \
@@ -28,9 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install the API dependencies explicitly; installation failure stops the build.
+# The GUI calls the assistant, so an API-only image is not a working chat app.
+# Installing Playwright's Python package does not download browser binaries.
 COPY api/requirements.txt /tmp/gathm-api-requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt
+COPY pilot/requirements.txt /tmp/gathm-pilot-requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt \
+    -r /tmp/gathm-pilot-requirements.txt && \
+    python3 -c "from langchain_core.messages import HumanMessage; from langgraph.graph import StateGraph; import langchain_ollama, rich, prompt_toolkit, fastapi, uvicorn"
 
 # Create non-root user for security
 ARG GATHM_USER=gathm

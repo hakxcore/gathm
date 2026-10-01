@@ -293,6 +293,17 @@ _init_venv() {
     GATHM_VENV="$SCRIPT_DIR/pilot/venv"
 }
 
+# CPython on Windows creates Scripts/python.exe, including when launched from
+# Git Bash. Keep installs, verification and startup on the same interpreter.
+_venv_python() {
+    local root="$1" candidate
+    [[ -n "$root" ]] || return 1
+    for candidate in "$root/bin/python3" "$root/bin/python" "$root/Scripts/python.exe"; do
+        [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
 # Install a Bionic-native Pydantic pair when the Termux package is unavailable.
 # PyPI's manylinux and musllinux wheels target glibc and musl respectively; a
 # renamed extension or copied libgcc cannot turn either into an Android binary.
@@ -724,8 +735,9 @@ _ensure_venv() {
 
 _venv_pip() {
     _ensure_venv
-    if [[ -n "$GATHM_VENV" && -x "$GATHM_VENV/bin/pip" ]]; then
-        "$GATHM_VENV/bin/pip" install "$@"
+    local python_cmd
+    if python_cmd=$(_venv_python "$GATHM_VENV"); then
+        "$python_cmd" -m pip install "$@"
     else
         pip3 install "$@" 2>/dev/null || pip install "$@" 2>/dev/null || return 1
     fi
@@ -757,8 +769,9 @@ _ensure_engineer_venv() {
 
 _engineer_venv_pip() {
     _ensure_engineer_venv
-    if [[ -n "$ENGINEER_VENV" && -x "$ENGINEER_VENV/bin/pip" ]]; then
-        "$ENGINEER_VENV/bin/pip" install -q "$@"
+    local python_cmd
+    if python_cmd=$(_venv_python "$ENGINEER_VENV"); then
+        "$python_cmd" -m pip install -q "$@"
     else
         # Fall back to the pilot venv or system pip
         _venv_pip "$@"
@@ -2803,6 +2816,8 @@ install_playwright_browser() {
     local pw_cmd=""
     if [[ -x "$GATHM_VENV/bin/playwright" ]]; then
         pw_cmd="$GATHM_VENV/bin/playwright"
+    elif [[ -x "$GATHM_VENV/Scripts/playwright.exe" ]]; then
+        pw_cmd="$GATHM_VENV/Scripts/playwright.exe"
     elif command -v playwright &>/dev/null; then
         pw_cmd="playwright"
     else
@@ -4216,17 +4231,17 @@ setup_shortcuts() {
     [[ "$platform" == "termux" ]] && shebang="#!/data/data/com.termux/files/usr/bin/bash"
 
     local api_python_cmd
-    if [[ -x "$GATHM_VENV/bin/python3" ]]; then
-        api_python_cmd="$GATHM_VENV/bin/python3"
+    if api_python_cmd=$(_venv_python "$GATHM_VENV"); then
+        :
     elif command -v python3 &>/dev/null; then
         api_python_cmd="python3"
     else
         api_python_cmd="python"
     fi
-    cat > "$bin_dir/gathm-api" << SCRIPT
-$shebang
-exec $api_python_cmd "$SCRIPT_DIR/api/server.py" "\$@"
-SCRIPT
+    {
+        printf '%s\n' "$shebang"
+        printf 'exec %q %q "$@"\n' "$api_python_cmd" "$SCRIPT_DIR/api/server.py"
+    } > "$bin_dir/gathm-api"
     chmod +x "$bin_dir/gathm-api"
 
     # Add ~/.local/bin to PATH if not already there
@@ -4263,8 +4278,8 @@ start_gui_server() {
     # installed. Fall back to system python only if the venv is unavailable.
     local python_cmd=""
     _init_venv
-    if [[ -n "$GATHM_VENV" && -x "$GATHM_VENV/bin/python3" ]]; then
-        python_cmd="$GATHM_VENV/bin/python3"
+    if python_cmd=$(_venv_python "$GATHM_VENV"); then
+        :
     elif command -v python3 &>/dev/null; then
         python_cmd="python3"
     elif command -v python &>/dev/null; then
@@ -4396,8 +4411,7 @@ launch_post_install() {
     # 3. Determine how to launch Pilot (prefer venv set by install_pilot_deps)
     local python_cmd="${_PILOT_PYTHON:-}"
     if [[ -z "$python_cmd" ]]; then
-        local venv_python="$SCRIPT_DIR/pilot/venv/bin/python"
-        [[ -x "$venv_python" ]] && python_cmd="$venv_python"
+        python_cmd=$(_venv_python "$SCRIPT_DIR/pilot/venv") || true
     fi
     [[ -z "$python_cmd" ]] && command -v python3 &>/dev/null && python_cmd="python3"
     [[ -z "$python_cmd" ]] && command -v python  &>/dev/null && python_cmd="python"
@@ -4414,10 +4428,10 @@ launch_post_install() {
     echo -e "  ${YELLOW}(Press Ctrl+C or type /exit to quit Pilot)${RESET}"
     echo ""
 
-    # Hand off to Pilot via run.sh (activates venv) or python directly as fallback
+    # Hand off using the selected interpreter, or Python directly as fallback.
     cd "$SCRIPT_DIR"
     if [[ -f "$pilot_run" ]]; then
-        exec bash "$pilot_run"
+        GATHM_PYTHON="$python_cmd" exec bash "$pilot_run"
     else
         exec "$python_cmd" "$pilot_main"
     fi
@@ -4536,8 +4550,8 @@ verify() {
     # We actually IMPORT each module (not just find_spec) so a native library
     # failure is caught here instead of only blowing up when Pilot starts.
     _init_venv
-    local pilot_py="$GATHM_VENV/bin/python3"
-    if [[ -x "$pilot_py" ]]; then
+    local pilot_py
+    if pilot_py=$(_venv_python "$GATHM_VENV"); then
         local missing_mods
         missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
 # Import what Pilot actually imports, not just the top-level packages.
@@ -4629,7 +4643,8 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
             note_missing "Chromium (browser tool)" "pkg install tur-repo x11-repo && pkg install chromium"
         fi
     else
-        if [[ -x "$GATHM_VENV/bin/playwright" ]] && "$pilot_py" -c "import playwright" 2>/dev/null; then
+        if { [[ -x "$GATHM_VENV/bin/playwright" ]] || [[ -x "$GATHM_VENV/Scripts/playwright.exe" ]]; } \
+                && [[ -n "$pilot_py" ]] && "$pilot_py" -c "import playwright" 2>/dev/null; then
             ok "Browser engine (Playwright)"
         else
             warn "Playwright browser not fully installed (browser control limited)"

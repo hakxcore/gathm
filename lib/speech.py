@@ -578,12 +578,13 @@ def _kill_tree(proc, grace: float = 0.5) -> None:
     """
     if proc.poll() is not None:
         return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for force in (False, True):
         try:
             if hasattr(os, "killpg"):
+                sig = signal.SIGKILL if force else signal.SIGTERM
                 os.killpg(os.getpgid(proc.pid), sig)
-            else:  # pragma: no cover - Windows
-                proc.terminate() if sig == signal.SIGTERM else proc.kill()
+            else:  # Windows has no process groups or SIGKILL constant.
+                proc.kill() if force else proc.terminate()
         except Exception:  # noqa: BLE001 - already gone, or no permission
             try:
                 proc.kill()

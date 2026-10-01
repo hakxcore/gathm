@@ -68,7 +68,8 @@ pick_python() {
     fi
     for candidate in \
         "$INSTALL_DIR/pilot/venv/bin/python3" \
-        "$INSTALL_DIR/pilot/venv/bin/python"; do
+        "$INSTALL_DIR/pilot/venv/bin/python" \
+        "$INSTALL_DIR/pilot/venv/Scripts/python.exe"; do
         [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
     done
     for candidate in python3 python; do

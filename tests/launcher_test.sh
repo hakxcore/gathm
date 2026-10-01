@@ -65,6 +65,10 @@ PORT=$(( 8300 + RANDOM % 400 ))
 # A port nothing answers on, so the Ollama probe is deterministic wherever
 # these run. Tests that want a live model server override OLLAMA_BASE_URL.
 DEAD_OLLAMA=$(( 8700 + RANDOM % 200 ))
+# A real llama.cpp server may already be listening on its default port. The
+# missing-model cases must not discover it; live fixture cases override this.
+unset GATHM_LLAMACPP_BASE_URL
+export GATHM_LLAMACPP_PORT=$(( 9100 + RANDOM % 200 ))
 run() {
     HOME="$FIX/home" GATHM_GUI_PORT="$PORT" \
     OLLAMA_BASE_URL="http://127.0.0.1:$DEAD_OLLAMA/v1" \

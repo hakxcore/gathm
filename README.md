@@ -220,7 +220,7 @@ Why those two platforms, and what each uses it for:
 
 | Platform | Speaking | Listening |
 |---|---|---|
-| Termux | audio.cpp (nothing else works on Android) | **Android's own recogniser**, audio.cpp as fallback |
+| Termux | Android TTS through Termux:API, or audio.cpp | **Android's own recogniser**, audio.cpp as fallback |
 | macOS | `say` — a resident OS service, far faster than any model | audio.cpp (macOS has no CLI for dictation) |
 | Linux | `spd-say` / `espeak-ng`, or audio.cpp if you build it | audio.cpp if you build it |
 | Windows | — | — |
@@ -299,8 +299,8 @@ the GUI spoke through the English-only PocketTTS voice while the TUI spoke
 through `say`. It now follows `engine()` like everything else, and a script the
 bundled voice cannot say overrides even an explicit
 `GATHM_SPEAK_ENGINE=audio.cpp`: an English voice handed Devanagari is not a
-choice between two engines. Where there is no OS voice at all — Termux —
-audio.cpp is still used, because failing is worse than a wrong-sounding voice.
+choice between two engines. On Termux, Android TTS is available through the
+Termux:API app and its command package; audio.cpp remains an alternative.
 
 **Listening is English-and-neighbours only**, and that is the ASR model, not a
 setting. SenseVoice-Small covers a small set of languages; Hindi is not among

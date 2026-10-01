@@ -71,6 +71,9 @@ jobs:
       - name: Launcher suite
         run: bash tests/launcher_test.sh
 
+      - name: POSIX and Windows virtualenv path fixtures
+        run: bash tests/venv_paths_test.sh
+
       # The connectivity check runs before every tool, so its cost is on every
       # command. Against a local stub, so it needs no network of its own.
       - name: Connectivity-check suite

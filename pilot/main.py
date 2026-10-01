@@ -1535,38 +1535,36 @@ def _voice_input(arg: str) -> Optional[str]:
             return None
 
     if not speech.asr_enabled():
-        cfg = speech.resolve_asr()
-        if not cfg["bin"]:
-            console.print("\n  [color(214)][!][/color(214)] Speech runtime not "
-                          "installed. Run ./install on Termux.")
-        else:
-            console.print("\n  [color(214)][!][/color(214)] No speech-to-text model "
-                          "installed. Add it with:")
-            console.print("      [dim]GATHM_AUDIOCPP_MODELS=pocket_tts,sense_asr "
-                          "GATHM_AUDIOCPP_FORCE=1 ./install[/dim]")
+        console.print("\n  [!] " + speech.asr_unavailable_reason(),
+                      style="color(214)", markup=False)
         return None
 
-    if speech.find_recorder() is None:
-        console.print("\n  [color(214)][!][/color(214)] No way to record audio. On "
-                      "Termux: [dim]pkg install termux-api[/dim] plus the "
-                      "Termux:API app.")
-        return None
-
-    secs = seconds or int(os.getenv("GATHM_LISTEN_SECONDS", "8"))
-    console.print(f"\n  [color(208)]🎤 Listening for {secs}s...[/color(208)]")
+    # Android's recogniser captures audio itself; it needs neither a separate
+    # recorder nor a fixed recording window. Let listen() select and validate
+    # its engine so the TUI agrees with the speech runtime on every platform.
+    if speech.asr_engine() == "android":
+        console.print("\n  [color(208)]Listening with Android speech recognition...[/color(208)]")
+    else:
+        if seconds is None:
+            try:
+                seconds = int(os.getenv("GATHM_LISTEN_SECONDS", "8"))
+            except ValueError:
+                seconds = 8
+        seconds = max(1, min(seconds, 300))
+        console.print(f"\n  [color(208)]Listening for {seconds}s...[/color(208)]")
     ok, text = speech.listen(seconds)
     if not ok:
-        console.print(f"  [color(196)][x][/color(196)] {text}")
+        console.print(f"  [x] {text}", style="color(196)", markup=False)
         return None
-    console.print(f"  [dim]heard:[/dim] {text}")
+    console.print(f"  Heard: {text}", markup=False)
     return text
 
 
 def _handle_speak_command(arg: str) -> None:
-    """/speak — inspect, toggle, or test the audio.cpp voice.
+    """/speak — inspect, toggle, or test the selected speech engine.
 
     Speech is opt-out via GATHM_SPEAK, and on a phone it is worth being able to
-    silence a long answer without restarting Pilot.
+    silence a long answer without restarting Gathm.
     """
     try:
         from lib import speech
@@ -1578,10 +1576,13 @@ def _handle_speak_command(arg: str) -> None:
 
     if arg_lower in ("on", "enable"):
         os.environ["GATHM_SPEAK"] = "1"
-        cfg = speech.resolve()
-        if not cfg["bin"] or not cfg["model"]:
-            console.print("\n  [color(214)][!][/color(214)] Speech on, but the voice "
-                          "runtime is not installed. Run ./install on Termux.")
+        selected = speech.engine()
+        if not selected:
+            console.print("\n  [color(214)][!][/color(214)] Speech on, but no speech "
+                          "engine is available. Run /speak for details.")
+        elif selected == "audio.cpp" and not speech.find_player():
+            console.print("\n  [color(214)][!][/color(214)] Speech on, but no audio "
+                          "player is available. Run /speak for details.")
         else:
             console.print("\n  [color(40)][+][/color(40)] Speech on.")
         return
@@ -1599,17 +1600,26 @@ def _handle_speak_command(arg: str) -> None:
                           "see /speak for the reason.")
         return
 
-    cfg = speech.resolve()
-    player = speech.find_player()
+    selected = speech.engine()
     console.print("")
-    console.print(f"  [color(208)]Runtime:[/color(208)] {cfg['bin'] or 'not installed'}")
-    console.print(f"  [color(208)]Voice:[/color(208)]   {cfg['voice']} ({cfg['family']})")
-    console.print(f"  [color(208)]Model:[/color(208)]   {cfg['model'] or 'not configured'}")
-    console.print(f"  [color(208)]Player:[/color(208)]  "
-                  f"{' '.join(player) if player else 'none — pkg install mpv'}")
+    console.print(f"  Engine: {selected or 'not available'}", markup=False)
+    if selected == "system":
+        voice = speech.find_system_voice()
+        console.print(f"  Voice: {voice[0] if voice else 'not available'}", markup=False)
+    elif selected == "audio.cpp":
+        cfg = speech.resolve()
+        player = speech.find_player()
+        console.print(f"  Runtime: {cfg['bin']}", markup=False)
+        console.print(f"  Voice: {cfg['voice']} ({cfg['family']})", markup=False)
+        console.print(f"  Model: {cfg['model']}", markup=False)
+        console.print(f"  Player: {' '.join(player) if player else 'not available'}", markup=False)
+        if not player:
+            console.print("  Install an audio player such as mpv to hear replies.")
+    else:
+        console.print("  Install a system voice or configure audio.cpp, then try /speak hello.")
     console.print(f"  [color(208)]Enabled:[/color(208)] {speech.enabled()}")
-    if not speech.enabled() or not player:
-        console.print("  [dim]Fix what is missing above, then: /speak hello[/dim]")
+    if selected and not speech.enabled():
+        console.print("  [dim]Use /speak on to enable spoken replies.[/dim]")
 
 
 def _handle_slash_command(cmd: str) -> bool:

@@ -24,7 +24,7 @@ class TestTerminalConversation(unittest.TestCase):
             yield output
 
     def test_conversation_and_controls_fit_phone_and_desktop(self):
-        for width in (40, 80, 120):
+        for width in (32, 40, 80, 120):
             with self.subTest(width=width), self._capture(width) as output:
                 tui.render_welcome("Llama-3.2-1B-Instruct-Q4_K_M", 44,
                                    "Termux", connectivity="offline")
