@@ -139,7 +139,77 @@
         return chunks;
     }
 
-    var api = { splitSpeech: splitSpeech, cleanForSpeech: cleanForSpeech,
+    /** Emit complete utterances without treating a packet boundary as punctuation. */
+    function createStream(emit) {
+        var buffer = '', first = true, closed = false;
+        function emitClean(text) {
+            var chunk = cleanForSpeech(text);
+            if (chunk) { emit(chunk); first = false; }
+        }
+        function safePrefix(text) {
+            // A closed fence can contain arbitrary punctuation and backticks.
+            // Remove it before checking for an unfinished inline span/fence.
+            var prose = text.replace(/```[\s\S]*?```/g, ' code block omitted. ');
+            if ((prose.match(/`/g) || []).length % 2 || prose.includes('```')) return false;
+            // Keep an unfenced code run together so the three-line omission
+            // rule can inspect all of it. Prose before the run still streams.
+            return !prose.split('\n').some(function (line) {
+                // A packet can stop inside a call/string, before the final
+                // semicolon makes CODE_LINE recognize it. Hold those lines
+                // until finish() can inspect the entire unfenced code run.
+                return CODE_LINE.test(line) ||
+                    /^\s*[\w$.:]+\s*(?:\(|=(?!=))/.test(line);
+            });
+        }
+        function drain() {
+            while (buffer) {
+                var cut = -1;
+                var need = first ? DEFAULTS.first : DEFAULTS.min;
+                // Wait for whitespace after punctuation. A token ending in
+                // "3." may be followed by "14", rather than a new sentence.
+                var ends = /[.!?…]['")\]]*(?=\s)/g;
+                var match;
+                while ((match = ends.exec(buffer)) !== null) {
+                    var end = match.index + match[0].length;
+                    if (end >= need && safePrefix(buffer.slice(0, end))) {
+                        cut = end;
+                        break;
+                    }
+                }
+                if (cut < 0 && buffer.length > DEFAULTS.max &&
+                    !buffer.includes('`') && safePrefix(buffer)) {
+                    var space = buffer.slice(0, DEFAULTS.max).lastIndexOf(' ');
+                    if (space > DEFAULTS.max / 3) cut = space + 1;
+                }
+                if (cut < 0) return;
+                emitClean(buffer.slice(0, cut));
+                // Keep newlines/indentation: they distinguish the following
+                // code block from the prose sentence just emitted.
+                buffer = buffer.slice(cut);
+            }
+        }
+        return {
+            feed: function (text) {
+                if (closed || !text) return;
+                buffer += text;
+                drain();
+            },
+            finish: function () {
+                if (closed) return;
+                closed = true;
+                // Clean the complete remaining code run BEFORE splitting it:
+                // punctuation inside a program must never become an utterance.
+                var complete = buffer.replace(/```[\s\S]*?```/g, ' code block omitted. ')
+                    .replace(/```[\s\S]*$/, ' code block omitted. ');
+                splitSpeech(cleanForSpeech(complete), {
+                    first: first ? DEFAULTS.first : DEFAULTS.min
+                }).forEach(emitClean);
+                buffer = '';
+            }
+        };
+    }
+
+    var api = { splitSpeech: splitSpeech, createStream: createStream, cleanForSpeech: cleanForSpeech,
                 stripUnfencedCode: stripUnfencedCode,
                 DEFAULTS: DEFAULTS };
 

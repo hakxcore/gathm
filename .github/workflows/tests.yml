@@ -96,6 +96,21 @@ jobs:
       - name: Installer self-check
         run: ./install --check
 
+  streaming-browser:
+    name: Streaming text and speech in Chromium
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install browser test dependencies
+        run: |
+          npm install --no-save --package-lock=false playwright-core@1.62.1
+          npx playwright-core install --with-deps chromium
+      - name: Verify streaming and cancellation with a local stub
+        run: node tests/streaming_browser_test.js
+
   package:
     name: The wheel installs and runs
     runs-on: ubuntu-latest

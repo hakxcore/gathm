@@ -35,9 +35,11 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import ipaddress
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 import json
 import os
@@ -48,12 +50,23 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Literal, Union
+
+if __package__:
+    from .assistant_worker import AssistantWorker
+else:  # Direct scripts and importlib-based launchers may lack a package context.
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from api.assistant_worker import AssistantWorker
+
+_CHAT_WORKER = AssistantWorker()
 
 try:
     from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -426,11 +439,12 @@ def _speech():
     return _SPEECH_MODULE
 
 
-def run_chat_agent(query: str, history: list = None, timeout: int | None = None) -> dict:
+def run_chat_agent(query: str, history: list = None, timeout: int | None = None,
+                   on_token=None, cancelled=None) -> dict:
     """Run the real Pilot LLM agent for one turn and return its reply.
 
-    Shells out to pilot/chat_once.py using the Pilot venv's Python so the
-    stdlib-only API server stays dependency-free. Returns {"reply": ...} on
+    Reuses pilot/chat_once.py in a subprocess with the Pilot interpreter.
+    GATHM_CHAT_WORKER=0 retains the one-shot path. Returns {"reply": ...} on
     success, or {"error": ...} when the assistant is unavailable. Callers must
     show that failure rather than retrying conversation through a tool router.
     """
@@ -439,6 +453,29 @@ def run_chat_agent(query: str, history: list = None, timeout: int | None = None)
 
     if not CHAT_SCRIPT.exists():
         return {"error": "chat agent not installed (pilot/chat_once.py missing)"}
+
+    if os.environ.get("GATHM_CHAT_WORKER", "1").lower() not in ("0", "false", "no", "off"):
+        env = _child_env()
+        # Config/code edits invalidate the reusable child just as starting a
+        # new process per turn used to. No config contents enter this marker.
+        state = Path(env.get("GATHM_CONFIG_DIR") or Path.home() / ".gathm")
+        watched = [GATHM_ROOT / ".env", PILOT_DIR / ".env", CHAT_SCRIPT,
+                   PILOT_DIR / "main.py", PILOT_DIR / "browser.py"]
+        watched += [GATHM_ROOT / "lib" / name for name in ("llm.py", "llamacpp.py", "sysexec.py")]
+        watched += [state / name for name in ("model", "llm_backend", "llamacpp_model", "llamacpp_bin")]
+        stamps = []
+        for path in watched:
+            try:
+                stat = path.stat()
+                stamps.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                stamps.append((str(path), None))
+        env["GATHM_WORKER_REVISION"] = json.dumps(stamps)
+        return _CHAT_WORKER.request(
+            [_pilot_python(), str(CHAT_SCRIPT), "--worker"], str(PILOT_DIR), env,
+            {"query": query, "history": history or [], "stream": on_token is not None},
+            timeout, on_token=on_token, cancelled=cancelled,
+        )
 
     payload = json.dumps({"query": query, "history": history or []})
     try:
@@ -710,6 +747,17 @@ class BodyLimitMiddleware:
         await self.app(scope, replay, send)
 
 
+@asynccontextmanager
+async def _app_lifespan(app):
+    global _CHAT_WORKER
+    if _CHAT_WORKER._shutdown.is_set():
+        _CHAT_WORKER = AssistantWorker()
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_CHAT_WORKER.shutdown)
+
+
 app = FastAPI(
     title="Gathm Assistant API",
     version=API_VERSION,
@@ -717,6 +765,7 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    lifespan=_app_lifespan,
 )
 app.add_middleware(BodyLimitMiddleware)
 
@@ -800,7 +849,10 @@ async def auth_and_ratelimit(request: Request, call_next):
     if not is_public and not check_rate_limit(_principal(request), limit):
         return JSONResponse({"error": "rate_limit_exceeded"}, status_code=429,
                             headers={"Retry-After": "60"})
-    token = _EXECUTION_ENV.set(_role_environment(role) if not is_public else {})
+    execution_env = _role_environment(role) if not is_public else {}
+    if not is_public:
+        execution_env["GATHM_CHAT_OWNER"] = _principal(request)
+    token = _EXECUTION_ENV.set(execution_env)
     try:
         response = await call_next(request)
     finally:
@@ -963,13 +1015,78 @@ async def agent_chat(body: ChatRequest, request: Request):
     keyword-based tool request: ordinary writing or planning can mention tools
     without asking to execute them.
 
-    Runs in a thread: run_chat_agent uses blocking subprocess.run, and calling
-    it directly here would stall the event loop for the whole turn.
+    Blocking worker I/O runs in a thread. Browsers can request SSE to receive
+    text while the model is generating; JSON clients keep the original shape.
     """
     role = _get_role(request)
     if not role_has_permission(role, "tool:execute"):
         raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    if "text/event-stream" in request.headers.get("accept", ""):
+        return StreamingResponse(_stream_chat(body.query, body.history),
+                                 media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     return await asyncio.to_thread(run_chat_agent, body.query, body.history)
+
+
+async def _stream_chat(query, history):
+    """Bounded delivery; disconnects stop this turn without retrying actions."""
+    loop = asyncio.get_running_loop()
+    events = asyncio.Queue(maxsize=64)
+    cancelled = threading.Event()
+    deadline = time.monotonic() + CHAT_TIMEOUT
+
+    def publish(event):
+        if cancelled.is_set():
+            raise RuntimeError("client disconnected")
+        future = asyncio.run_coroutine_threadsafe(events.put(event), loop)
+        while True:
+            try:
+                return future.result(timeout=0.1)
+            except concurrent.futures.TimeoutError:
+                if cancelled.is_set() or time.monotonic() >= deadline:
+                    future.cancel()
+                    cancelled.set()
+                    raise RuntimeError("assistant stream stopped")
+
+    def generate():
+        try:
+            result = run_chat_agent(query, history,
+                                    on_token=lambda text: publish({"event": "token", "text": text}),
+                                    cancelled=cancelled)
+            if not cancelled.is_set():
+                publish({"event": "result", "data": result})
+        except Exception:
+            if not cancelled.is_set():
+                publish({"event": "result", "data": {"error": "assistant stream failed; request not retried"}})
+
+    task = asyncio.create_task(asyncio.to_thread(generate))
+    # A disconnect may finish this generator before the worker's kill/wait
+    # finishes. Retrieve late failures without cancelling its cleanup thread.
+    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+    try:
+        # Send headers immediately, including on a cold worker/model start.
+        yield ": connected\n\n"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                yield "data: " + json.dumps({"event": "result", "data": {
+                    "error": f"the agent did not finish within {CHAT_TIMEOUT}s. The request was stopped and was not retried."
+                }}) + "\n\n"
+                break
+            try:
+                event = await asyncio.wait_for(events.get(), timeout=min(15, remaining))
+            except asyncio.TimeoutError:
+                yield ": waiting\n\n"
+                continue
+            yield "data: " + json.dumps(event) + "\n\n"
+            if event["event"] == "result":
+                break
+    finally:
+        cancelled.set()
+        # The worker observes cancellation and kills its own process group.
+        # Do not cancel the thread wrapper while it is cleaning that group up.
+        if task.done():
+            task.result()
 
 @app.post("/api/v1/agent/plan", tags=["agent"])
 async def agent_plan(body: TaskRequest, request: Request):

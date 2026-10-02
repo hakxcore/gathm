@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { splitSpeech, cleanForSpeech } =
+const { splitSpeech, cleanForSpeech, createStream } =
     require(path.join(__dirname, '..', 'gui', 'chunker.js'));
 
 let PASS = 0, FAIL = 0;
@@ -163,6 +163,43 @@ print(json.dumps(out))
     });
 }
 
+function test_stream() {
+    console.log('\nstreaming speech without losing text or speaking code');
+    const chunks = [], stream = createStream(text => chunks.push(text));
+    stream.feed('Hello.');
+    check('packet end is not mistaken for a sentence boundary', chunks, []);
+    stream.feed(' Pi is 3.');
+    check('the first sentence is available before completion', chunks, ['Hello.']);
+    stream.feed('14 and this number must stay whole.');
+    stream.finish();
+    stream.finish();
+    stream.feed('Ignored. ');
+    check('the tail is emitted once and decimals stay intact', chunks,
+        ['Hello.', 'Pi is 3.14 and this number must stay whole.']);
+
+    const cases = [
+        'Here is code.\n```js\nconsole.log("Hello. world");\n```\nThat is all.',
+        'Here is code.\n```js\nconsole.log("Hello. world");',
+        'Here is code.\nconsole.log("Hello. world");\nconsole.log("One. two");\nconsole.log("Three. four");\nThat is all.',
+        fs.readFileSync(path.join(__dirname, 'fixtures', 'unfenced_cpp.txt'), 'utf8'),
+    ];
+    cases.forEach(function (input, i) {
+        const heard = [], pending = createStream(text => heard.push(text));
+        for (const character of input) pending.feed(character);
+        pending.finish();
+        const spoken = heard.join(' ');
+        ok('streamed code case ' + i + ' preserves the leading prose', /Here is/.test(spoken));
+        ok('streamed code case ' + i + ' omits the code', spoken.includes('code block omitted.'));
+        ok('streamed code case ' + i + ' never leaks code punctuation',
+            !/console|iostream|Hello\. world|#include|cout|```/.test(spoken));
+    });
+    const prose = 'Hello. ' + 'This is a fairly long following sentence without any code. '.repeat(5) + 'Done';
+    const spoken = [], pending = createStream(text => spoken.push(text));
+    for (const character of prose) pending.feed(character);
+    pending.finish();
+    check('ordinary streamed prose is spoken exactly once', spoken.join(' '), prose);
+}
+
 console.log('Browser speech chunker tests');
 console.log('='.repeat(60));
 test_basic();
@@ -172,6 +209,7 @@ test_unpunctuated();
 test_edges();
 test_unfenced_code();
 test_agrees_with_python();
+test_stream();
 console.log('='.repeat(60));
 console.log(PASS + ' passed, ' + FAIL + ' failed');
 process.exit(FAIL ? 1 : 0);

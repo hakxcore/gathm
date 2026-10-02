@@ -18,6 +18,7 @@ This directory contains task-focused documentation for each interface, plus runn
 - [Use Cases](./use-cases/README.md)
 - [GUI/TUI compatibility checks](./testing/compatibility.md)
 - [Laya integration check](./testing/laya.md)
+- [Assistant latency measurements](./testing/latency.md)
 
 ## Related Root Docs
 

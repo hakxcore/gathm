@@ -163,8 +163,8 @@ def stop_waiting() -> None:
 def check_connectivity() -> str:
     """Return 'online' or 'offline'."""
     try:
-        socket.setdefaulttimeout(3)
-        socket.create_connection(("github.com", 443))
+        with socket.create_connection(("github.com", 443), timeout=0.75):
+            pass
         return "online"
     except OSError:
         return "offline"
@@ -233,7 +233,8 @@ def render_welcome(model_name: str, tool_count: int, platform: str,
     )
     content.append(f"{model_name}\n{platform} · ", style=_C_MUTED)
     content.append(
-        "Online" if connectivity == "online" else "Offline",
+        {"online": "Online", "offline": "Offline"}.get(
+            connectivity, "Network status unknown"),
         style=_C_SUCCESS if connectivity == "online" else _C_MUTED,
     )
     os.system("clear" if os.name != "nt" else "cls")

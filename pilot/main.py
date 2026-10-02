@@ -5,6 +5,7 @@ import re
 import shlex
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Annotated, Any, List, Optional, TypedDict
 
@@ -61,6 +62,8 @@ except Exception:
 LLM_MODEL = OLLAMA_MODEL
 
 PILOT_MAX_HISTORY = int(os.getenv("PILOT_MAX_HISTORY", "12"))
+_CHAT_MODEL = None
+_CHAT_MODEL_KEY = None
 
 def _build_llm():
     """Instantiate the LangChain chat model via the unified LLM provider.
@@ -69,8 +72,18 @@ def _build_llm():
     up — the provider does it, because the first question after a cold boot
     should load the model rather than fail with a refused connection.
     """
+    global _CHAT_MODEL, _CHAT_MODEL_KEY
     if _llm_config is not None:
-        return LLMProvider(_llm_config).langchain_chat_model()
+        settings = ("GATHM_LLM_TEMPERATURE", "GATHM_LLM_TIMEOUT", "GATHM_OLLAMA_KEEP_ALIVE",
+                    "GATHM_OLLAMA_NUM_PREDICT", "GATHM_OLLAMA_NUM_CTX")
+        key = (tuple(vars(_llm_config).items()), tuple(os.environ.get(k) for k in settings))
+        provider = LLMProvider(_llm_config)
+        if _CHAT_MODEL is None or key != _CHAT_MODEL_KEY:
+            model = provider.langchain_chat_model()
+            _CHAT_MODEL, _CHAT_MODEL_KEY = model, key
+        elif _llm_config.backend == "llamacpp":
+            provider.ensure_ready()  # preserve recovery if the server stopped
+        return _CHAT_MODEL
     # Fallback if lib.llm failed to import
     from langchain_ollama import ChatOllama  # type: ignore[import]
     return ChatOllama(model=OLLAMA_MODEL)
@@ -274,7 +287,7 @@ def print_tricolor_banner():
     # "LLAMACPP" is not what anyone calls it.
     backend_label = {"llamacpp": "LLAMA.CPP"}.get(LLM_BACKEND, LLM_BACKEND.upper())
     model_label = f"{OLLAMA_MODEL} [{backend_label}]"
-    connectivity = check_connectivity()
+    connectivity = current_connectivity()
     # render_welcome handles os.system("clear") internally
     render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
@@ -430,19 +443,34 @@ def tool_requires_internet(tool_name: str) -> bool:
     _REQUIRES_INTERNET_CACHE[tool_name] = result
     return result
 
-# Connectivity can change mid-session, but check_connectivity() opens a socket
-# with a 3s timeout — too costly to call on every model turn. Cache the result
-# for a short window so an offline session pays that cost at most once per TTL.
+# Connectivity can change mid-session. Refresh in the background and cache
+# briefly; an internet probe must not delay a local model's reply.
 _CONN_CACHE: dict[str, float | str] = {"status": "", "ts": 0.0}
 _CONN_TTL_SECONDS = 30.0
+_CONN_LOCK = threading.Lock()
 
 def current_connectivity() -> str:
-    """Return 'online'/'offline', cached for _CONN_TTL_SECONDS."""
+    """Refresh connectivity off the model's critical path; unknown on first use.
+
+    Tool execution still performs its own network/error checks. Until the
+    probe finishes, do not declare either online or offline without evidence.
+    """
     now = time.monotonic()
     if not _CONN_CACHE["status"] or (now - float(_CONN_CACHE["ts"])) > _CONN_TTL_SECONDS:
-        _CONN_CACHE["status"] = check_connectivity()
-        _CONN_CACHE["ts"] = now
-    return str(_CONN_CACHE["status"])
+        if _CONN_LOCK.acquire(blocking=False):
+            def refresh():
+                try:
+                    _CONN_CACHE["status"] = check_connectivity()
+                    _CONN_CACHE["ts"] = time.monotonic()
+                except Exception:
+                    _CONN_CACHE.update(status="unknown", ts=time.monotonic())
+                finally:
+                    _CONN_LOCK.release()
+            try:
+                threading.Thread(target=refresh, daemon=True, name="gathm-connectivity").start()
+            except RuntimeError:
+                _CONN_LOCK.release()
+    return str(_CONN_CACHE["status"] or "unknown")
 
 def _looks_number(value: str) -> bool:
     return bool(re.match(r"^-?\d+(\.\d+)?$", value.strip()))
@@ -1491,11 +1519,9 @@ def should_continue(state: AgentState):
     return state.get("next_step", "end")
 
 if LANGCHAIN_AVAILABLE:
-    try:
-        llm = _build_llm()
-    except RuntimeError:
-        llm = None
-
+    # Building the graph does not need a model. Eager client construction here
+    # loaded backends (and sometimes started a server) during every import.
+    llm = None
     workflow = StateGraph(AgentState)
     workflow.add_node("agent", call_model)
     workflow.add_node("action", tool_node)

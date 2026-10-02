@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const chunker = require('../gui/chunker.js');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'gui', 'app.js'), 'utf8');
 const start = source.indexOf('// -- Spoken replies');
@@ -33,7 +34,7 @@ function harness(plays = []) {
         pause() { this.pauses++; if (this.onpause) this.onpause(); }
     }
     const context = vm.createContext({
-        Audio, Blob, console, AbortSignal,
+        Audio, Blob, console, AbortSignal, AbortController, TextDecoder, Uint8Array,
         URL: {
             createObjectURL(blob) {
                 const url = 'blob:http://localhost/test-' + (++serial);
@@ -45,7 +46,8 @@ function harness(plays = []) {
         document: { addEventListener(name, callback) { listeners[name] = callback; } },
         localStorage: { getItem() { return null; } },
         fetch: async () => ({ ok: false }),
-        API_BASE: '', speakBtn: null, voiceActive: false, window: {},
+        API_BASE: '', speakBtn: null, voiceActive: false,
+        window: { GathmChunker: chunker }, GathmChunker: chunker,
         addMessage() {}, setOrbState() {},
     });
     vm.runInContext(source.slice(start, end), context, { filename: 'gui/app.js' });
@@ -155,6 +157,69 @@ async function main() {
         assert.equal(h.elements[0].onended, null);
         assert.equal(h.elements[0].onpause, null);
         assert.deepEqual(h.revoked, ['blob:http://localhost/reply']);
+    });
+    await test('cancellation releases a stream waiting for its next sentence', async () => {
+        const h = harness();
+        await flush();
+        vm.runInContext('speechAvailable = true', h.context);
+        const stream = h.context.startStreamingSpeech();
+        let settled = false;
+        stream.done.then(() => { settled = true; });
+        await flush();
+        assert.equal(settled, false);
+        h.context.stopSpeaking();
+        await flush();
+        assert.equal(settled, true, 'cancel must wake the empty-queue waiter');
+        stream.feed('Never speak this. ');
+        await stream.finish();
+        assert.equal(h.created.size, 0);
+    });
+    await test('cancellation aborts synthesis and reclaims prefetched audio', async () => {
+        const h = harness();
+        await flush();
+        vm.runInContext('speechAvailable = true', h.context);
+        const requests = [];
+        h.context.fetch = async (url, options) => {
+            requests.push(options);
+            return { ok: true, blob: async () => new Blob(['wav']) };
+        };
+        const stream = h.context.startStreamingSpeech();
+        stream.feed('Hello. This second sentence is long enough to be prefetched. ');
+        await flush();
+        assert.equal(requests.length, 2);
+        assert(h.state().current, 'the first sentence plays before final result');
+        h.context.stopSpeaking();
+        await stream.done;
+        await flush();
+        assert(requests.every(request => request.signal.aborted));
+        assert.equal(h.state().current, null);
+        assert.deepEqual([...new Set(h.revoked)].sort(), [...h.created.keys()].sort());
+    });
+    await test('SSE parser accepts split UTF-8 packets and a JSON fallback', async () => {
+        const h = harness();
+        const expected = 'Hello, नमस्ते 🌱.';
+        const wire = Buffer.from('data: ' + JSON.stringify({ event: 'token', text: expected }) +
+            '\r\n\r\ndata: ' + JSON.stringify({ event: 'result', data: { reply: expected } }) + '\n\n');
+        const body = new ReadableStream({ start(controller) {
+            for (const byte of wire) controller.enqueue(Uint8Array.of(byte));
+            controller.close();
+        } });
+        const tokens = [];
+        const result = await h.context.readChatReply(new Response(body, {
+            headers: { 'content-type': 'text/event-stream' },
+        }), text => tokens.push(text));
+        assert.deepEqual(tokens, [expected]);
+        assert.equal(result.reply, expected);
+        const legacy = await h.context.readChatReply(Response.json({ reply: 'Legacy.' }),
+            () => { throw new Error('JSON must not emit tokens'); });
+        assert.equal(legacy.reply, 'Legacy.');
+    });
+    await test('a truncated SSE response fails instead of accepting a partial reply', async () => {
+        const h = harness();
+        await assert.rejects(h.context.readChatReply(new Response(
+            'data: {"event":"token","text":"Partial"}\n\n',
+            { headers: { 'content-type': 'text/event-stream' } }), () => {}),
+            /before its final result/);
     });
     console.log('\n' + passed + ' passed');
 }

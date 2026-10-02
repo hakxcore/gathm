@@ -69,6 +69,48 @@ If the model is unavailable, show the error and let the user retry after fixing
 their connection or model setup. Do not resend the message to `/agent/ask`:
 that endpoint routes keywords to tools and is not a conversational fallback.
 
+## Streaming Conversation
+
+The same endpoint accepts `Accept: text/event-stream` to deliver text as it is
+generated. Omit that header to keep the JSON response above. Add your bearer
+authorization header when authentication is enabled.
+
+```bash
+curl -N http://127.0.0.1:8080/api/v1/agent/chat \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"query":"Say hello in one short sentence","history":[]}'
+```
+
+Each SSE `data:` record contains a JSON object. `event` is a field inside that
+object, not a separate SSE `event:` line. A successful stream can look like:
+
+```text
+: connected
+
+data: {"event":"token","text":"Hello"}
+
+data: {"event":"token","text":"!"}
+
+data: {"event":"result","data":{"reply":"Hello!","backend":"llamacpp","model":"local-model"}}
+
+```
+
+A failed turn ends with `{"event":"result","data":{"error":"..."}}`.
+Ignore comment records such as `: connected` and `: waiting`; they carry no
+reply text. Token events are optional and contain provisional text. Require a
+final `result` event, and use its `data.reply` as the authoritative answer or
+display its `data.error`. A connection that ends without a result is incomplete.
+
+Do not automatically resend a failed or disconnected turn: tools may already
+have performed actions. The server does not replay failed worker requests.
+
+By default the API reuses an assistant subprocess to avoid importing the model
+runtime on every turn. Conversation history still comes entirely from each
+request. Set `GATHM_CHAT_WORKER=0` before starting the API to use a new subprocess
+for each turn; SSE remains available but sends only the final result in this
+mode.
+
 ## Notes
 
 - Assistant chat uses the configured model and preserves the request's tool permissions.

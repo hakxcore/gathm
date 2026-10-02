@@ -796,9 +796,22 @@ On CPU-only hardware that prefill is the wait. Three things reduce it:
   ~3.5 KB of box-drawing and ANSI escapes; the model now gets the text without
   the art, capped by `GATHM_OBS_MAX_CHARS`.
 
-What remains, and is not yet optimized: the API server starts a fresh Python
-process per turn (`pilot/chat_once.py`), so the GUI pays LangChain's import cost
-on every message — noticeable on a phone, and worth a persistent worker later.
+The API keeps a reusable assistant process, so later messages avoid Python and
+LangChain startup. It handles one turn at a time, with a bounded waiting queue;
+each turn still supplies its own conversation history. Changes to the caller,
+permissions, model configuration, or watched runtime files replace the worker.
+Timed-out or disconnected streaming requests stop without replaying actions.
+
+The GUI displays text as it arrives and starts speaking completed sentences
+while the rest is generated. Model clients are created lazily and reused, and
+connectivity refreshes in the background instead of delaying local replies.
+JSON API clients keep the existing response format; request
+`Accept: text/event-stream` for token events followed by one final result.
+
+A paired macOS test with the same 8B llama.cpp model measured 19–62% lower
+complete-reply latency across four short tasks, and about 75% lower time to
+first text for writing and explanation. These are local measurements, not a
+guarantee for other devices. See the [method, results, and limits](docs/testing/latency.md).
 
 | Variable | Purpose |
 |---|---|
@@ -807,6 +820,7 @@ on every message — noticeable on a phone, and worth a persistent worker later.
 | `GATHM_OLLAMA_NUM_PREDICT` | cap on generated tokens (unset by default) |
 | `GATHM_OLLAMA_NUM_CTX` | context window override (unset by default) |
 | `GATHM_CHAT_TIMEOUT` | seconds the API waits for one agent turn (default 600) |
+| `GATHM_CHAT_WORKER` | reuse the assistant process (default `1`; `0` restores one process per turn) |
 
 ## Quick Start
 
@@ -1167,9 +1181,14 @@ microphone synthesised inside the page and the API stubbed:
 ```bash
 npm install playwright-core
 node tests/conversation_browser_test.js
+node tests/streaming_browser_test.js
 ```
 
-It skips cleanly when playwright-core is absent. It exists because the failure
+These skip cleanly when playwright-core is absent. Set `GATHM_CHROMIUM` to an
+existing Chromium executable, or install the matching browser with
+`npx playwright-core install chromium`. The streaming suite verifies early
+text/audio, interruption, JSON compatibility, and incomplete-stream recovery.
+They exist because the failure
 that actually happens is a loop that passes every unit test and never fires in
 the page — which is how the hardcoded API port and the CDN-dependent icon
 call were found.

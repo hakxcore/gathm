@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -23,6 +24,9 @@ from api import server
 @unittest.skipUnless(server.HAS_FASTAPI and httpx, "API test dependencies unavailable")
 class AssistantApiTests(unittest.TestCase):
     def setUp(self):
+        legacy = patch.dict(os.environ, {"GATHM_CHAT_WORKER": "0"})
+        legacy.start()
+        self.addCleanup(legacy.stop)
         auth = patch.multiple(server, AUTH_ENABLED=False, TOKEN_MAP={})
         auth.start()
         self.addCleanup(auth.stop)

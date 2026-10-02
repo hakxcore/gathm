@@ -203,6 +203,7 @@ function renderMessage(m) {
 
     chatArea.appendChild(wrapper);
     chatArea.appendChild(time);
+    return { wrapper: wrapper, time: time, body: msg.querySelector('.md, p') };
 }
 
 function addMessage(text, sender, cssClass) {
@@ -381,9 +382,11 @@ let speechGeneration = 0;
 // without this the endpointer would drop to its normal threshold mid-reply and
 // the next sentence could trigger on its own echo.
 let speakingActive = false;
+let cancelStreamingSpeech = null;
 
 function stopSpeaking() {
     speechGeneration++;
+    if (cancelStreamingSpeech) cancelStreamingSpeech();
     speakingActive = false;
     if (currentAudio) {
         try { currentAudio.pause(); } catch (_) { /* already gone */ }
@@ -400,18 +403,21 @@ function stopSpeaking() {
  * fails intermittently, so one retry recovers most of them, and whatever is
  * still lost says so in the console instead of vanishing.
  */
-async function fetchSpeech(text) {
+async function fetchSpeech(text, signal) {
     for (let attempt = 0; attempt < 2; attempt++) {
+        if (signal && signal.aborted) return null;
         try {
             const res = await fetch(API_BASE + '/api/v1/speech', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: text }),
+                signal: signal,
             });
             if (res.ok) return URL.createObjectURL(await res.blob());
             if (res.status >= 400 && res.status < 500) break;   // will not improve
         } catch (_) { /* network hiccup; worth one more go */ }
     }
+    if (signal && signal.aborted) return null;
     console.warn('[speech] could not render, sentence skipped:', text);
     return null;
 }
@@ -524,6 +530,103 @@ if (speakBtn) {
 
 checkSpeech();
 
+/** Queue complete streamed sentences, with only one synthesis ahead. */
+function startStreamingSpeech() {
+    if (!speechAvailable || !speakEnabled || !window.GathmChunker || !GathmChunker.createStream) return null;
+    const mine = ++speechGeneration;
+    const queue = [];
+    const controller = new AbortController();
+    let ended = false, wake = null;
+    const notify = function () { if (wake) { const fn = wake; wake = null; fn(); } };
+    const cancel = function () {
+        ended = true;
+        controller.abort();
+        notify();
+    };
+    // stopSpeaking() must release a waiter even between incoming sentences.
+    cancelStreamingSpeech = cancel;
+    const prefetch = function () {
+        if (controller.signal.aborted) return;
+        queue.slice(0, 2).forEach(function (entry) {
+            if (!entry.pending && !entry.consumed) entry.pending = fetchSpeech(entry.text, controller.signal);
+        });
+    };
+    const chunker = GathmChunker.createStream(function (text) {
+        if (mine !== speechGeneration || controller.signal.aborted) return;
+        queue.push({ text: text });
+        prefetch();
+        notify();
+    });
+    const done = (async function () {
+        try {
+            while (mine === speechGeneration && !controller.signal.aborted) {
+                if (!queue.length) {
+                    if (ended) break;
+                    await new Promise(function (resolve) { wake = resolve; });
+                    continue;
+                }
+                speakingActive = true;
+                if (!voiceActive) setOrbState('speaking');
+                const entry = queue[0];
+                const url = await entry.pending;
+                entry.pending = null;
+                entry.consumed = true;
+                if (mine !== speechGeneration || controller.signal.aborted) {
+                    if (url) URL.revokeObjectURL(url);
+                    break;
+                }
+                if (url) await playClip(url);
+                queue.shift();
+                prefetch();
+            }
+        } catch (_) {
+            // A speech failure must not reject the chat/conversation promise.
+        } finally {
+            queue.forEach(function (entry) {
+                if (entry.pending) entry.pending.then(function (url) { if (url) URL.revokeObjectURL(url); });
+            });
+            if (cancelStreamingSpeech === cancel) cancelStreamingSpeech = null;
+            if (mine === speechGeneration) {
+                speakingActive = false;
+                if (!voiceActive) setOrbState('idle');
+            }
+        }
+    })();
+    return {
+        feed: function (text) { if (!ended) chunker.feed(text); },
+        finish: function () { if (!ended) chunker.finish(); ended = true; notify(); return done; },
+        cancel: function () { if (mine === speechGeneration) stopSpeaking(); else cancel(); },
+        done: done
+    };
+}
+
+/** Parse SSE incrementally, including events split across network packets. */
+async function readChatReply(res, onToken) {
+    if (!(res.headers.get('content-type') || '').includes('text/event-stream')) return res.json();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    try {
+        while (true) {
+            const part = await reader.read();
+            pending += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+            let end;
+            while ((end = pending.indexOf('\n')) >= 0) {
+                const line = pending.slice(0, end).trimEnd();
+                pending = pending.slice(end + 1);
+                if (!line.startsWith('data:')) continue;
+                const event = JSON.parse(line.slice(5));
+                if (event.event === 'token' && typeof event.text === 'string') onToken(event.text);
+                else if (event.event === 'result') return event.data;
+            }
+            if (part.done) throw new Error('Assistant stream ended before its final result');
+        }
+    } finally {
+        await reader.cancel();
+        reader.releaseLock();
+    }
+}
+
 // -- Send via API ----------------------------------------------------------
 async function sendMessage(options = {}) {
     const text = messageInput.value.trim();
@@ -552,29 +655,68 @@ async function sendMessage(options = {}) {
     updateComposerState();
     sendBtn.disabled = true;
     showTyping();
+    let preview = null, partial = '', streamedSpeech = null;
+    let replySpeechGeneration = speechGeneration;
+    const canSpeak = function () {
+        return replySpeechGeneration === speechGeneration &&
+            (options.conversationGeneration === undefined ||
+             (convoMode && options.conversationGeneration === conversationGeneration));
+    };
+    const clearPreview = function () {
+        if (preview) { preview.wrapper.remove(); preview.time.remove(); preview = null; }
+    };
 
     try {
         const res = await fetch(API_BASE + '/api/v1/agent/chat', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
             body: JSON.stringify({ query: text, history: history }),
         });
 
-        hideTyping();
-
         if (!res.ok) {
+            hideTyping();
             const err = await res.json().catch(function() { return {}; });
             addMessage(err.error || 'Server error (' + res.status + ')', 'bot', 'bot-error');
             return;
         }
 
-        const data = await res.json();
+        const data = await readChatReply(res, function (token) {
+            if (!preview) {
+                hideTyping();
+                preview = renderMessage({ text: '', sender: 'bot' });
+                if (canSpeak()) {
+                    streamedSpeech = startStreamingSpeech();
+                    if (streamedSpeech) {
+                        replySpeechGeneration = speechGeneration;
+                        speaking = streamedSpeech.done;
+                    }
+                }
+            }
+            partial += token;
+            preview.body.textContent = partial;
+            scrollToBottom();
+            if (streamedSpeech && canSpeak()) streamedSpeech.feed(token);
+        });
+        hideTyping();
+        clearPreview();
         const reply = formatAgentReply(data);
         addMessage(reply, 'bot');
         // Not awaited: the text is already on screen and the composer should
         // come back immediately. Conversation mode awaits `speaking` instead.
-        if (options.conversationGeneration === undefined ||
-            (convoMode && options.conversationGeneration === conversationGeneration)) {
+        if (streamedSpeech) {
+            // The backend trims the final answer. Leading/trailing whitespace
+            // in raw model tokens must not make us speak that answer twice.
+            const streamedText = partial.trimStart();
+            if (data.error || !canSpeak()) streamedSpeech.cancel();
+            else if (reply.startsWith(streamedText) || reply === streamedText.trimEnd()) {
+                streamedSpeech.feed(reply.slice(streamedText.length));
+                speaking = streamedSpeech.finish();
+            } else {
+                // The final result may replace a draft after tool execution.
+                streamedSpeech.cancel();
+                speaking = speakReply(reply);
+            }
+        } else if (canSpeak()) {
             speaking = speakReply(reply);
         }
 
@@ -588,6 +730,8 @@ async function sendMessage(options = {}) {
 
     } catch (err) {
         hideTyping();
+        clearPreview();
+        if (streamedSpeech) streamedSpeech.cancel();
         addMessage(
             'I can’t reach Gathm right now. Check that it is running, then try again.',
             'bot', 'bot-error'

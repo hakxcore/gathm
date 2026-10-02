@@ -1,0 +1,464 @@
+{
+  "platform": "macOS-26.7-arm64-arm-64bit-Mach-O",
+  "repeat": 4,
+  "before_url": "http://127.0.0.1:8767",
+  "after_url": "http://127.0.0.1:8768",
+  "warmup": [
+    {
+      "build": "before",
+      "seconds": 2.2584675420000053,
+      "first_text_seconds": 2.2584675420000053,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "seconds": 1.2997739999999567,
+      "first_text_seconds": 1.2994745829999488,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    }
+  ],
+  "samples": [
+    {
+      "build": "before",
+      "case": "greeting",
+      "iteration": 0,
+      "seconds": 1.428688749999992,
+      "first_text_seconds": 1.428688749999992,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "greeting",
+      "iteration": 0,
+      "seconds": 0.9702386669999896,
+      "first_text_seconds": 0.9697797499999865,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "explanation",
+      "iteration": 0,
+      "seconds": 9.35464966699999,
+      "first_text_seconds": 9.35464966699999,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "explanation",
+      "iteration": 0,
+      "seconds": 2.916475916999957,
+      "first_text_seconds": 1.0764943749999816,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "writing",
+      "iteration": 0,
+      "seconds": 7.4103004169999735,
+      "first_text_seconds": 7.4103004169999735,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "writing",
+      "iteration": 0,
+      "seconds": 3.1811437920000003,
+      "first_text_seconds": 0.8952537920000054,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "context",
+      "iteration": 0,
+      "seconds": 2.170366124999987,
+      "first_text_seconds": 2.170366124999987,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "context",
+      "iteration": 0,
+      "seconds": 0.20941175000001522,
+      "first_text_seconds": 0.208300166000015,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "greeting",
+      "iteration": 1,
+      "seconds": 1.0927864170000134,
+      "first_text_seconds": 1.0922445829999674,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "greeting",
+      "iteration": 1,
+      "seconds": 1.53009366699996,
+      "first_text_seconds": 1.53009366699996,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "explanation",
+      "iteration": 1,
+      "seconds": 2.535436250000032,
+      "first_text_seconds": 0.809173291000036,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "explanation",
+      "iteration": 1,
+      "seconds": 3.22975624999998,
+      "first_text_seconds": 3.22975624999998,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "writing",
+      "iteration": 1,
+      "seconds": 3.3003260410000053,
+      "first_text_seconds": 1.083248875000038,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "writing",
+      "iteration": 1,
+      "seconds": 3.7188864159999753,
+      "first_text_seconds": 3.7188864159999753,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "context",
+      "iteration": 1,
+      "seconds": 0.5540050419999716,
+      "first_text_seconds": 0.5527439169999866,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "context",
+      "iteration": 1,
+      "seconds": 0.7432493329999943,
+      "first_text_seconds": 0.7432493329999943,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "greeting",
+      "iteration": 2,
+      "seconds": 1.4356051250000519,
+      "first_text_seconds": 1.4356051250000519,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "greeting",
+      "iteration": 2,
+      "seconds": 0.9747838750000142,
+      "first_text_seconds": 0.974269124999978,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "explanation",
+      "iteration": 2,
+      "seconds": 3.156037958000013,
+      "first_text_seconds": 3.156037958000013,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "explanation",
+      "iteration": 2,
+      "seconds": 2.5110588329999928,
+      "first_text_seconds": 0.7947481670000229,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "writing",
+      "iteration": 2,
+      "seconds": 3.9804572919999828,
+      "first_text_seconds": 3.9804572919999828,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "writing",
+      "iteration": 2,
+      "seconds": 3.107660874999965,
+      "first_text_seconds": 0.8963015420000033,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "context",
+      "iteration": 2,
+      "seconds": 1.1159304579999798,
+      "first_text_seconds": 1.1159304579999798,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "context",
+      "iteration": 2,
+      "seconds": 0.20253450000001294,
+      "first_text_seconds": 0.20134091700003864,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "greeting",
+      "iteration": 3,
+      "seconds": 0.9834670000000187,
+      "first_text_seconds": 0.9829837089999955,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "greeting",
+      "iteration": 3,
+      "seconds": 1.383492208000007,
+      "first_text_seconds": 1.383492208000007,
+      "response": {
+        "reply": "I'm Gathm, your personal AI assistant. How can I assist you today?",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "explanation",
+      "iteration": 3,
+      "seconds": 2.523095249999983,
+      "first_text_seconds": 0.7945888749999881,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "explanation",
+      "iteration": 3,
+      "seconds": 3.160189833000004,
+      "first_text_seconds": 3.160189833000004,
+      "response": {
+        "reply": "RAM (Random Access Memory) is a temporary storage space for data and applications currently being used by the computer, whereas storage refers to the long-term holding area for files, programs, and data, such as a hard drive or solid-state drive.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "writing",
+      "iteration": 3,
+      "seconds": 3.809514792000016,
+      "first_text_seconds": 1.5647662500000479,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "writing",
+      "iteration": 3,
+      "seconds": 3.9917635829999654,
+      "first_text_seconds": 3.9917635829999654,
+      "response": {
+        "reply": "Here's a possible birthday greeting for your friend: \n\n\"Happy birthday to a green thumb extraordinaire, may your day be as vibrant and beautiful as the gardens you tend with love and care. Wishing you a year ahead filled with growth, blooms, and all the joys of nurturing the earth.\"",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "after",
+      "case": "context",
+      "iteration": 3,
+      "seconds": 0.5629277080000179,
+      "first_text_seconds": 0.5615544170000248,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    },
+    {
+      "build": "before",
+      "case": "context",
+      "iteration": 3,
+      "seconds": 0.9153648330000124,
+      "first_text_seconds": 0.9153648330000124,
+      "response": {
+        "reply": "Sam.",
+        "backend": "llamacpp",
+        "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M"
+      }
+    }
+  ],
+  "summary": {
+    "greeting": {
+      "before": {
+        "successful": 4,
+        "seconds": 1.432146937500022,
+        "first_text_seconds": 1.432146937500022
+      },
+      "after": {
+        "successful": 4,
+        "seconds": 0.9791254375000165,
+        "first_text_seconds": 0.9786264169999868
+      }
+    },
+    "explanation": {
+      "before": {
+        "successful": 4,
+        "seconds": 3.194973041499992,
+        "first_text_seconds": 3.194973041499992
+      },
+      "after": {
+        "successful": 4,
+        "seconds": 2.5292657500000075,
+        "first_text_seconds": 0.8019607290000295
+      }
+    },
+    "writing": {
+      "before": {
+        "successful": 4,
+        "seconds": 3.986110437499974,
+        "first_text_seconds": 3.986110437499974
+      },
+      "after": {
+        "successful": 4,
+        "seconds": 3.240734916500003,
+        "first_text_seconds": 0.9897752085000207
+      }
+    },
+    "context": {
+      "before": {
+        "successful": 4,
+        "seconds": 1.015647645499996,
+        "first_text_seconds": 1.015647645499996
+      },
+      "after": {
+        "successful": 4,
+        "seconds": 0.3817083959999934,
+        "first_text_seconds": 0.3805220415000008
+      }
+    }
+  }
+}
