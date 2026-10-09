@@ -40,6 +40,17 @@ access when your browser asks. Use the interface on localhost, such as
 `http://127.0.0.1:8080`, or HTTPS for browser microphone access. If voice is
 unavailable, you can keep using text chat.
 
+## System Actions
+
+Ask for a supported [system action](../../system-control.md), such as changing
+volume, opening an app, moving a file, or restarting the computer. A confirmation
+card names the exact action and the device running Gathm. Nothing changes until
+you choose **Approve once**. **Cancel**, expiry, clearing chat, or a new message
+invalidates the pending action. Voice capture pauses for confirmation; a spoken
+“yes” does not approve a card. Cards and approval tokens are not restored from
+chat history. A lost connection is reported without automatically repeating an
+action that may already have run.
+
 ## Conversation Context
 
 Recent turns are sent with each message so follow-up questions have context.

@@ -128,6 +128,9 @@ def run_turn(req: dict, on_token=None):
                 # checking only "agent" silently dropped its answer.
                 if value.get("next_step") == "end" and messages:
                     reply = messages[-1].content
+    except getattr(pilot, "ControlApprovalRequired", ()) as exc:
+        return _result({"reply": "Please confirm the proposed system action. It has not run yet.",
+                        "pending_control": {"command": exc.command}})
     except Exception as exc:  # noqa: BLE001
         # A loop that will not converge is not an error to hand the GUI. The
         # tool ran and its output is in hand; that is a better answer than a

@@ -60,13 +60,16 @@ from typing import Any, Optional, Literal, Union
 
 if __package__:
     from .assistant_worker import AssistantWorker
+    from .system_approvals import ApprovalStore
 else:  # Direct scripts and importlib-based launchers may lack a package context.
     _repo_root = str(Path(__file__).resolve().parent.parent)
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
     from api.assistant_worker import AssistantWorker
+    from api.system_approvals import ApprovalStore
 
 _CHAT_WORKER = AssistantWorker()
+_SYSTEM_APPROVALS = ApprovalStore()
 
 try:
     from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -461,7 +464,7 @@ def run_chat_agent(query: str, history: list = None, timeout: int | None = None,
         state = Path(env.get("GATHM_CONFIG_DIR") or Path.home() / ".gathm")
         watched = [GATHM_ROOT / ".env", PILOT_DIR / ".env", CHAT_SCRIPT,
                    PILOT_DIR / "main.py", PILOT_DIR / "browser.py"]
-        watched += [GATHM_ROOT / "lib" / name for name in ("llm.py", "llamacpp.py", "sysexec.py")]
+        watched += [GATHM_ROOT / "lib" / name for name in ("llm.py", "llamacpp.py", "sysexec.py", "system_control.py", "control_intent.py")]
         watched += [state / name for name in ("model", "llm_backend", "llamacpp_model", "llamacpp_bin")]
         stamps = []
         for path in watched:
@@ -755,6 +758,7 @@ async def _app_lifespan(app):
     try:
         yield
     finally:
+        _SYSTEM_APPROVALS.clear()
         await asyncio.to_thread(_CHAT_WORKER.shutdown)
 
 
@@ -786,6 +790,8 @@ def _role_environment(role: str) -> dict:
     allowed = {t["name"] for t in list_tools()}
     if role_has_permission(role, "system:execute"):
         allowed.add("system")
+    if role_has_permission(role, "system:control"):
+        allowed.add("control")
     if role_has_permission(role, "browser:execute"):
         allowed.add("browser")
     # Explicit denies take precedence over capabilities, including builtins.
@@ -882,6 +888,13 @@ class ChatRequest(BaseModel):
     """GUI chat turn. `history` is prior turns as {"role", "content"} dicts."""
     query: str = Field(min_length=1, max_length=16000)
     history: list = Field(default_factory=list, max_length=100)
+
+class SystemControlRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=2048)
+
+class SystemConfirmRequest(BaseModel):
+    id: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
+    approve: bool = Field(strict=True)
 
 class SpeechRequest(BaseModel):
     """Text to render as speech for the browser to play."""
@@ -1021,14 +1034,18 @@ async def agent_chat(body: ChatRequest, request: Request):
     role = _get_role(request)
     if not role_has_permission(role, "tool:execute"):
         raise HTTPException(403, f"Role '{role}' lacks tool:execute permission")
+    owner = _principal(request)
+    # A new request replaces the previous intent; stale cards cannot execute it.
+    _SYSTEM_APPROVALS.cancel_owner(owner)
     if "text/event-stream" in request.headers.get("accept", ""):
-        return StreamingResponse(_stream_chat(body.query, body.history),
+        return StreamingResponse(_stream_chat(body.query, body.history, owner=owner, role=role),
                                  media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    return await asyncio.to_thread(run_chat_agent, body.query, body.history)
+    result = await asyncio.to_thread(run_chat_agent, body.query, body.history)
+    return await asyncio.to_thread(_prepare_chat_control, result, owner, role)
 
 
-async def _stream_chat(query, history):
+async def _stream_chat(query, history, owner=None, role=None):
     """Bounded delivery; disconnects stop this turn without retrying actions."""
     loop = asyncio.get_running_loop()
     events = asyncio.Queue(maxsize=64)
@@ -1054,6 +1071,7 @@ async def _stream_chat(query, history):
                                     on_token=lambda text: publish({"event": "token", "text": text}),
                                     cancelled=cancelled)
             if not cancelled.is_set():
+                result = _prepare_chat_control(result, owner, role)
                 publish({"event": "result", "data": result})
         except Exception:
             if not cancelled.is_set():
@@ -1087,6 +1105,78 @@ async def _stream_chat(query, history):
         # Do not cancel the thread wrapper while it is cleaning that group up.
         if task.done():
             task.result()
+
+
+def _system_control():
+    root = str(GATHM_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from lib import system_control
+    return system_control
+
+
+def _require_system_control(role):
+    if (not role or not role_has_permission(role, "tool:execute") or
+            not role_has_permission(role, "system:control") or
+            "control" in set(role_blocked_tools(role)) | set(role_requires_approval(role))):
+        raise HTTPException(403, "This role cannot use system controls.")
+
+
+def _prepare_control(command, owner, role):
+    _require_system_control(role)
+    plan = _system_control().prepare(command)
+    if not plan["requires_confirmation"]:
+        return _system_control().execute(plan)
+    key, expires = _SYSTEM_APPROVALS.create(owner, plan)
+    return {"reply": "Please review and confirm the proposed system action. It has not run yet.",
+            "approval": {"id": key, "summary": plan["summary"], "warning": plan["warning"],
+                         "command": "control " + plan["command"], "expires_at": expires,
+                         "target": f"{platform.node()} ({plan['platform']})"}}
+
+
+def _prepare_chat_control(result, owner, role):
+    if not isinstance(result, dict) or "pending_control" not in result:
+        return result
+    # Only the worker's structured proposal reaches this code. Text produced by
+    # the model, conversation history and the browser never create approvals.
+    try:
+        proposal = result["pending_control"]
+        if not isinstance(proposal, dict) or not isinstance(proposal.get("command"), str):
+            raise ValueError("Invalid system action proposal.")
+        return _prepare_control(proposal["command"], owner, role)
+    except (ValueError, OSError, HTTPException) as exc:
+        return {"error": getattr(exc, "detail", None) or str(exc)}
+
+
+@app.get("/api/v1/system/status", tags=["system"])
+async def system_control_status(request: Request):
+    role = _get_role(request)
+    _require_system_control(role)
+    return await asyncio.to_thread(_prepare_control, "status", _principal(request), role)
+
+
+@app.post("/api/v1/system/prepare", tags=["system"])
+async def system_control_prepare(body: SystemControlRequest, request: Request):
+    role = _get_role(request)
+    _require_system_control(role)
+    try:
+        return await asyncio.to_thread(_prepare_control, body.command, _principal(request), role)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/v1/system/confirm", tags=["system"])
+async def system_control_confirm(body: SystemConfirmRequest, request: Request):
+    role = _get_role(request)
+    _require_system_control(role)  # permissions may have changed since proposal
+    try:
+        plan = _SYSTEM_APPROVALS.take(body.id, _principal(request))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    if not body.approve:
+        return {"ok": True, "output": "Cancelled. The system action was not run."}
+    # No model turn, client-supplied command, replay, or fallback on failure.
+    return await asyncio.to_thread(_system_control().execute, plan)
 
 @app.post("/api/v1/agent/plan", tags=["agent"])
 async def agent_plan(body: TaskRequest, request: Request):

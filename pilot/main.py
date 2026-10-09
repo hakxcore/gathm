@@ -134,11 +134,13 @@ TOOL_ALIASES = {
 
 # Built-in tools handled directly in Python (not shell scripts in tools/)
 BUILTIN_TOOLS: dict[str, str] = {
+    "control": "Control this device: volume, brightness, apps, files, processes, screenshots, "
+               "lock, sleep, restart or shutdown. Changes require your confirmation. Usage: control status",
     "browser": "Open URLs, fetch web pages, or take screenshots. "
                "Usage: browser open <url> | browser fetch <url> | browser screenshot <url>",
-    "system": "Run a shell command on this machine to inspect or control it "
-              "(disk space, processes, network, installing things, files). "
-              "Usage: system <command>",
+    "system": "Optional raw shell access for other inspection or explicitly requested commands "
+              "(disk space, network, package management). Prefer control for supported device actions. "
+              "Raw shell access has a separate enable setting. Usage: system <command>",
 }
 
 # Lazy-import the browser module so a missing optional dep doesn't crash Pilot
@@ -160,6 +162,31 @@ try:
     from lib import sysexec as _sysexec
 except Exception:  # noqa: BLE001 - degrade to "no system control"
     _sysexec = None
+
+
+class ControlApprovalRequired(Exception):
+    """A typed action awaiting a human; never permission from model prose."""
+    def __init__(self, command):
+        self.command = command
+        super().__init__("Please confirm the proposed system action.")
+
+
+def _run_control_command(command):
+    from lib import system_control
+    if not command.strip():
+        return "Usage: control status | volume get | volume set <0-100> | apps list | power restart"
+    try:
+        plan = system_control.prepare(command)
+        if plan["requires_confirmation"]:
+            if not _can_ask_the_user():
+                raise ControlApprovalRequired(plan["command"])
+            if not _confirm_command(plan["summary"], plan["warning"] or
+                                    "This changes the device running Gathm. Approve this action once."):
+                return "Cancelled. The system action was not run."
+        result = system_control.execute(plan)
+        return result["output"] if result["ok"] else "Error: " + result["output"]
+    except (ValueError, OSError) as exc:
+        return "Error: " + str(exc)
 
 
 def _can_ask_the_user() -> bool:
@@ -188,8 +215,8 @@ def _confirm_command(command: str, reason: str) -> bool:
         "  [color(208) bold][?][/color(208) bold] Gathm wants to run a command "
         "on this machine:"
     )
-    console.print(f"      [bold]{command}[/bold]")
-    console.print(f"      [color(244)]{reason}[/color(244)]")
+    console.print("      " + command, style="bold", markup=False)
+    console.print("      " + reason, style="color(244)", markup=False)
     try:
         answer = input("      run it? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -422,6 +449,8 @@ def tool_requires_internet(tool_name: str) -> bool:
     anything we can't read (built-ins, missing/garbled manifest) so we never
     offer a tool offline that would just fail — the conservative choice.
     """
+    if tool_name == "control":
+        return False
     if tool_name in _REQUIRES_INTERNET_CACHE:
         return _REQUIRES_INTERNET_CACHE[tool_name]
 
@@ -557,6 +586,8 @@ def run_gathm_tool_raw(command: str) -> str:
         return "Error: Tool access denied."
 
     # Dispatch built-in tools before looking in the shell tools directory
+    if tool_name == "control":
+        return _run_control_command(shlex.join(tool_args))
     if tool_name == "browser":
         return _run_browser_action(" ".join(tool_args))
 
@@ -728,6 +759,11 @@ def _invoke_spoken(llm, messages):
     streaming interface, so behaviour is unchanged wherever speech is off.
     """
     sink = _TOKEN_SINK
+    from lib.control_intent import needs_control_evidence
+    # Hold device claims until call_model has a real tool call/result. Otherwise
+    # a fabricated success could already be spoken or streamed to the browser.
+    if needs_control_evidence(_last_user_question(messages)):
+        sink = None
     if sink is None or not hasattr(llm, "stream"):
         return llm.invoke(messages)
 
@@ -991,6 +1027,14 @@ _TOOL_INDEX: dict = {}
 # Words other tools own are deliberately absent — "ip" belongs to ipinfo,
 # "search" to websearch — because taking them would break those instead.
 BUILTIN_TAGS = {
+    "control": {
+        "volume", "mute", "unmute", "brightness", "screen", "screenshot", "capture",
+        "app", "apps", "application", "applications", "open", "launch", "calculator",
+        "file", "folder", "directory", "downloads", "desktop", "move", "rename", "trash",
+        "create", "mkdir", "process", "processes", "stop", "terminate", "pid",
+        "restart", "reboot", "shutdown", "shut", "power", "sleep", "lock",
+        "device", "computer", "phone", "control", "controls",
+    },
     "system": {
         "machine", "computer", "laptop", "device", "phone", "os", "version",
         "macos", "mac", "osx", "windows", "linux", "termux", "android", "ios",
@@ -1156,11 +1200,29 @@ def _last_user_question(messages) -> str:
     return ""
 
 
-_SYSTEM_HELP = """DEVICE ACCESS: To INSPECT OR CONTROL THIS MACHINE use the 'system' tool with a shell
+_CONTROL_HELP = """TYPED DEVICE CONTROLS: Prefer 'control' for supported device actions.
+    These operate on the device running Gathm, not necessarily the browser device.
+    Action Input: control status
+    Supported syntax: control volume get|set <0-100>|mute|unmute;
+    control brightness get|set <0-100>; control apps list|open "Installed App Name";
+    control files list|open|mkdir|trash "~/path"; control files move "~/source" "~/destination";
+    control processes list|stop <pid>; control screenshot;
+    control power lock|sleep|restart|shutdown.
+    Use ONE operation per tool call, not the example separators shown here.
+    List apps/processes first when their exact name or PID is unknown. Never invent a PID.
+    File changes stay in the home folder, do not overwrite, and protect configuration.
+    Trash is recoverable. Do not substitute a permanent delete or raw shell action.
+    Changes and screen capture require a human confirmation. Stop when approval is
+    pending; a chat or voice message saying yes is not approval. Never claim an action
+    ran before its result. Report unsupported controls/OS permissions without bypassing them."""
+
+_SYSTEM_HELP = """RAW SHELL ACCESS: For other inspection use the 'system' tool with a shell
     command: Action Input: system <command>
     This machine is: {platform}
     Commands run in: {shell}
-    System control is currently: {state}
+    Raw shell access through 'system' is currently: {state}
+    This setting does not disable the separate typed 'control' tool. Use 'control'
+    for its supported device actions, including when raw shell access is disabled.
     Write the command for THAT platform and THAT shell:
     - macOS: `sw_vers` not `lsb_release`, `vm_stat` not `free`, `brew` for packages
     - Termux (Android): `pkg` not `apt`, `getprop` for device details
@@ -1178,8 +1240,8 @@ _SYSTEM_HELP = """DEVICE ACCESS: To INSPECT OR CONTROL THIS MACHINE use the 'sys
     question. Read-only commands run immediately; anything that could change
     the machine asks the user first, so do not try to avoid the prompt by
     chaining commands together.
-    If system control is off, say so and stop. You cannot switch it on, and
-    no command you run will change that.
+    If raw shell access is off, do not call 'system' or try to enable it.
+    Use 'control' when it supports the requested action; otherwise explain the limit.
     Report what the output says, and do not do arithmetic on it. `df` already
     has an Avail column — that IS the free space, so quote it rather than
     subtracting Used from Size and getting a different number.
@@ -1202,12 +1264,49 @@ _BROWSER_HELP = """WEB ACCESS: For WEB BROWSING use the 'browser' tool. Availabl
 
 
 # System prompt for models without native tool support
+def _direct_control_request(text):
+    from lib.control_intent import route_control_request
+    return (route_control_request(text) or {}).get("command", "")
+
+
+def _control_followup(messages):
+    """Corrections and chat 'yes' never authorize retries or invented errors."""
+    from lib.control_intent import needs_control_evidence, route_control_request
+    question = _last_user_question(messages).strip()
+    if not re.fullmatch(r"(?:yes|no|never mind|nevermind|(?:it(?:'s| is)?|that(?:'s| is)?)\s+(?:not|still|didn't|did not)\b.*)[.!?]?", question, re.I):
+        return None
+    humans = [m for m in messages if getattr(m, "type", None) == "human"
+              and not str(m.content).lstrip().startswith(_OBSERVATION_PREFIXES)]
+    if len(humans) < 2:
+        return None
+    previous = str(humans[-2].content)
+    if not (route_control_request(previous) or needs_control_evidence(previous)):
+        return None
+    return ("No new system action has run. Chat replies do not approve or retry an action. "
+            "Please state the exact action again; Gathm must show a tool result, "
+            "and any change requires the confirmation prompt or approval card.")
+
+
 def call_model(state: AgentState):
     _require_langchain_runtime()
 
     # Small talk never needs a tool. Answer with the short prompt and finish,
     # skipping tool discovery and the long rule list entirely.
     _last = _last_user_question(state.get("messages"))
+    from lib.control_intent import needs_control_evidence, route_control_request
+    control_request = route_control_request(_last)
+    control_evidence = bool(control_request) or needs_control_evidence(_last)
+    if not _current_turn_messages(state.get("messages")):
+        followup = _control_followup(state.get("messages") or [])
+        if followup:
+            return {"messages": [AIMessage(content=followup)], "next_step": "end"}
+        if control_request:
+            if not _tool_allowed("control"):
+                return {"messages": [AIMessage(content="System control access is denied for this session. Nothing was run.")], "next_step": "end"}
+            if "reply" in control_request:
+                return {"messages": [AIMessage(content=control_request["reply"])], "next_step": "end"}
+            return {"messages": [AIMessage(content="Action: gathm\nAction Input: control " + control_request["command"])],
+                    "next_step": "action"}
     if _is_small_talk(_last):
         from langchain_core.messages import AIMessage as _AIMsg
         _llm = _build_llm()
@@ -1304,6 +1403,7 @@ Give a final answer directly, without Action/Thought formatting.
 
 AVAILABLE TOOLS — optional capabilities for this request:
 {tool_descriptions}
+{_CONTROL_HELP if 'control' in available_tools else ''}
 {system_help}
 {browser_help}
 {offline_notice}"""
@@ -1329,6 +1429,15 @@ AVAILABLE TOOLS — optional capabilities for this request:
             "messages": [_AIMsg(content=f"Action: gathm\nAction Input: {recovered}")],
             "next_step": "action",
         }
+
+    if control_evidence:
+        # A model's success, refusal or quoted OS error is not evidence. Never
+        # display it when no device tool produced a result for this turn.
+        observed = _last_observation(state.get("messages"))
+        return {"messages": [_AIMsg(content=observed or (
+            "No system action was run and no device result was obtained for this request. "
+            "Please give one exact action and target, or use /control for supported commands."))],
+                "next_step": "end"}
 
     # No valid tool call — clean ReAct scaffolding before returning the
     # final answer so the user sees only the actual response text.
@@ -1500,6 +1609,14 @@ def tool_node(state: AgentState):
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
 
+        if normalized_input == "control" or normalized_input.startswith("control "):
+            # Device output is authoritative, including cancellations/errors.
+            # Skip another inference pass and preserve full, literal listings.
+            if "\n" in result:
+                fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", result)), default=0))
+                result = fence + "text\n" + result + "\n" + fence
+            return {"messages": [AIMessage(content=result)], "next_step": "end"}
+
         # Label a failure as a failure. Left as a bare "Observation:", a tool
         # error was answered with the canned engineer line and the actual
         # reason never reached the user — which is how a broken weather lookup
@@ -1660,6 +1777,14 @@ def _handle_slash_command(cmd: str) -> bool:
         tools = discover_tools()
         tool_info = [(t, get_tool_description(t)) for t in tools]
         render_tools_list(tool_info)
+        return True
+
+    if cmd_lower == "/control" or cmd_lower.startswith("/control "):
+        command = cmd.strip()[len("/control"):].strip() or "status"
+        try:
+            render_response(run_gathm_tool_raw("control " + command))
+        except ControlApprovalRequired:
+            render_response("This action needs an interactive confirmation. Use the GUI or an interactive terminal.")
         return True
 
     if cmd_lower == "/clear":

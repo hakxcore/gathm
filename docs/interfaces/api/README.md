@@ -111,6 +111,35 @@ request. Set `GATHM_CHAT_WORKER=0` before starting the API to use a new subproce
 for each turn; SSE remains available but sends only the final result in this
 mode.
 
+## System Controls
+
+These endpoints require both `tool:execute` and `system:control`; the default
+admin role has them. They do not grant raw-shell access. Explicit `control`
+entries in `blocked_tools` or `requires_approval` deny this capability, as they
+do for the other builtins. Cross-origin and remote authentication rules apply.
+
+- `GET /api/v1/system/status` returns this host's supported controls.
+- `POST /api/v1/system/prepare` accepts `{"command":"volume set 40"}`. Read-only
+  commands return `{"ok":true,"output":"..."}`. Changes return `reply` plus an
+  `approval` object containing `id`, `summary`, `warning`, `command`, `target`,
+  and `expires_at` (Unix seconds).
+- `POST /api/v1/system/confirm` accepts `{"id":"<approval-id>","approve":true}`
+  to execute, or `false` to cancel. `approve` must be a JSON boolean. The response
+  is `{"ok":true|false,"output":"..."}`. Do not retry an ambiguous failure.
+
+Approvals last two minutes, are bound to the authenticated caller, and can be
+consumed only once. The server stores the exact validated plan; a confirmation
+cannot substitute a new command. Permissions and target identities are checked
+again before execution. Server restart clears all pending approvals. A new chat
+turn revokes that caller's previous proposals.
+
+Chat/SSE final results may contain the same `approval` object. Render it outside
+generated Markdown, and require a deliberate human UI action. Never put its id
+in model messages, conversation history, or persistent browser storage. A chat
+message saying “yes” is not a confirmation request.
+
+See [commands, platform limits, and recovery](../../system-control.md).
+
 ## Notes
 
 - Assistant chat uses the configured model and preserves the request's tool permissions.

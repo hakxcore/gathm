@@ -390,6 +390,7 @@ def render_help() -> None:
         ("/clear", "Redraw the welcome screen; keeps this conversation"),
         ("/model", "Show the model in use"),
         ("/tools", "Explore tools for information and actions"),
+        ("/control", "Device controls and availability; /control volume set 40 asks before changing it"),
         ("/help or ?", "Show this guide"),
         ("/quit", "Leave Gathm"),
     ]:

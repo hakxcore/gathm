@@ -981,6 +981,27 @@ at all.
 
 ## System control
 
+Ask Gathm to change volume or brightness, open an installed app, manage files,
+stop a process, capture a screenshot, or lock/sleep/restart/shut down the device.
+The `control` tool uses fixed platform adapters and does not need unrestricted
+shell access. Read-only inspection runs immediately. Changes show the exact
+action and target device for **one-time confirmation**, including in the GUI.
+Voice requests can propose actions; approving requires a click or terminal input.
+
+In the TUI, `/control` shows availability and `/control volume set 40` proposes
+a volume change directly. File changes are limited to the home folder, protect
+configuration, and never overwrite a destination. `files trash` keeps a
+recoverable copy under `~/.gathm/trash`. Restart/shutdown include an unsaved-work
+warning and rely on the OS's permissions. Rootless Termux cannot perform those
+power actions; its volume/brightness controls need Termux:API. Availability also
+depends on installed utilities and desktop permissions.
+
+See [system controls](docs/system-control.md) for commands, platform support,
+permissions, and recovery. The controls act on the **device running Gathm**,
+which may differ from the device displaying the browser.
+
+### Advanced shell access
+
 Pilot can run shell commands on the machine it is on — to inspect it (disk,
 processes, network) or to change it (install something, move files). It knows
 which platform it is on and writes the command for that platform: `sw_vers`
@@ -988,7 +1009,7 @@ rather than `lsb_release` on macOS, `pkg` rather than `apt` on Termux,
 `Get-ChildItem` rather than `ls` on Windows. Termux, Linux, macOS, Windows and
 iOS-under-iSH are all supported — see [Platforms](#platforms) below.
 
-**It is off until you turn it on**, because a language model with a shell should
+**Raw shell access is off until you turn it on**, because a language model with a shell should
 be a decision somebody made:
 
 ```bash
@@ -1019,8 +1040,8 @@ Two rules do most of the work. First, a shell metacharacter demotes anything to
 not. Second, the safe list contains only binaries that *cannot write* — anything
 absent isn't assumed hostile, just unproven, so it goes to a human.
 
-Where there is nobody to ask — the GUI and the REST API, which have no
-terminal — anything needing confirmation is refused rather than assumed fine,
+For this raw-shell path, where there is nobody to ask — the GUI and the REST API,
+which have no terminal — anything needing confirmation is refused rather than assumed fine,
 with a message saying to run it in `gathm tui` instead. Read-only commands still
 work there.
 

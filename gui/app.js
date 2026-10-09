@@ -118,6 +118,8 @@ function formatTime() {
 const STORE_KEY = 'gathmChat';
 const STORE_MAX = 200;            // messages kept; older ones are dropped
 let transcript = [];              // [{text, sender, cssClass, time}]
+let systemControls = null;
+let systemControlBusy = false;
 
 function syncConversationView(forceVisible) {
     const hasMessages = !!forceVisible || transcript.length > 0;
@@ -127,7 +129,7 @@ function syncConversationView(forceVisible) {
 }
 
 function updateComposerState() {
-    if (clearBtn) clearBtn.disabled = isSending || isTranscribing || voiceActive || voiceStarting || convoMode || turnBusy;
+    if (clearBtn) clearBtn.disabled = (typeof systemControlBusy !== 'undefined' && systemControlBusy) || isSending || isTranscribing || voiceActive || voiceStarting || convoMode || turnBusy;
 }
 
 function saveChat() {
@@ -157,6 +159,8 @@ function restoreChat() {
 }
 
 function clearChat() {
+    if (systemControlBusy) return;
+    if (systemControls) systemControls.cancelAll();
     transcript = [];
     history = [];
     chatArea.innerHTML = '';
@@ -628,9 +632,40 @@ async function readChatReply(res, onToken) {
 }
 
 // -- Send via API ----------------------------------------------------------
+if (window.GathmControls) systemControls = GathmControls.create({
+    document: document, container: chatArea, apiBase: API_BASE,
+    fetch: function (url, init) { return fetch(url, init); },
+    onPending: function () {
+        if (convoMode || voiceActive || voiceStarting) stopConversation();
+        stopSpeaking();
+        scrollToBottom();
+    },
+    onBusy: function (value) {
+        if (value) {
+            // Voice can have been restarted since the proposal appeared.
+            // Discard capture, pending permissions, and late dictation before
+            // locking controls; no spoken word can approve a system action.
+            stopConversation();
+            voiceGeneration++;
+            hideRecording();
+        }
+        systemControlBusy = value;
+        messageInput.disabled = value;
+        sendBtn.disabled = value || isSending;
+        updateComposerState();
+        updateConvoBtn();
+    },
+    onResult: function (output, ok) {
+        addMessage(output, 'bot', ok ? undefined : 'bot-error');
+        history.push({ role: 'assistant', content: output });
+        history = history.slice(-HISTORY_MAX * 2);
+        saveChat();
+    }
+});
+
 async function sendMessage(options = {}) {
     const text = messageInput.value.trim();
-    if (!text || isSending) return;
+    if (!text || isSending || systemControlBusy) return;
 
     stopSpeaking();               // a new question outranks the old answer
 
@@ -648,6 +683,7 @@ async function sendMessage(options = {}) {
         return;
     }
 
+    if (systemControls) systemControls.cancelAll();
     addMessage(text, 'user');
     messageInput.value = '';
     messageInput.style.height = 'auto';
@@ -699,6 +735,18 @@ async function sendMessage(options = {}) {
         });
         hideTyping();
         clearPreview();
+        if (data && data.approval) {
+            if (streamedSpeech) streamedSpeech.cancel();
+            stopSpeaking();
+            const proposed = systemControls && systemControls.offer(data.approval);
+            const message = proposed ? 'Review the system action above and choose Approve once or Cancel.' :
+                'This system action needs confirmation, but its approval could not be displayed. Nothing was run.';
+            addMessage(message, 'bot');
+            history.push({ role: 'user', content: text }, { role: 'assistant', content: message });
+            history = history.slice(-HISTORY_MAX * 2);
+            saveChat();
+            return;
+        }
         const reply = formatAgentReply(data);
         addMessage(reply, 'bot');
         // Not awaited: the text is already on screen and the composer should
@@ -955,6 +1003,7 @@ async function transcribeChunks(chunks) {
 }
 
 async function transcribeAndSend() {
+    const generation = voiceGeneration;
     const chunks = pcmChunks;
     pcmChunks = [];
     if (!chunks.length) return;
@@ -971,6 +1020,7 @@ async function transcribeAndSend() {
     setRecordingLabel('Transcribing ' + seconds.toFixed(1) + 's of audio…');
     botStatus.textContent = 'Transcribing…';
     const out = await transcribeChunks(chunks);
+    if (generation !== voiceGeneration) return;
     if (out.error) {
         setRecordingLabel('Transcription failed: ' + out.error);
         setTimeout(hideRecording, 6000);
@@ -996,6 +1046,7 @@ async function transcribeAndSend() {
 const bars = Array.from(freqBars.querySelectorAll('.fb'));
 
 async function startVoice() {
+    if (typeof systemControlBusy !== 'undefined' && systemControlBusy) return;
     // Re-entry would orphan the previous AudioContext and mic stream: the
     // globals below are the only handles on them, and starting again
     // overwrites both.
@@ -1120,6 +1171,7 @@ async function startVoice() {
         }
 
         driveFrequency();
+
     } catch (err) {
         if (generation === voiceGeneration) {
             stopVoice(true);
@@ -1321,7 +1373,7 @@ async function handleTurn(chunks) {
 function updateConvoBtn() {
     if (!convoBtn) return;
     convoBtn.hidden = false;
-    convoBtn.disabled = !convoMode && (!asrAvailable || voiceStarting);
+    convoBtn.disabled = (typeof systemControlBusy !== 'undefined' && systemControlBusy) || (!convoMode && (!asrAvailable || voiceStarting));
     convoBtn.classList.toggle('active', convoMode);
     convoBtn.setAttribute('aria-pressed', String(convoMode));
     convoBtn.setAttribute('aria-label',
@@ -1329,7 +1381,7 @@ function updateConvoBtn() {
     convoBtn.innerHTML = '<i data-lucide="' + (convoMode ? 'square' : 'radio') +
                          '" class="btn-icon"></i><span>' +
                          (convoMode ? 'End conversation' : 'Talk to Gathm') + '</span>';
-    micBtn.disabled = !asrAvailable && !voiceActive && !voiceStarting;
+    micBtn.disabled = (typeof systemControlBusy !== 'undefined' && systemControlBusy) || (!asrAvailable && !voiceActive && !voiceStarting);
     micBtn.setAttribute('aria-label', voiceStarting ? 'Cancel microphone request' :
         voiceActive ? (convoMode ? 'End voice conversation' : 'Send voice message') : 'Dictate a message');
     updateComposerState();
@@ -1356,6 +1408,7 @@ function updateVoiceHint() {
 }
 
 async function startConversation() {
+    if (typeof systemControlBusy !== 'undefined' && systemControlBusy) return;
     if (!asrAvailable) {
         await checkTranscribe();
         if (!asrAvailable) {

@@ -44,12 +44,19 @@ outside the assistant, such as `gathm run dns example.com`.
 | `/speak hello` | Try a spoken phrase |
 | `/model` | Show the selected backend and model |
 | `/tools` | Explore available tools |
+| `/control` | Show this device's supported controls |
+| `/control volume set 40` | Propose a volume change; ask for default-no confirmation |
 | `/clear` | Redraw the welcome screen; keep the current conversation context |
 | `/help` or `?` | Show the command guide |
 | `/quit` or `/exit` | Leave Gathm |
 
 Restart the terminal assistant for a fresh conversation. The terminal session
 and browser chat have separate histories.
+
+You can also ask naturally: “Open Calculator”, “Move this file”, or “Restart
+my computer”. Typed [system controls](../../system-control.md) are separate
+from opt-in shell access. Changes require terminal confirmation; merely saying
+“yes” to the model does not authorize them. File trash remains recoverable.
 
 ## Model Configuration
 

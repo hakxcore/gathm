@@ -23,6 +23,14 @@ button, textarea { font: inherit; }
 button { color: inherit; cursor: pointer; }
 button, a, textarea { -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: not-allowed; opacity: .5; }
+.system-approval { margin: 8px 0 20px; padding: 18px; border: 1px solid var(--accent); border-radius: 14px; background: var(--surface-raised); overflow-wrap: anywhere; }
+.system-approval h3 { font-size: 15px; margin-bottom: 10px; }
+.system-approval p { font-size: 13px; line-height: 1.6; margin: 8px 0; }
+.system-approval code { display: block; padding: 10px; white-space: pre-wrap; background: var(--bg); border-radius: 7px; font-size: 12px; }
+.system-approval .approval-target, .system-approval .approval-status { color: var(--text-secondary); }
+.system-approval .approval-warning { color: var(--text-primary); font-weight: 500; }
+.system-approval button { min-height: 44px; padding: 10px 16px; margin: 8px 10px 0 0; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.system-approval .approval-yes { background: var(--accent); color: #18213b; }
 button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
 button { transition: background .18s, border-color .18s, color .18s; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
