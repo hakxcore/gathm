@@ -203,8 +203,22 @@ several gigabytes of weights is not something a status command should do.
 ### Uninstall
 
 ```bash
-./install --uninstall
+./uninstall --dry-run             # preview without changing anything
+./uninstall --keep-data           # retain models, settings, and history
+./install --uninstall             # same uninstaller, including data removal
 ```
+
+Removal asks for confirmation. Add `--yes` for unattended use. Both commands
+keep the source checkout, external model/runtime directories, and the audio
+build cache. Only shortcuts owned by this checkout and the exact PATH block
+added by Gathm are removed. Unrecognized commands are kept; if another install
+may use the shared `~/.gathm` directory, that data is kept too. For pipx installs,
+use `pipx uninstall gathm` to remove the package-managed command afterward.
+Windows users should run these commands inside Git Bash, MSYS2, or WSL.
+
+The installer requires Python 3.10+, repairs incomplete local virtualenvs, and
+returns an error if required verification fails. Set `GATHM_NO_LAUNCH=1` to skip
+opening Gathm after setup; unattended runs never launch it automatically.
 
 After setup, restart shell or source your shell rc file (`~/.bashrc` / `~/.zshrc`).
 

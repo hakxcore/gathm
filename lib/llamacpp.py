@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import shlex
 import signal
 import subprocess

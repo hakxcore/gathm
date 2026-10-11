@@ -1,0 +1,7 @@
+# Bash scripts must stay LF even with Git for Windows core.autocrlf enabled.
+*.sh text eol=lf
+*.bash text eol=lf
+/gathm text eol=lf
+/install text eol=lf
+/uninstall text eol=lf
+/tools/** text=auto eol=lf

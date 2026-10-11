@@ -6,7 +6,6 @@ The terminal remains usable without speech or prompt_toolkit installed.
 
 from __future__ import annotations
 
-import os
 import shutil
 import socket
 import sys
@@ -237,7 +236,7 @@ def render_welcome(model_name: str, tool_count: int, platform: str,
             connectivity, "Network status unknown"),
         style=_C_SUCCESS if connectivity == "online" else _C_MUTED,
     )
-    os.system("clear" if os.name != "nt" else "cls")
+    console.clear()
     _print_panel(content, border_style=_C_ACCENT)
 
 

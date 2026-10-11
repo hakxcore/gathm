@@ -19,8 +19,7 @@ class TestTerminalConversation(unittest.TestCase):
         with patch.object(tui, "console", Console(
             file=output, width=width, color_system=None,
         )), patch.object(tui.shutil, "get_terminal_size",
-                         return_value=os.terminal_size((width, 30))), \
-                patch.object(tui.os, "system"):
+                         return_value=os.terminal_size((width, 30))):
             yield output
 
     def test_conversation_and_controls_fit_phone_and_desktop(self):

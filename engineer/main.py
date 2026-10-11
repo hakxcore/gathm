@@ -17,7 +17,6 @@ try:
     from autogen_agentchat.conditions import TextMentionTermination
     from autogen_agentchat.ui import Console
     from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
-    from autogen_ext.models.anthropic import AnthropicChatCompletionClient
     AUTOGEN_AVAILABLE = True
 except ImportError as e:
     print(f"Import error: {e}")

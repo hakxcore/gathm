@@ -39,7 +39,13 @@ provider credentials remain available to the tools that need them.
 
 ## Shell commands and browsing
 
-System command execution remains disabled unless explicitly enabled by the
+Typed system controls require the `system:control` capability through the API.
+Changes such as moving files, stopping processes, restarting, or shutting down
+require confirmation of the specific proposed action. API confirmations use
+short-lived, one-use tickets bound to the requesting client; the action and its
+target are checked again before execution. Model output cannot approve an action.
+
+Arbitrary shell command execution remains disabled unless explicitly enabled by the
 operator. Commands whose binary and arguments are not known inspection
 operations require confirmation in the terminal. This includes interpreters,
 Git, package managers, programmable text tools, and arbitrary executable paths.

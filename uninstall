@@ -1,183 +1,146 @@
 #!/usr/bin/env bash
-## Author: Hakxcore https://github.com/hakxcore
-## Gathm Uninstaller — supports Termux, macOS, Linux (all distros), WSL, Git Bash
-
+# Gathm uninstaller: Linux, macOS, Termux, WSL, and Windows Bash environments.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/install_common.bash
+source "$SCRIPT_DIR/lib/install_common.bash"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-
-# ── Colors ────────────────────────────────────────────────────────────
-if [[ "${TERM:-dumb}" != "dumb" ]]; then
-    RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"
-    BLUE="\033[34m"; BOLD="\033[1m"; RESET="\033[0m"
-else
-    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; RESET=""
-fi
-
-info()  { echo -e "${BLUE}[*]${RESET} $1"; }
-ok()    { echo -e "${GREEN}[+]${RESET} $1"; }
-warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
-fail()  { echo -e "${RED}[-]${RESET} $1"; }
-
-# ── Platform detection ────────────────────────────────────────────────
-detect_platform() {
-    # Termux (Android)
-    if [[ "$OSTYPE" == linux-android* ]] || command -v termux-setup-storage &>/dev/null; then
-        echo "termux"; return
-    fi
-    case "$(uname -s 2>/dev/null)" in
-        Darwin) echo "macos"; return ;;
-        MINGW*|MSYS*|CYGWIN*) echo "windows"; return ;;
+DRY_RUN=0; KEEP_DATA=0; YES=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        --keep-data) KEEP_DATA=1 ;;
+        --yes|-y) YES=1 ;;
+        --help|-h)
+            printf 'Usage: ./uninstall [--dry-run] [--keep-data] [--yes]\n'
+            printf 'Removes owned shortcuts and local virtualenvs. By default also removes\n'
+            printf '%s (settings, history, models, runtimes, and recovery files).\n' "$HOME/.gathm"
+            printf 'Use --keep-data to retain those files. The source checkout is kept.\n'
+            exit 0 ;;
+        *) printf 'Unknown option: %s (use --help)\n' "$arg" >&2; exit 2 ;;
     esac
-    if [[ -f /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null; then
-        echo "wsl"; return
-    fi
-    echo "linux"
-}
+done
 
-PLATFORM=$(detect_platform)
-
-# ── What install actually puts on disk ───────────────────────────────
 LOCAL_BIN="$HOME/.local/bin"
 DATA_DIR="$HOME/.gathm"
-PILOT_VENV="$SCRIPT_DIR/pilot/venv"
-
-SHORTCUTS=("$LOCAL_BIN/gathm" "$LOCAL_BIN/gathm-agent" "$LOCAL_BIN/gathm-api" "$LOCAL_BIN/audiocpp_cli")
-
-# audio.cpp speech runtime source tree. install clones it into ~/.gathm by
-# default (so it goes with DATA_DIR below), but reuses an existing ~/audio.cpp
-# checkout if one is there. Only the copy we created is removed — a checkout
-# the user made themselves is left alone.
-if [[ -n "${GATHM_AUDIOCPP_SRC:-}" ]]; then
-    AUDIOCPP_SRC="$GATHM_AUDIOCPP_SRC"
-elif [[ -d "$HOME/audio.cpp/.git" ]]; then
-    AUDIOCPP_SRC="$HOME/audio.cpp"
-else
-    AUDIOCPP_SRC="$DATA_DIR/audio.cpp"
-fi
-
-# Shell RC files that may contain the PATH entry added by install
-RC_FILES=(
-    "$HOME/.zshrc"
-    "$HOME/.bashrc"
-    "$HOME/.bash_profile"
-    "$HOME/.profile"
-)
-
-# ── Preview what will be removed ─────────────────────────────────────
-echo ""
-echo -e "${BOLD}Gathm Uninstaller${RESET}"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "  Platform : ${GREEN}${PLATFORM}${RESET}"
-echo ""
-echo "  The following will be removed:"
-for s in "${SHORTCUTS[@]}"; do
-    [[ -f "$s" ]] && echo "    • $s" || echo "    • $s  (not found — skip)"
-done
-[[ -d "$DATA_DIR"    ]] && echo "    • $DATA_DIR  (config & logs)"   || echo "    • $DATA_DIR  (not found — skip)"
-[[ -d "$PILOT_VENV"  ]] && echo "    • $PILOT_VENV  (Python venv)"  || echo "    • $PILOT_VENV  (not found — skip)"
-echo "    • PATH entry from shell RC files"
-
-# Call out the llama.cpp runtime and the model weights for the same reason as
-# audio.cpp below: both live inside DATA_DIR, and a GGUF can be twenty
-# gigabytes that took an hour to download. Nobody should discover that after
-# answering "y".
-LLAMACPP_DIR="${GATHM_LLAMACPP_DIR:-$DATA_DIR/llamacpp}"
-MODELS_DIR="${GATHM_LLAMACPP_MODEL_DIR:-$DATA_DIR/models}"
-_dir_size() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
-if [[ -d "$MODELS_DIR" ]]; then
-    if [[ "$MODELS_DIR" == "$DATA_DIR/"* ]]; then
-        echo -e "    • $MODELS_DIR  ${YELLOW}(model weights, $(_dir_size "$MODELS_DIR") — goes with $DATA_DIR)${RESET}"
+SHORTCUTS=(gathm gathm-agent gathm-api audiocpp_cli)
+TARGETS=("$SCRIPT_DIR/gathm" "$SCRIPT_DIR/agent/orchestrator.sh" "$SCRIPT_DIR/api/server.py" "")
+REMOVE=()
+KEEP_PATH=0
+for i in 0 1 2 3; do
+    shortcut="$LOCAL_BIN/${SHORTCUTS[$i]}"
+    [[ -e "$shortcut" || -L "$shortcut" ]] || continue
+    if { [[ "$i" == 3 ]] && gathm_audio_owned "$shortcut"; } \
+            || { [[ "$i" != 3 ]] && gathm_shortcut_owned "$shortcut" "${TARGETS[$i]}"; }; then
+        REMOVE+=("$shortcut")
     else
-        echo -e "    ${GREEN}Kept:${RESET} $MODELS_DIR  (your own model directory)"
-    fi
-fi
-if [[ -d "$LLAMACPP_DIR" && "$LLAMACPP_DIR" == "$DATA_DIR/"* ]]; then
-    echo -e "    • $LLAMACPP_DIR  ${YELLOW}(llama.cpp runtime — goes with $DATA_DIR)${RESET}"
-fi
-# A llama.cpp installed by Homebrew or a package manager is the system's, not
-# ours; say so rather than leaving the user to wonder.
-if command -v llama-server &>/dev/null; then
-    echo -e "    ${GREEN}Kept:${RESET} $(command -v llama-server)  (installed outside Gathm)"
-fi
-
-# Call out the audio.cpp build explicitly: it is removed only as part of
-# DATA_DIR, and rebuilding it costs 20-60 min on a phone.
-if [[ -d "$AUDIOCPP_SRC" ]]; then
-    if [[ "$AUDIOCPP_SRC" == "$DATA_DIR/"* ]]; then
-        echo -e "    • $AUDIOCPP_SRC  ${YELLOW}(audio.cpp build — goes with $DATA_DIR)${RESET}"
-    else
-        echo -e "    ${GREEN}Kept:${RESET} $AUDIOCPP_SRC  (your own audio.cpp checkout)"
-    fi
-fi
-echo ""
-
-read -r -p "$(echo -e "${YELLOW}> Proceed with uninstallation? [y/N]: ${RESET}")" answer </dev/tty || answer="n"
-if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-    echo -e "${GREEN}> Uninstallation cancelled.${RESET}"
-    exit 0
-fi
-
-echo ""
-
-# ── Remove command shortcuts ──────────────────────────────────────────
-for s in "${SHORTCUTS[@]}"; do
-    if [[ -f "$s" || -L "$s" ]]; then
-        rm -f "$s" && ok "Removed $s" || warn "Could not remove $s"
-    else
-        info "Skipping $s (not found)"
+        printf 'Keeping command not owned by this checkout: %s\n' "$shortcut"
+        KEEP_PATH=1
     fi
 done
-
-# ── Stop the model server before its weights disappear ────────────────
-# Deleting the GGUF out from under a running llama-server leaves a process
-# holding a deleted file and a port nothing explains.
-if [[ -f "$SCRIPT_DIR/lib/llamacpp.py" ]] && command -v python3 &>/dev/null; then
-    python3 "$SCRIPT_DIR/lib/llamacpp.py" stop >/dev/null 2>&1 \
-        && info "Stopped the llama.cpp server" || true
+# Another checkout may use the shared state too. Do not remove its models.
+if (( KEEP_PATH )); then
+    KEEP_DATA=1
+fi
+for venv in "$SCRIPT_DIR/pilot/venv" "$SCRIPT_DIR/engineer/venv"; do
+    if [[ -L "$venv" ]]; then
+        REMOVE+=("$venv") # rm removes the link, never its external target.
+    elif [[ -d "$venv" && -f "$venv/pyvenv.cfg" ]]; then
+        REMOVE+=("$venv")
+    elif [[ -e "$venv" ]]; then
+        printf 'Keeping unrecognized environment directory: %s\n' "$venv"
+    fi
+done
+if (( ! KEEP_DATA )) && [[ -e "$DATA_DIR" || -L "$DATA_DIR" ]]; then
+    REMOVE+=("$DATA_DIR")
 fi
 
-# ── Remove data directory ─────────────────────────────────────────────
-if [[ -d "$DATA_DIR" ]]; then
-    rm -rf "$DATA_DIR" && ok "Removed $DATA_DIR" || warn "Could not remove $DATA_DIR"
-else
-    info "Skipping $DATA_DIR (not found)"
-fi
-
-# ── Remove pilot venv ─────────────────────────────────────────────────
-if [[ -d "$PILOT_VENV" ]]; then
-    rm -rf "$PILOT_VENV" && ok "Removed $PILOT_VENV" || warn "Could not remove $PILOT_VENV"
-else
-    info "Skipping $PILOT_VENV (not found)"
-fi
-
-# ── Remove PATH entry from shell RC files ────────────────────────────
+# Only remove the exact two-line block the installer adds. Writing back into
+# the original file preserves its mode and any symlink used by dotfile tools.
 _strip_path_entry() {
-    local rc="$1"
-    [[ ! -f "$rc" ]] && return
-    # Remove the two lines install adds:
-    #   # Gathm Framework
-    #   export PATH="$HOME/.local/bin:$PATH"
-    local tmp
-    tmp=$(mktemp)
-    # Use grep -v to strip both the comment and the PATH export line
-    grep -v '# Gathm Framework' "$rc" \
-        | grep -v 'export PATH="$HOME/.local/bin:$PATH"' \
-        > "$tmp" && mv "$tmp" "$rc" || { rm -f "$tmp"; return 1; }
+    local rc="$1" tmp
+    tmp=$(mktemp) || return 1
+    if ! awk '
+        function flush() { if (held) { print "# Gathm Framework"; held=0 } }
+        held && $0 == "export PATH=\"$HOME/.local/bin:$PATH\"" { held=0; next }
+        { flush() }
+        $0 == "# Gathm Framework" { held=1; next }
+        { print }
+        END { flush() }
+    ' "$rc" > "$tmp"; then
+        rm -f "$tmp"; return 1
+    fi
+    if ! cmp -s "$tmp" "$rc"; then
+        if ! cat "$tmp" > "$rc"; then rm -f "$tmp"; return 1; fi
+        printf 'Cleaned Gathm PATH block: %s\n' "$rc"
+    fi
+    rm -f "$tmp"
 }
 
-for rc in "${RC_FILES[@]}"; do
-    if [[ -f "$rc" ]] && grep -q 'Gathm Framework\|\.local/bin.*PATH' "$rc" 2>/dev/null; then
-        _strip_path_entry "$rc" && ok "Cleaned PATH entry from $rc" || warn "Could not clean $rc"
+printf '\nGathm uninstaller (%s)\n' "$(gathm_detect_platform)"
+printf 'Files to remove:\n'
+# Bash 3.2 with nounset cannot expand an empty array using the usual form.
+for path in ${REMOVE[@]+"${REMOVE[@]}"}; do printf '  %s\n' "$path"; done
+if (( KEEP_DATA )); then
+    printf 'Keeping %s (settings, history, models, runtimes, recovery files).\n' "$DATA_DIR"
+else
+    printf 'Data removal includes downloaded models, history, and recovery files.\n'
+fi
+(( KEEP_PATH )) || printf 'The marked Gathm PATH block will be removed from shell startup files.\n'
+printf 'Keeping source checkout, external runtimes/models, and ~/.cache/gathm.\n'
+if (( DRY_RUN )); then printf 'Dry run: no files or processes changed.\n'; exit 0; fi
+if (( ! YES )); then
+    if [[ "${GATHM_NON_INTERACTIVE:-0}" == 1 || ! -t 0 ]]; then
+        printf 'No confirmation received; use --yes for unattended removal.\n' >&2
+        exit 1
     fi
-done
+    answer=""
+    read -r -p 'Proceed with uninstallation? [y/N]: ' answer || answer=n
+    case "$answer" in y|Y|yes|YES) ;; *) printf 'Uninstallation cancelled.\n'; exit 0 ;; esac
+fi
 
-# ── Done ─────────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}${GREEN}━━━━━━━━━━ UNINSTALLED ━━━━━━━━━━${RESET}"
-echo "  Gathm shortcuts and data have been removed."
-echo "  The source directory was NOT deleted: $SCRIPT_DIR"
-echo ""
-echo -e "  ${YELLOW}Note:${RESET} Open a new terminal (or run ${BOLD}source ~/.zshrc${RESET}) to"
-echo "  refresh your PATH."
-echo ""
+# Avoid trusting stale PID files as authority to kill an arbitrary process.
+# Only stop a running command whose arguments identify this Gathm runtime.
+_stop_owned_process() {
+    local file="$1" expected="$2" pid command_line n=0
+    [[ -f "$file" ]] || return 0
+    pid=$(cat "$file")
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    (( pid > 1 )) || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    command_line=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
+    if [[ -z "$expected" || "$command_line" != *"$expected"* ]]; then
+        printf 'Cannot verify process %s; stop Gathm before uninstalling.\n' "$pid" >&2
+        return 1
+    fi
+    kill "$pid" 2>/dev/null || return 1
+    while kill -0 "$pid" 2>/dev/null && (( n < 5 )); do sleep 1; n=$((n + 1)); done
+    if kill -0 "$pid" 2>/dev/null; then
+        printf 'Process %s is still stopping; retry uninstall shortly.\n' "$pid" >&2
+        return 1
+    fi
+}
+if (( ! KEEP_PATH )) && [[ ! -L "$DATA_DIR" ]]; then
+    _stop_owned_process "$DATA_DIR/gui.pid" "$SCRIPT_DIR/api/server.py" || exit 1
+    llama_binary=""
+    [[ ! -f "$DATA_DIR/llamacpp_bin" ]] || IFS= read -r llama_binary < "$DATA_DIR/llamacpp_bin" || true
+    _stop_owned_process "$DATA_DIR/llamacpp.pid" "$llama_binary" || exit 1
+fi
+
+errors=0
+for path in ${REMOVE[@]+"${REMOVE[@]}"}; do
+    if rm -rf -- "$path"; then printf 'Removed %s\n' "$path"
+    else printf 'Could not remove %s\n' "$path" >&2; errors=$((errors + 1)); fi
+done
+if (( ! KEEP_PATH )); then
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        [[ -f "$rc" ]] || continue
+        _strip_path_entry "$rc" || errors=$((errors + 1))
+    done
+fi
+if (( errors )); then
+    printf 'Uninstall incomplete: %s removal(s) failed.\n' "$errors" >&2
+    exit 1
+fi
+printf '\nUninstall complete. Source checkout retained: %s\n' "$SCRIPT_DIR"
+printf 'Open a new terminal to refresh command lookup.\n'

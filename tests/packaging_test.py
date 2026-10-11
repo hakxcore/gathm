@@ -3,7 +3,7 @@
 """Tests for installing Gathm as a package.
 
 The failure this file exists to prevent: someone adds a directory the runtime
-needs, does not add it to force-include, and `pipx install gathm` produces a
+needs, does not add it to the build configuration, and `pipx install gathm` produces a
 Gathm that is missing a third of itself — while every other test still passes,
 because from a checkout the file is right there on disk.
 
@@ -40,7 +40,7 @@ def ok(name, cond):
 def load_pyproject():
     try:
         import tomllib
-    except ModuleNotFoundError:          # Python 3.9/3.10
+    except ModuleNotFoundError:          # Python 3.10
         try:
             import tomli as tomllib      # type: ignore[no-redef]
         except ModuleNotFoundError:
@@ -96,14 +96,15 @@ def test_every_runtime_directory_is_packaged():
     if cfg is None:
         print("  SKIP no tomllib/tomli on this Python")
         return
-    included = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    wheel = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]
+    included = {**wheel["force-include"], **wheel["sources"]}
     mapped = set(included.keys())
 
     # Everything the launcher and orchestrator reach for at runtime. Add a
     # directory here when the runtime starts needing it — that is the point.
-    for needed in ["gathm", "install", "lib", "pilot", "api", "gui", "agent",
+    for needed in ["gathm", "install", "uninstall", "lib", "pilot", "api", "gui", "agent",
                    "tools", "config"]:
-        ok(f"{needed} is force-included", needed in mapped)
+        ok(f"{needed} is included", needed in mapped)
         ok(f"...and exists to be included",
            os.path.exists(os.path.join(ROOT, needed)))
 
@@ -132,12 +133,13 @@ def test_the_sdist_is_whole_too():
         print("  SKIP no tomllib/tomli on this Python")
         return
 
-    wheel = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    target = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]
+    wheel = {**target["force-include"], **target["sources"]}
     sdist = cfg["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
 
     # This is not belt and braces. `python -m build` writes the sdist and then
     # builds the wheel *from that sdist*, so a directory left out here vanishes
-    # from the wheel too — and the force-include list above would still look
+    # from the wheel too — and the mappings above would still look
     # perfectly correct while it happened.
     for needed in sorted(wheel):
         ok(f"{needed} is in the sdist as well", needed in sdist)
@@ -218,6 +220,7 @@ def test_exec_bits_are_restored():
         made = {
             "gathm": os.path.join(bundle, "gathm"),
             "install": os.path.join(bundle, "install"),
+            "uninstall": os.path.join(bundle, "uninstall"),
             "tool": os.path.join(bundle, "tools", "dns", "dns"),
             "bash lib": os.path.join(bundle, "lib", "utils.bash"),
         }

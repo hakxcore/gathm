@@ -25,7 +25,7 @@ elif command -v python3 &>/dev/null; then
 elif command -v python &>/dev/null; then
     PYTHON="python"
 else
-    echo "Error: Python 3 not found. Install Python 3.9+ and try again." >&2
+    echo "Error: Python 3 not found. Install Python 3.10+ and try again." >&2
     exit 1
 fi
 

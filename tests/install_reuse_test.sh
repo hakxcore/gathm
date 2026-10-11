@@ -268,9 +268,9 @@ main_preserves_incomplete_setup() {
     install_audio_cpp() { :; }
     setup_shortcuts() { :; }
     reload_shell_config() { :; }
-    verify() { :; }
+    verify() { printf 'reached\n' > "$HOME/install-completed"; }
     step_summary() { :; }
-    launch_post_install() { printf 'reached\n' > "$HOME/install-completed"; }
+    launch_post_install() { echo "Unexpected unattended launch" >&2; return 1; }
     step_fail() { printf '%s\n' "$1" >> "$HOME/failed-steps"; }
     main || return 1
     eq 'main does not install or pull a replacement' "$(cat "$CALLS")" '' || return 1

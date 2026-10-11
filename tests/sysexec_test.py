@@ -357,7 +357,8 @@ def test_pilot_integration():
     ok("it is a built-in tool", "system" in pilot_main.BUILTIN_TOOLS)
     ok("so it is always discoverable", "system" in pilot_main.discover_tools())
 
-    saved = os.environ.pop("GATHM_ALLOW_SHELL", None)
+    saved = os.environ.get("GATHM_ALLOW_SHELL")
+    os.environ["GATHM_ALLOW_SHELL"] = "0"
     try:
         # Off by default, and the refusal says how to turn it on.
         out = pilot_main.run_gathm_tool_raw("system uname -a")
@@ -466,7 +467,7 @@ def test_prompt_tells_the_model_the_platform():
        "chaining" in help_text)
     ok("browser guidance is separate from device guidance",
        pilot_main._BROWSER_HELP.lstrip().startswith("WEB ACCESS:")
-       and pilot_main._SYSTEM_HELP.lstrip().startswith("DEVICE ACCESS:"))
+       and "SHELL ACCESS:" in pilot_main._SYSTEM_HELP.splitlines()[0])
 
 
 def wtier(command):
@@ -777,9 +778,11 @@ def test_a_missing_system_prefix_is_recovered():
         os.environ.pop("GATHM_ALLOW_SHELL", None)
 
     # With system control off, nothing is recovered at all.
+    os.environ["GATHM_ALLOW_SHELL"] = "0"  # ignore a real user's allow_shell file
     check("nothing is recovered while system control is off",
           pilot_main._recover_bare_shell_command(
               "Action Input: ls ~/Downloads", tools), "")
+    os.environ.pop("GATHM_ALLOW_SHELL", None)
 
 
 def test_the_prompt_says_to_act_not_explain():

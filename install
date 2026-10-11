@@ -18,8 +18,9 @@ trap 'echo "[INSTALL ABORT] Line $LINENO exited with code $?" >&2' ERR
 VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 LOCAL_BIN="$HOME/.local/bin"
-mkdir -p "$LOCAL_BIN" 2>/dev/null || true
 export PATH="$LOCAL_BIN:$PATH"
+# shellcheck source=lib/install_common.bash
+source "$SCRIPT_DIR/lib/install_common.bash"
 
 # --- Colors (skip on dumb terminals) ---
 if [[ "${TERM:-dumb}" != "dumb" ]]; then
@@ -144,7 +145,7 @@ run_with_spinner() {
     fi
 
     local log_file
-    log_file=$(mktemp 2>/dev/null) || log_file="/tmp/gathm-spinner.$$"
+    log_file=$(mktemp) || return 1
 
     ( "$@" ) >"$log_file" 2>&1 &
     local cmd_pid=$!
@@ -155,7 +156,7 @@ run_with_spinner() {
         local elapsed=$(( SECONDS - t0 ))
         local last_line
         last_line=$(tail -n 1 "$log_file" 2>/dev/null \
-            | tr -cd '\11\12\15\40-\176' | tr '\r' ' ' | head -c 70)
+            | tr -cd '\11\12\15\40-\176' | tr '\r' ' ' | awk '{print substr($0, 1, 70)}')
         printf '\r\033[2K  %b%s%b %s %b[%s]%b %b%s%b' \
             "$CYAN" "$frame" "$RESET" \
             "$label" \
@@ -165,8 +166,8 @@ run_with_spinner() {
         frame_i=$((frame_i + 1))
     done
 
-    wait "$cmd_pid" 2>/dev/null
-    local rc=$?
+    local rc=0
+    wait "$cmd_pid" 2>/dev/null || rc=$?
     printf '\r\033[2K'
 
     if (( rc != 0 )); then
@@ -179,11 +180,11 @@ run_with_spinner() {
 }
 
 # ── Python version gate ──────────────────────────────────────────────
-# Pilot, api/server.py, and engineer all require Python 3.8+.
+# Pilot, api/server.py, and engineer all require Python 3.10+.
 # We check (and optionally auto-install) Python early, before touching
 # the venv or pip, so failures surface with a clear message.
 MIN_PYTHON_MAJOR=3
-MIN_PYTHON_MINOR=8
+MIN_PYTHON_MINOR=10
 
 # Returns 0 if $1 points to a python binary >= MIN_PYTHON_MAJOR.MINOR
 _python_version_ok() {
@@ -198,21 +199,30 @@ sys.exit(0 if ok else 1)
 
 # Returns the first working python command, or empty string
 _python_cmd() {
-    if _python_version_ok python3; then echo "python3"
+    if [[ -n "${GATHM_PYTHON:-}" ]] && _python_version_ok "$GATHM_PYTHON"; then echo "$GATHM_PYTHON"
+    elif _python_version_ok python3; then echo "python3"
     elif _python_version_ok python; then echo "python"
     else echo ""
     fi
+}
+
+# Run Python snippets through the same version gate as environment setup.
+_install_python() {
+    local python_cmd; python_cmd=$(_python_cmd)
+    [[ -n "$python_cmd" ]] || { fail "Python 3.10+ is required" >&2; return 1; }
+    "$python_cmd" "$@"
 }
 
 # Check Python is available; try to install it for the given platform if not.
 # Exits with an error if Python still can't be found after the install attempt.
 check_and_install_python() {
     local platform="$1"
+    [[ "$platform" != wsl ]] || platform=$(gathm_linux_distribution)
 
     # ── fast path: already have a good Python ────────────────────────
-    if _python_version_ok python3 || _python_version_ok python; then
+    if [[ -n "$(_python_cmd)" ]]; then
         local pcmd; pcmd=$(_python_cmd)
-        ok "Python: $($pcmd --version 2>&1)"
+        ok "Python: $("$pcmd" --version 2>&1)"
         return 0
     fi
 
@@ -223,20 +233,20 @@ check_and_install_python() {
             pkg install -y python 2>/dev/null || true
             ;;
         debian|wsl)
-            sudo apt-get update -y 2>/dev/null || true
-            sudo apt-get install -y python3 python3-pip python3-venv 2>/dev/null || true
+            gathm_run_privileged apt-get update -y 2>/dev/null || true
+            gathm_run_privileged apt-get install -y python3 python3-pip python3-venv 2>/dev/null || true
             ;;
         fedora)
-            sudo dnf install -y python3 python3-pip 2>/dev/null || true
+            gathm_run_privileged dnf install -y python3 python3-pip 2>/dev/null || true
             ;;
         arch)
-            sudo pacman -Sy --noconfirm python python-pip 2>/dev/null || true
+            gathm_run_privileged pacman -S --noconfirm python python-pip 2>/dev/null || true
             ;;
         alpine)
-            apk add --no-cache python3 py3-pip 2>/dev/null || true
+            gathm_run_privileged apk add --no-cache python3 py3-pip 2>/dev/null || true
             ;;
         opensuse)
-            sudo zypper install -y python3 python3-pip 2>/dev/null || true
+            gathm_run_privileged zypper install -y python3 python3-pip 2>/dev/null || true
             ;;
         macos)
             if command -v brew &>/dev/null; then
@@ -257,6 +267,8 @@ check_and_install_python() {
                 scoop install python 2>/dev/null || true
             elif command -v choco &>/dev/null; then
                 choco install python3 -y 2>/dev/null || true
+            elif command -v pacman &>/dev/null; then
+                pacman -S --noconfirm python python-pip || true
             else
                 fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ is required but not installed."
                 fail "Download from: https://www.python.org/downloads/"
@@ -270,9 +282,9 @@ check_and_install_python() {
     esac
 
     # ── verify the install worked ─────────────────────────────────────
-    if _python_version_ok python3 || _python_version_ok python; then
+    if [[ -n "$(_python_cmd)" ]]; then
         local pcmd; pcmd=$(_python_cmd)
-        ok "Python installed: $($pcmd --version 2>&1)"
+        ok "Python installed: $("$pcmd" --version 2>&1)"
     else
         fail "Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+ could not be installed automatically."
         fail "Please install it manually and re-run: ./install"
@@ -348,7 +360,7 @@ _termux_use_native_pydantic_core() {
     # Only proceed if the native build actually IMPORTS on the system Python —
     # otherwise we'd strip the venv's copies for nothing. (A native Bionic build
     # loads fine; a missing/again-glibc one would not.)
-    python3 -c "import pydantic_core" 2>/dev/null || return 1
+    _install_python -c "import pydantic_core" 2>/dev/null || return 1
 
     # Remove the venv's own (broken, glibc) pydantic + pydantic-core so the
     # system-site-packages native build is the one that gets imported. pydantic
@@ -711,7 +723,16 @@ PYEOF
 
 _ensure_venv() {
     _init_venv
-    if [[ ! -d "$GATHM_VENV" ]]; then
+    local existing_python
+    existing_python=$(_venv_python "$GATHM_VENV") || existing_python=""
+    if [[ -n "$existing_python" ]] && _python_version_ok "$existing_python"; then
+        return 0
+    fi
+    if [[ -L "$GATHM_VENV" ]]; then
+        warn "Pilot venv is a symlink; repair it manually: $GATHM_VENV"
+        return 1
+    fi
+    if [[ -z "$existing_python" ]] || ! _python_version_ok "$existing_python"; then
         local python_cmd; python_cmd=$(_python_cmd)
         if [[ -z "$python_cmd" ]]; then
             warn "Python not found — cannot create pilot venv"
@@ -725,7 +746,7 @@ _ensure_venv() {
         local venv_opts=""
         [[ "${_GATHM_PLATFORM:-}" == "termux" ]] && venv_opts="--system-site-packages"
         "$python_cmd" -m venv $venv_opts "$GATHM_VENV" || {
-            warn "Pilot venv creation failed — falling back to system pip"
+            warn "Pilot venv creation failed — system Python was left unchanged"
             GATHM_VENV=""
             return 1
         }
@@ -734,12 +755,13 @@ _ensure_venv() {
 }
 
 _venv_pip() {
-    _ensure_venv
+    _ensure_venv || return 1
     local python_cmd
     if python_cmd=$(_venv_python "$GATHM_VENV"); then
         "$python_cmd" -m pip install "$@"
     else
-        pip3 install "$@" 2>/dev/null || pip install "$@" 2>/dev/null || return 1
+        warn "No usable Pilot venv interpreter"
+        return 1
     fi
 }
 
@@ -750,7 +772,16 @@ _init_engineer_venv() {
 
 _ensure_engineer_venv() {
     _init_engineer_venv
-    if [[ ! -d "$ENGINEER_VENV" ]]; then
+    local existing_python
+    existing_python=$(_venv_python "$ENGINEER_VENV") || existing_python=""
+    if [[ -n "$existing_python" ]] && _python_version_ok "$existing_python"; then
+        return 0
+    fi
+    if [[ -L "$ENGINEER_VENV" ]]; then
+        warn "Engineer venv is a symlink; repair it manually: $ENGINEER_VENV"
+        return 1
+    fi
+    if [[ -z "$existing_python" ]] || ! _python_version_ok "$existing_python"; then
         local python_cmd; python_cmd=$(_python_cmd)
         if [[ -z "$python_cmd" ]]; then
             warn "Python not found — cannot create engineer venv"
@@ -768,12 +799,12 @@ _ensure_engineer_venv() {
 }
 
 _engineer_venv_pip() {
-    _ensure_engineer_venv
+    _ensure_engineer_venv || { _venv_pip "$@"; return $?; }
     local python_cmd
     if python_cmd=$(_venv_python "$ENGINEER_VENV"); then
         "$python_cmd" -m pip install -q "$@"
     else
-        # Fall back to the pilot venv or system pip
+        # Fall back to the Pilot venv
         _venv_pip "$@"
     fi
 }
@@ -825,39 +856,12 @@ check_internet() {
 }
 
 # --- Platform detection ---
-detect_platform() {
-    local kernel
-    kernel=$(uname -s 2>/dev/null || echo "unknown")
-    case "$kernel" in
-        Darwin)       echo "macos" ;;
-        MINGW*|MSYS*) echo "windows" ;;
-        CYGWIN*)      echo "windows" ;;
-        Linux)
-            if command -v termux-setup-storage &>/dev/null; then
-                echo "termux"
-            elif grep -qi microsoft /proc/version 2>/dev/null; then
-                echo "wsl"
-            elif command -v apt-get &>/dev/null; then
-                echo "debian"
-            elif command -v dnf &>/dev/null; then
-                echo "fedora"
-            elif command -v pacman &>/dev/null; then
-                echo "arch"
-            elif command -v apk &>/dev/null; then
-                echo "alpine"
-            elif command -v zypper &>/dev/null; then
-                echo "opensuse"
-            else
-                echo "linux"
-            fi
-            ;;
-        *) echo "unknown" ;;
-    esac
-}
+detect_platform() { gathm_detect_platform; }
 
 # --- Install dependencies by platform ---
 install_deps() {
     local platform="$1"
+    [[ "$platform" != wsl ]] || platform=$(gathm_linux_distribution)
 
     # Core packages every platform needs.
     # openssl is intentionally excluded: macOS ships LibreSSL as 'openssl',
@@ -888,36 +892,29 @@ install_deps() {
             # Termux ships a prebuilt binding we use it; otherwise the venv gets
             # a pure-Python stub in _create_termux_native_stubs. (zstd = C lib.)
             pkg install -y zstd python-zstandard 2>/dev/null || true
-            pip install pyyaml 2>/dev/null || true
             ;;
         debian|wsl)
-            sudo apt-get update -y 2>/dev/null || true
-            sudo apt-get install -y $core python3 python3-pip python3-venv pv wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
-            pip3 install pyyaml 2>/dev/null || pip install pyyaml 2>/dev/null || true
+            gathm_run_privileged apt-get update -y 2>/dev/null || true
+            gathm_run_privileged apt-get install -y $core python3 python3-pip python3-venv pv wget dnsutils iproute2 net-tools libxml2-utils 2>/dev/null || true
             ;;
         fedora)
-            sudo dnf install -y $core python3 python3-pip pv wget bind-utils iproute net-tools libxml2 2>/dev/null || true
-            pip3 install pyyaml 2>/dev/null || true
+            gathm_run_privileged dnf install -y $core python3 python3-pip pv wget bind-utils iproute net-tools libxml2 2>/dev/null || true
             ;;
         arch)
-            sudo pacman -Sy --noconfirm $core python python-pip pv wget bind-tools iproute2 net-tools libxml2 2>/dev/null || true
-            pip install pyyaml 2>/dev/null || true
+            gathm_run_privileged pacman -S --noconfirm $core python python-pip pv wget bind-tools iproute2 net-tools libxml2 2>/dev/null || true
             ;;
         alpine)
-            apk update 2>/dev/null || true
-            apk add $core python3 py3-pip pv wget bind-tools iproute2 net-tools libxml2-utils 2>/dev/null || true
-            pip3 install pyyaml 2>/dev/null || true
+            gathm_run_privileged apk update 2>/dev/null || true
+            gathm_run_privileged apk add $core python3 py3-pip pv wget bind-tools iproute2 net-tools libxml2-utils 2>/dev/null || true
             ;;
         opensuse)
-            sudo zypper install -y $core python3 python3-pip pv wget bind-utils iproute2 net-tools libxml2-tools 2>/dev/null || true
-            pip3 install pyyaml 2>/dev/null || true
+            gathm_run_privileged zypper install -y $core python3 python3-pip pv wget bind-utils iproute2 net-tools libxml2-tools 2>/dev/null || true
             ;;
         macos)
             if command -v brew &>/dev/null; then
                 # openssl omitted: macOS ships LibreSSL as /usr/bin/openssl
                 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
                     brew install bash curl jq git python3 pv wget 2>/dev/null || true
-                pip3 install pyyaml 2>/dev/null || true
             else
                 warn "Homebrew not found. Install it from https://brew.sh"
                 warn "Then run: brew install bash curl jq git python3 pv wget"
@@ -930,18 +927,25 @@ install_deps() {
                 choco install git curl jq python3 -y 2>/dev/null || true
             elif command -v pacman &>/dev/null; then
                 # MSYS2
-                pacman -Sy --noconfirm $core python python-pip 2>/dev/null || true
+                pacman -S --noconfirm $core python python-pip 2>/dev/null || true
             else
                 warn "No package manager found (try installing scoop, choco, or MSYS2)"
             fi
-            pip install pyyaml 2>/dev/null || pip3 install pyyaml 2>/dev/null || true
             ;;
         *)
             warn "Unknown platform. Please install manually: $core python3 pv jq"
             ;;
     esac
 
-    ok "Dependencies installed"
+    local missing="" command_name
+    for command_name in bash curl jq git; do
+        command -v "$command_name" >/dev/null 2>&1 || missing="$missing $command_name"
+    done
+    if [[ -n "$missing" ]]; then
+        fail "Required commands still missing:$missing"
+        return 1
+    fi
+    ok "Required OS dependencies available"
 }
 
 # --- Termux storage permissions (no-op on non-Termux) ---
@@ -967,6 +971,10 @@ setup_termux_storage() {
         return 0
     fi
 
+    if [[ "${GATHM_NON_INTERACTIVE:-0}" == 1 || ! -t 0 ]]; then
+        warn "Run termux-setup-storage interactively when shared-storage access is needed."
+        return 0
+    fi
     warn "Termux is about to ask for the storage permission."
     warn "Granting it may restart Termux and interrupt this installer."
     warn "If that happens, just run ${BOLD}./install${RESET}${YELLOW} again — it resumes and"
@@ -1054,7 +1062,7 @@ _llamacpp_setting() {
     local key="$1" value="${!1:-}"
     if [[ -n "$value" ]]; then printf '%s\n' "$value"; return 0; fi
     [[ -f "$SCRIPT_DIR/.env" ]] || return 0
-    python3 - "$SCRIPT_DIR/.env" "$key" <<'ENV'
+    _install_python - "$SCRIPT_DIR/.env" "$key" <<'ENV'
 import re, sys
 from pathlib import Path
 value = ""
@@ -1178,7 +1186,7 @@ _llamacpp_release_asset() {
     [[ -n "$json" ]] || return 1
 
     patterns=$(_llamacpp_asset_patterns "$platform" | tr '\n' ' ')
-    printf '%s' "$json" | GATHM_ASSET_PATTERNS="$patterns" python3 -c '
+    printf '%s' "$json" | GATHM_ASSET_PATTERNS="$patterns" _install_python -c '
 import json, os, sys
 
 try:
@@ -1210,7 +1218,7 @@ raise SystemExit(1)
 # something that runs on the build machine and nowhere else.
 _llamacpp_unpack() {
     local zip_path="$1" workdir="$2"
-    python3 - "$zip_path" "$workdir" <<'PY' || return 1
+    _install_python - "$zip_path" "$workdir" <<'PY' || return 1
 import sys, zipfile
 zip_path, dest = sys.argv[1], sys.argv[2]
 try:
@@ -1326,7 +1334,7 @@ _llamacpp_sudo() {
         echo "sudo"
         return 0
     fi
-    [[ "${GATHM_NON_INTERACTIVE:-0}" == "1" ]] && return 1
+    [[ "${GATHM_NON_INTERACTIVE:-0}" == "1" || ! -t 0 ]] && return 1
     echo "sudo"
     return 0
 }
@@ -1726,7 +1734,7 @@ _llamacpp_repo_that_fits() {
 _llamacpp_model_filename() {
     local repo="$1" json
     json=$(_bounded 45 curl -fsSL "${LLAMACPP_HF_API}/${repo}" 2>/dev/null) || return 1
-    printf '%s' "$json" | python3 -c '
+    printf '%s' "$json" | _install_python -c '
 import json, sys
 
 try:
@@ -1823,7 +1831,7 @@ _llamacpp_model_at() {
         return 1
     fi
     [[ -d "$path" ]] || return 1
-    python3 - "$path" <<'GGUF'
+    _install_python - "$path" <<'GGUF'
 import re, sys
 from pathlib import Path
 
@@ -1908,7 +1916,7 @@ _llamacpp_ollama_blob() {
     local want="${1:-}"
     local root="${OLLAMA_MODELS:-$HOME/.ollama/models}"
     [[ -d "$root/manifests" ]] || return 1
-    GATHM_OLLAMA_ROOT="$root" GATHM_WANT_TAG="$want" python3 - <<'BLOBPY' 2>/dev/null
+    GATHM_OLLAMA_ROOT="$root" GATHM_WANT_TAG="$want" _install_python - <<'BLOBPY' 2>/dev/null
 import json, os, pathlib
 
 root = pathlib.Path(os.environ["GATHM_OLLAMA_ROOT"])
@@ -2056,7 +2064,8 @@ install_ollama() {
     # several times (writing /usr/local/bin, registering systemd units). If
     # sudo prompts mid-download the install can sit waiting for a password
     # behind a wall of curl output — looking exactly like a hung script.
-    if [[ "$platform" != "windows" && "$platform" != "termux" ]] \
+    if [[ "$platform" != "windows" && "$platform" != "termux" && "$(id -u)" != 0
+            && "${GATHM_NON_INTERACTIVE:-0}" != 1 && -t 0 ]] \
             && command -v sudo &>/dev/null \
             && ! sudo -n true 2>/dev/null; then
         info "Caching sudo credentials so the Ollama installer doesn't pause for a password later..."
@@ -2078,8 +2087,8 @@ install_ollama() {
                         HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
                         brew install ollama || install_rc=$?
             else
-                # Foreground so user sees curl + install.sh progress directly.
-                curl -fsSL https://ollama.com/install.sh | sh || install_rc=$?
+                warn "Install Ollama for macOS from https://ollama.com/download/mac or install Homebrew, then re-run."
+                install_rc=1
             fi
             ;;
         termux)
@@ -2103,14 +2112,15 @@ install_ollama() {
             else
                 # Download and run the official silent installer
                 info "Downloading OllamaSetup.exe (official installer)..."
-                local _tmp_dir; _tmp_dir=$(mktemp -d 2>/dev/null || echo "$TEMP/gathm_$$")
+                local _tmp_dir; _tmp_dir=$(mktemp -d) || { step_fail "Cannot create download directory"; return 1; }
                 mkdir -p "$_tmp_dir" 2>/dev/null || true
                 local _setup_exe="$_tmp_dir/OllamaSetup.exe"
                 if curl -fL --progress-bar "https://ollama.com/download/OllamaSetup.exe" \
                         -o "$_setup_exe"; then
                     info "Running OllamaSetup.exe /SILENT..."
-                    "$_setup_exe" /SILENT || install_rc=$?
+                    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" "$_setup_exe" /SILENT || install_rc=$?
                     rm -f "$_setup_exe" 2>/dev/null || true
+                    rmdir "$_tmp_dir" 2>/dev/null || true
                 else
                     install_rc=1
                     warn "Could not download Ollama installer."
@@ -2128,6 +2138,17 @@ install_ollama() {
 
     local elapsed=$(( SECONDS - t0 ))
 
+    if [[ "$platform" == windows && -n "${LOCALAPPDATA:-}" ]]; then
+        local ollama_dir="$LOCALAPPDATA/Programs/Ollama"
+        if command -v cygpath >/dev/null 2>&1; then
+            ollama_dir=$(cygpath -u "$ollama_dir")
+        fi
+        [[ ! -x "$ollama_dir/ollama.exe" ]] || export PATH="$ollama_dir:$PATH"
+    fi
+    hash -r
+    if (( install_rc != 0 )); then
+        warn "Ollama installer exited with code $install_rc"
+    fi
     if command -v ollama &>/dev/null; then
         step_done "Ollama installed in $(_format_elapsed $elapsed)"
         start_ollama_serve
@@ -2182,6 +2203,10 @@ open_url() {
 # --- Google Gemini free-tier fallback (when Ollama is unavailable) ---
 setup_gemini_fallback() {
     local platform="${1:-linux}"
+    if [[ "${GATHM_NON_INTERACTIVE:-0}" == 1 || ! -t 0 ]]; then
+        warn "Gemini needs an API key; skipping interactive setup."
+        return 0
+    fi
 
     echo ""
     info "Setting up Google Gemini (free tier) as the Pilot AI backend."
@@ -2203,10 +2228,11 @@ setup_gemini_fallback() {
 
     local gemini_key=""
     while [[ -z "$gemini_key" ]]; do
-        read -r -p "  Paste your Gemini API key: " gemini_key </dev/tty || true
+        read -r -s -p "  Paste your Gemini API key: " gemini_key </dev/tty || return 0
+        echo ""
         if [[ -z "$gemini_key" ]]; then
             local skip_ans=""
-            read -r -p "  No key entered. Skip Gemini setup? [y/N]: " skip_ans </dev/tty || true
+            read -r -p "  No key entered. Skip Gemini setup? [y/N]: " skip_ans </dev/tty || return 0
             if [[ "$skip_ans" =~ ^[Yy]$ ]]; then
                 warn "Gemini setup skipped — Pilot AI will not be available."
                 return 0
@@ -2684,6 +2710,7 @@ install_engineer_deps() {
 
 # --- Install Pilot Python requirements ---
 install_pilot_deps() {
+    local install_failed=0
     local req_file="$SCRIPT_DIR/pilot/requirements.txt"
     if [[ ! -f "$req_file" ]]; then
         return 0
@@ -2694,7 +2721,7 @@ install_pilot_deps() {
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
         # Pre-populate the venv with stubs for packages that require Rust/native
         # compilation (patchelf/ninja/maturin) which can't build on Android/aarch64.
-        _ensure_venv
+        _ensure_venv || return 1
         _create_termux_native_stubs "$GATHM_VENV"
 
         # playwright has no PyPI wheel for Android/aarch64; skip it and
@@ -2708,7 +2735,8 @@ install_pilot_deps() {
         if _venv_pip -r "$tmp_req"; then
             ok "Pilot dependencies installed (playwright skipped on Termux)"
         else
-            warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
+            warn "Pilot dependency install failed — re-run ./install after fixing the pip error above"
+            install_failed=1
         fi
         rm -f "$tmp_req"
 
@@ -2726,7 +2754,7 @@ install_pilot_deps() {
                     ok "pydantic-core now loads (Android-native wheel)"
                 else
                     warn "pydantic-core still cannot load:"
-                    "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /'
+                    "$GATHM_VENV/bin/python3" -c "import pydantic_core" 2>&1 | tail -3 | sed 's/^/    /' || true
                     warn "Fix manually: pip install --index-url https://termux-user-repository.github.io/pypi/ --only-binary=:all: --no-deps pydantic-core==2.41.5"
                 fi
             fi
@@ -2745,13 +2773,15 @@ install_pilot_deps() {
         if _venv_pip -r "$req_file"; then
             ok "Pilot dependencies installed"
         else
-            warn "Pilot dependency install failed — run manually: pip install -r pilot/requirements.txt"
+            warn "Pilot dependency install failed — re-run ./install after fixing the pip error above"
+            install_failed=1
         fi
     fi
 
     # The GUI/API server (api/server.py) needs FastAPI + uvicorn. Install them
     # into the same venv Pilot uses so the GUI actually starts.
-    _install_gui_deps
+    _install_gui_deps || install_failed=1
+    return "$install_failed"
 }
 
 # Install the FastAPI + uvicorn stack the GUI/API server needs, into the pilot
@@ -2760,13 +2790,14 @@ install_pilot_deps() {
 # (Rust) — none of which have Android/aarch64 wheels, so they'd try to compile
 # from source and stall the install. Plain uvicorn is pure Python and works.
 _install_gui_deps() {
-    _ensure_venv
+    _ensure_venv || return 1
     # NB: _venv_pip already runs `pip install`, so pass only packages/flags.
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
         if _venv_pip fastapi uvicorn; then
             ok "GUI dependencies installed (fastapi, uvicorn)"
         else
-            warn "GUI dependency install failed — GUI won't start. Retry: pip install fastapi uvicorn"
+            warn "GUI dependency install failed — GUI won't start. Re-run ./install after fixing the pip error."
+            return 1
         fi
     else
         local api_req="$SCRIPT_DIR/api/requirements.txt"
@@ -2775,7 +2806,8 @@ _install_gui_deps() {
         elif _venv_pip fastapi uvicorn; then
             ok "GUI dependencies installed (fastapi, uvicorn)"
         else
-            warn "GUI dependency install failed — GUI won't start. Retry: pip install -r api/requirements.txt"
+            warn "GUI dependency install failed — GUI won't start. Re-run ./install after fixing the pip error."
+            return 1
         fi
     fi
 }
@@ -2793,7 +2825,7 @@ _install_gui_deps() {
 #   browser.py detects the system binary automatically via `executable_path`.
 install_playwright_browser() {
     if [[ "$GATHM_ONLINE" != "true" ]]; then
-        warn "Skipping browser engine install (offline)"
+        step_skip "Browser engine installation skipped (offline)"
         return 0
     fi
 
@@ -2804,9 +2836,9 @@ install_playwright_browser() {
         # display-related libraries needed by the Chromium binary.
         pkg install -y tur-repo x11-repo 2>/dev/null || true
         if pkg install -y chromium 2>/dev/null; then
-            ok "Chromium installed via pkg — full browser control enabled on Termux"
+            step_done "Chromium installed via pkg"
         else
-            warn "Chromium pkg install failed — browser control limited to open/fetch"
+            step_fail "Chromium pkg install failed — browser control limited to open/fetch"
             warn "Retry manually: pkg install tur-repo x11-repo && pkg install chromium"
         fi
         return 0
@@ -2821,7 +2853,7 @@ install_playwright_browser() {
     elif command -v playwright &>/dev/null; then
         pw_cmd="playwright"
     else
-        warn "playwright CLI not found — skipping Chromium download"
+        step_skip "Playwright CLI unavailable — skipping Chromium download"
         warn "Run manually: playwright install chromium"
         return 0
     fi
@@ -2829,11 +2861,11 @@ install_playwright_browser() {
     info "Installing Playwright Chromium (browser engine for Pilot)..."
     # --with-deps installs required OS libraries on Linux (harmless on macOS/Win)
     if "$pw_cmd" install chromium --with-deps 2>/dev/null; then
-        ok "Playwright Chromium ready"
+        step_done "Playwright Chromium ready"
     elif "$pw_cmd" install chromium 2>/dev/null; then
-        ok "Playwright Chromium ready"
+        step_done "Playwright Chromium ready"
     else
-        warn "Playwright Chromium download failed — browser control will be limited"
+        step_fail "Playwright Chromium download failed — browser control will be limited"
         warn "Retry manually: playwright install chromium"
     fi
 }
@@ -3372,11 +3404,12 @@ _audiocpp_cache_restore() {
         return 1
     fi
     mkdir -p "$LOCAL_BIN" 2>/dev/null || true
-    if cp "$cached" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
-        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+    local prepared; prepared=$(mktemp "$LOCAL_BIN/.audiocpp.XXXXXX") || return 1
+    if cp "$cached" "$prepared" && gathm_publish_audio "$prepared"; then
         ok "Reused the cached audio.cpp build — no compile needed"
         return 0
     fi
+    rm -f "$prepared"
     return 1
 }
 
@@ -3430,14 +3463,14 @@ _audiocpp_fetch_prebuilt() {
     fi
 
     mkdir -p "$LOCAL_BIN" 2>/dev/null || true
-    if cp "$out" "$LOCAL_BIN/audiocpp_cli" 2>/dev/null; then
-        chmod +x "$LOCAL_BIN/audiocpp_cli" 2>/dev/null || true
+    local prepared; prepared=$(mktemp "$LOCAL_BIN/.audiocpp.XXXXXX") || { rm -f "$out"; return 1; }
+    if cp "$out" "$prepared" && gathm_publish_audio "$prepared"; then
         _audiocpp_cache_save "$LOCAL_BIN/audiocpp_cli"
         rm -f "$out" 2>/dev/null || true
         ok "Installed the prebuilt audiocpp_cli — no compile needed"
         return 0
     fi
-    rm -f "$out" 2>/dev/null || true
+    rm -f "$out" "$prepared" 2>/dev/null || true
     return 1
 }
 
@@ -3572,41 +3605,25 @@ _audiocpp_cmake_build() {
 
 # Put the built binary on PATH at $LOCAL_BIN/audiocpp_cli and confirm it runs.
 _audiocpp_install_bin() {
-    local src="$1"
-    local built="$src/build/bin/audiocpp_cli"
-    local target="$LOCAL_BIN/audiocpp_cli"
-
+    local src="$1" built="$1/build/bin/audiocpp_cli" prepared
     [[ -x "$built" ]] || return 1
-    mkdir -p "$LOCAL_BIN" 2>/dev/null || true
-
-    if ! cp "$built" "$target" 2>/dev/null; then
-        warn "Could not copy audiocpp_cli into $LOCAL_BIN"
-        return 1
+    mkdir -p "$LOCAL_BIN" || return 1
+    prepared=$(mktemp "$LOCAL_BIN/.audiocpp.XXXXXX") || return 1
+    if ! cp "$built" "$prepared" || ! chmod +x "$prepared"; then
+        rm -f "$prepared"; return 1
     fi
-    chmod +x "$target" 2>/dev/null || true
-
-    # A copied binary can lose sibling shared objects that live in the build
-    # tree (ggml links statically by default, but a shared build would not).
-    # Verify the copy actually runs; if it doesn't, replace it with a wrapper
-    # that execs the binary in place rather than leave a broken command
-    # on PATH that fails later, mid-conversation.
-    if "$target" --help >/dev/null 2>&1; then
+    if ! "$prepared" --help >/dev/null 2>&1; then
+        warn "Copied audiocpp_cli needs its build tree — installing a wrapper"
+        {
+            printf '%s\n' '#!/usr/bin/env bash'
+            printf 'exec %q "$@"\n' "$built"
+        } > "$prepared"
+    fi
+    if "$prepared" --help >/dev/null 2>&1 && gathm_publish_audio "$prepared"; then
         return 0
     fi
-
-    warn "Copied audiocpp_cli won't run standalone — installing a wrapper instead"
-    cat > "$target" <<EOF
-#!/usr/bin/env bash
-# Gathm wrapper: run audiocpp_cli from its build tree so it can find the
-# shared libraries built alongside it.
-exec "$built" "\$@"
-EOF
-    chmod +x "$target" 2>/dev/null || true
-
-    if "$target" --help >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "audiocpp_cli still won't run — see $src/build for build output"
+    rm -f "$prepared"
+    warn "Could not install audiocpp_cli — see $src/build for build output"
     return 1
 }
 
@@ -3638,7 +3655,7 @@ _audiocpp_save_config() {
 # Upsert a literal dotenv value; sed replacement would corrupt '&', '|', and
 # backslashes in model paths. Preserve unrelated settings without evaluating them.
 _audiocpp_write_env() {
-    python3 - "$SCRIPT_DIR/.env" "$1" "$2" <<'ENV'
+    _install_python - "$SCRIPT_DIR/.env" "$1" "$2" <<'ENV'
 import re, sys
 from pathlib import Path
 path, key, value = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -4212,60 +4229,76 @@ install_audio_cpp() {
 # gathm-api: needs a thin wrapper to select the right Python interpreter
 #   (venv vs system) since server.py is not a standalone executable.
 setup_shortcuts() {
-    local platform="$1"
+    local platform="$1" bin_dir="$HOME/.local/bin" name target
     info "Creating command shortcuts..."
+    mkdir -p "$bin_dir" || return 1
+    # Preflight all three paths before changing any. In particular never write
+    # a wrapper through a symlink into another checkout or a package manager.
+    for name in gathm gathm-agent gathm-api; do
+        case "$name" in
+            gathm) target="$SCRIPT_DIR/gathm" ;;
+            gathm-agent) target="$SCRIPT_DIR/agent/orchestrator.sh" ;;
+            gathm-api) target="$SCRIPT_DIR/api/server.py" ;;
+        esac
+        if [[ -e "$bin_dir/$name" || -L "$bin_dir/$name" ]]; then
+            if [[ "$name" == gathm && "${GATHM_INSTALL_KIND:-}" == pipx ]]; then
+                info "Keeping the package-managed gathm command"
+                continue
+            fi
+            gathm_shortcut_owned "$bin_dir/$name" "$target" || {
+                fail "Existing command belongs to another installation: $bin_dir/$name"
+                return 1
+            }
+        fi
+    done
+    chmod +x "$SCRIPT_DIR/gathm" "$SCRIPT_DIR/agent/orchestrator.sh" || return 1
+    for name in gathm gathm-agent; do
+        if [[ "$name" == gathm && "${GATHM_INSTALL_KIND:-}" == pipx                 && ( -e "$bin_dir/gathm" || -L "$bin_dir/gathm" ) ]]; then
+            continue
+        fi
+        target="$SCRIPT_DIR/gathm"
+        [[ "$name" != gathm-agent ]] || target="$SCRIPT_DIR/agent/orchestrator.sh"
+        if [[ "$platform" == windows ]]; then
+            # Git Bash may copy instead of symlinking without Windows Developer
+            # Mode. A copied launcher resolves its libraries from the wrong root.
+            local prepared_link
+            prepared_link=$(mktemp "$bin_dir/.gathm-link.XXXXXX") || return 1
+            if ! {
+                printf '%s\n' '#!/usr/bin/env bash' "# Gathm install: $SCRIPT_DIR"
+                printf 'exec bash %q "$@"\n' "$target"
+            } > "$prepared_link" || ! chmod +x "$prepared_link"                     || ! mv -f "$prepared_link" "$bin_dir/$name"; then
+                rm -f "$prepared_link"; return 1
+            fi
+        else
+            rm -f "$bin_dir/$name" || return 1
+            ln -s "$target" "$bin_dir/$name" || return 1
+        fi
+    done
 
-    local bin_dir="$HOME/.local/bin"
-    mkdir -p "$bin_dir"
-
-    # gathm — symlink to the main executable
-    chmod +x "$SCRIPT_DIR/gathm" 2>/dev/null || true
-    ln -sf "$SCRIPT_DIR/gathm" "$bin_dir/gathm"
-
-    # gathm-agent — symlink to the orchestrator
-    chmod +x "$SCRIPT_DIR/agent/orchestrator.sh" 2>/dev/null || true
-    ln -sf "$SCRIPT_DIR/agent/orchestrator.sh" "$bin_dir/gathm-agent"
-
-    # gathm-api — thin wrapper: picks venv python when available
-    local shebang="#!/usr/bin/env bash"
-    [[ "$platform" == "termux" ]] && shebang="#!/data/data/com.termux/files/usr/bin/bash"
-
-    local api_python_cmd
-    if api_python_cmd=$(_venv_python "$GATHM_VENV"); then
-        :
-    elif command -v python3 &>/dev/null; then
-        api_python_cmd="python3"
-    else
-        api_python_cmd="python"
-    fi
-    {
-        printf '%s\n' "$shebang"
+    local shebang="#!/usr/bin/env bash" api_python_cmd wrapper
+    [[ "$platform" != termux ]] || shebang="#!/data/data/com.termux/files/usr/bin/bash"
+    api_python_cmd=$(_venv_python "$GATHM_VENV") || api_python_cmd=$(_python_cmd)
+    [[ -n "$api_python_cmd" ]] || { fail "No usable Python for the API shortcut"; return 1; }
+    wrapper=$(mktemp "$bin_dir/.gathm-api.XXXXXX") || return 1
+    if ! {
+        printf '%s\n' "$shebang" "# Gathm install: $SCRIPT_DIR"
         printf 'exec %q %q "$@"\n' "$api_python_cmd" "$SCRIPT_DIR/api/server.py"
-    } > "$bin_dir/gathm-api"
-    chmod +x "$bin_dir/gathm-api"
-
-    # Add ~/.local/bin to PATH if not already there
-    local rc_file=""
-    if [[ "$platform" == "termux" ]]; then
-        rc_file="$HOME/.bashrc"
-    elif [[ -f "$HOME/.zshrc" ]]; then rc_file="$HOME/.zshrc"
-    elif [[ -f "$HOME/.bashrc" ]]; then rc_file="$HOME/.bashrc"
-    elif [[ -f "$HOME/.bash_profile" ]]; then rc_file="$HOME/.bash_profile"
-    elif [[ -f "$HOME/.profile" ]]; then rc_file="$HOME/.profile"
-    else rc_file="$HOME/.bashrc"
+    } > "$wrapper" || ! chmod +x "$wrapper" || ! mv -f "$wrapper" "$bin_dir/gathm-api"; then
+        rm -f "$wrapper"; return 1
     fi
 
-    [[ -f "$rc_file" ]] || touch "$rc_file"
-    if [[ -n "$rc_file" ]] && ! grep -q '.local/bin' "$rc_file" 2>/dev/null; then
-        echo '' >> "$rc_file"
-        echo '# Gathm Framework' >> "$rc_file"
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc_file"
+    local rc_file
+    if [[ "$platform" == termux ]]; then rc_file="$HOME/.bashrc"
+    elif [[ "${SHELL:-}" == */zsh || -z "${SHELL:-}" && "$platform" == macos ]]; then rc_file="$HOME/.zshrc"
+    elif [[ "$platform" == macos && "${SHELL:-}" == */bash ]]; then rc_file="$HOME/.bash_profile"
+    elif [[ -f "$HOME/.bashrc" ]]; then rc_file="$HOME/.bashrc"
+    elif [[ -f "$HOME/.bash_profile" || "$platform" == windows ]]; then rc_file="$HOME/.bash_profile"
+    else rc_file="$HOME/.bashrc"; fi
+    if ! grep -Fq '.local/bin' "$rc_file" 2>/dev/null; then
+        printf '\n# Gathm Framework\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc_file" || return 1
         info "Added ~/.local/bin to PATH in $rc_file"
     fi
-
-    ok "Shortcuts created: gathm → $SCRIPT_DIR/gathm"
-    ok "                   gathm-agent → $SCRIPT_DIR/agent/orchestrator.sh"
-    ok "                   gathm-api (wrapper, python: $api_python_cmd)"
+    ok "Shortcuts installed in $bin_dir"
 }
 
 # --- Start the GUI API server in the background ---
@@ -4460,12 +4493,11 @@ verify() {
     done
 
     # Python
-    if command -v python3 &>/dev/null; then
-        ok "python3 ($(python3 --version 2>&1))"
-    elif command -v python &>/dev/null; then
-        ok "python ($(python --version 2>&1))"
+    local checked_python; checked_python=$(_python_cmd)
+    if [[ -n "$checked_python" ]]; then
+        ok "Python ($("$checked_python" --version 2>&1))"
     else
-        fail "python NOT FOUND"; errors=$((errors + 1))
+        fail "Python 3.10+ NOT FOUND"; errors=$((errors + 1))
     fi
 
     # Tools
@@ -4518,7 +4550,7 @@ verify() {
                 ok "LLM backend: Ollama ($(ollama --version 2>&1 | head -1))"
             else
                 warn "LLM backend: Ollama not installed (optional — needed for Pilot AI)"
-                note_missing "Ollama runtime" "curl -fsSL https://ollama.com/install.sh | sh  (or pkg install ollama on Termux)"
+                note_missing "Ollama runtime" "re-run ./install or use https://ollama.com/download for your OS"
             fi
             # Confirm the configured model is actually downloaded, not just named.
             local want_model=""
@@ -4550,8 +4582,9 @@ verify() {
     # We actually IMPORT each module (not just find_spec) so a native library
     # failure is caught here instead of only blowing up when Pilot starts.
     _init_venv
-    local pilot_py
-    if pilot_py=$(_venv_python "$GATHM_VENV"); then
+    local pilot_py=""
+    pilot_py=$(_venv_python "$GATHM_VENV") || pilot_py=$(_python_cmd)
+    if [[ -n "$pilot_py" ]] && _python_version_ok "$pilot_py"; then
         local missing_mods
         missing_mods=$("$pilot_py" - <<'PY' 2>/dev/null
 # Import what Pilot actually imports, not just the top-level packages.
@@ -4593,20 +4626,21 @@ print(" ".join(missing))
 for d in details:
     print(d)
 PY
-)
+) || missing_mods="Python interpreter failed during dependency verification"
         # First line is the package list; any following lines are the real
         # exceptions, which is what actually identifies the problem.
         local _dep_pkgs _dep_details
         _dep_pkgs=$(printf '%s\n' "$missing_mods" | head -1)
         _dep_details=$(printf '%s\n' "$missing_mods" | tail -n +2)
         if [[ -z "$_dep_pkgs" ]]; then
-            ok "Pilot runtime (venv + dependencies)"
+            ok "Pilot runtime ($pilot_py + dependencies)"
         else
-            warn "Pilot runtime missing/broken: $_dep_pkgs"
+            fail "Pilot runtime missing/broken: $_dep_pkgs"
+            errors=$((errors + 1))
             if [[ -n "$_dep_details" ]]; then
                 printf '%s\n' "$_dep_details" | sed 's/^/       /'
             fi
-            note_missing "Pilot Python deps" "pip install -r pilot/requirements.txt  (missing: $_dep_pkgs)"
+            warn "Re-run ./install after resolving the dependency errors above."
         fi
 
         # GUI/API server needs FastAPI + uvicorn (installed into the same venv).
@@ -4615,11 +4649,11 @@ PY
             # uvicorn loads the app as "api.server:app", so that module path has
             # to resolve from the repo root. find_spec checks it without
             # executing the module, so this needs no running server.
-            if "$pilot_py" -c "
+            if "$pilot_py" -c '
 import importlib.util, sys
-sys.path.insert(0, '$SCRIPT_DIR')
-sys.exit(0 if importlib.util.find_spec('api.server') else 1)
-" 2>/dev/null; then
+sys.path.insert(0, sys.argv[1])
+sys.exit(0 if importlib.util.find_spec("api.server") else 1)
+' "$SCRIPT_DIR" 2>/dev/null; then
                 ok "GUI app importable (api.server)"
             else
                 warn "GUI app not importable as api.server (GUI won't start)"
@@ -4630,8 +4664,9 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
             note_missing "GUI deps (fastapi/uvicorn)" "pip install fastapi uvicorn"
         fi
     else
-        warn "Pilot venv not found"
-        note_missing "Pilot venv" "re-run ./install (creates pilot/venv from requirements.txt)"
+        fail "No usable Python interpreter for Pilot"
+        errors=$((errors + 1))
+        warn "Re-run ./install to create pilot/venv from requirements.txt."
     fi
 
     # ── Browser engine (powers Pilot's 'browser' tool) ──
@@ -4753,26 +4788,7 @@ sys.exit(0 if importlib.util.find_spec('api.server') else 1)
 
 # --- Uninstall ---
 uninstall() {
-    info "Removing Gathm shortcuts..."
-    rm -f "$HOME/.local/bin/gathm" "$HOME/.local/bin/gathm-agent" "$HOME/.local/bin/gathm-api"
-    rm -f "$HOME/.local/bin/audiocpp_cli"
-
-    # The audio.cpp checkout is only deleted when it lives inside ~/.gathm
-    # (the default). A checkout somewhere else — ~/audio.cpp, or a custom
-    # GATHM_AUDIOCPP_SRC — is left alone, since we did not create it.
-    # Either way say which happened: rebuilding costs up to an hour on a phone.
-    local audio_src; audio_src=$(_audiocpp_src_dir)
-    if [[ -d "$audio_src" && "$audio_src" == "$HOME/.gathm/"* ]]; then
-        warn "Deleting the audio.cpp build at $audio_src (a rebuild takes 20-60 min on a phone)"
-    fi
-
-    info "Removing data directory..."
-    rm -rf "$HOME/.gathm"
-
-    if [[ -d "$audio_src" ]]; then
-        warn "audio.cpp source kept at $audio_src (delete manually to reclaim the space)"
-    fi
-    ok "Uninstalled. Source directory not removed: $SCRIPT_DIR"
+    "$BASH" "$SCRIPT_DIR/uninstall" "$@"
 }
 
 # --- Reload shell config (best effort) ---
@@ -4803,10 +4819,15 @@ main() {
 
     case "${1:-install}" in
         --check|-c)
-            verify; exit $? ;;
+            [[ $# == 1 ]] || { fail "Unexpected arguments to --check"; return 2; }
+            local check_rc=0
+            verify || check_rc=$?
+            return "$check_rc" ;;
         --uninstall|-u)
-            uninstall; exit 0 ;;
+            shift
+            uninstall "$@"; return $? ;;
         --audio-only|--speech)
+            [[ $# == 1 ]] || { fail "Unexpected arguments to --audio-only"; return 2; }
             # Just the speech runtime. Re-running the whole installer to retry
             # one compile means sitting through eleven unrelated steps.
             _GATHM_PLATFORM=$(detect_platform)
@@ -4824,24 +4845,28 @@ main() {
             echo "  (default)     Auto-detect platform and install"
             echo "  --check       Verify environment only"
             echo "  --audio-only  Install just the speech runtime (audio.cpp)"
-            echo "  --uninstall   Remove shortcuts and data"
+            echo "  --uninstall   Remove Gathm (--dry-run, --keep-data, --yes supported)"
             echo "  --help        Show this help"
             exit 0 ;;
+        install)
+            [[ $# -le 1 ]] || { fail "Unexpected install arguments"; return 2; } ;;
+        *) fail "Unknown option: $1 (use --help)"; return 2 ;;
     esac
 
     local platform
     platform=$(detect_platform)
     # Expose platform globally so sub-functions (e.g. Gemini fallback) can use it
     _GATHM_PLATFORM="$platform"
+    [[ "$platform" != unknown ]] || { fail "Unsupported platform; use Linux, macOS, Termux, WSL or Git Bash/MSYS2."; return 1; }
 
     # Visible step count. Termux has one extra step (storage permission),
     # which runs first so a permission-grant restart costs no real work.
     # Steps: [storage] connectivity, python, deps, files, llama.cpp, ollama,
     # llm-model, pilot-deps, playwright, audio.cpp, shortcuts, verify.
     if [[ "$platform" == "termux" ]]; then
-        _GATHM_TOTAL_STEPS=13
+        _GATHM_TOTAL_STEPS=14
     else
-        _GATHM_TOTAL_STEPS=12
+        _GATHM_TOTAL_STEPS=13
     fi
 
     # Termux storage permission FIRST: granting it can restart Termux, so we
@@ -4860,16 +4885,21 @@ main() {
         step_skip "Offline — online-only steps will be skipped"
     fi
 
-    # Verify Python 3.8+ is present before touching the venv or pip.
+    # Verify Python 3.10+ is present before touching the venv or pip.
     # This runs before install_deps so a missing Python surfaces immediately
     # with a clear message rather than a cryptic venv failure later.
-    step_begin "Verifying Python toolchain (3.8+)"
+    step_begin "Verifying Python toolchain (3.10+)"
     check_and_install_python "$platform"
     step_done "Python toolchain ready"
 
     step_begin "Installing OS dependencies"
-    install_deps "$platform"
-    step_done "OS dependencies installed"
+    if install_deps "$platform"; then
+        step_done "OS dependencies checked"
+    else
+        step_fail "Required OS dependencies are missing"
+        step_summary
+        return 1
+    fi
 
     step_begin "Staging gathm files"
     setup_files
@@ -4902,12 +4932,14 @@ main() {
     # engineer agent. Uncomment the line below to restore engineer setup.
     # install_engineer_deps
     step_begin "Installing Pilot AI Python dependencies"
-    install_pilot_deps
-    step_done "Pilot AI dependencies installed"
+    if install_pilot_deps; then
+        step_done "Pilot dependency setup finished"
+    else
+        step_fail "Pilot dependency setup failed"
+    fi
 
     step_begin "Installing Playwright browser engine"
     install_playwright_browser
-    step_done "Browser engine ready"
 
     # Speech runtime (lets Pilot talk). Native C++ on every platform — on
     # Termux that is the only thing that works, so it runs by default there
@@ -4916,14 +4948,27 @@ main() {
     install_audio_cpp "$platform"
 
     step_begin "Installing shell shortcuts"
-    setup_shortcuts "$platform"
-    step_done "Shortcuts installed"
+    if setup_shortcuts "$platform"; then
+        step_done "Shortcuts installed"
+    else
+        step_fail "Could not install command shortcuts"
+        step_summary
+        return 1
+    fi
 
     reload_shell_config
 
     step_begin "Running final verification"
-    verify || true   # non-zero return just means warnings; never abort setup
-    step_done "Verification complete"
+    local verify_rc=0
+    verify || verify_rc=$?
+    if (( verify_rc == 0 )); then
+        step_done "Verification complete"
+    else
+        step_fail "Required checks failed"
+        step_summary
+        fail "Setup incomplete. Resolve the errors above and re-run ./install."
+        return 1
+    fi
 
     step_summary
 
@@ -4953,7 +4998,11 @@ main() {
     fi
 
     # Start GUI + hand off to Pilot in the current terminal
-    launch_post_install "$platform"
+    if [[ "${GATHM_NON_INTERACTIVE:-0}" != 1 && "${GATHM_NO_LAUNCH:-0}" != 1 && -t 0 ]]; then
+        launch_post_install "$platform"
+    else
+        info "Start Gathm when ready: gathm"
+    fi
 }
 
 # Sourcing this file to exercise one function should not run an install.

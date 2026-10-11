@@ -101,7 +101,7 @@ RESET = "\033[0m"
 # of crashing with a raw ModuleNotFoundError traceback.
 try:
     from pilot.tui import (
-        render_welcome, print_prompt, render_response, print_tool_exec,
+        render_welcome, render_response, print_tool_exec,
         print_status_bar, render_help, render_tools_list, render_error,
         render_goodbye, check_connectivity,
         start_waiting, stop_waiting, print_user_message, get_user_input,
@@ -110,7 +110,7 @@ try:
 except ImportError:
     try:
         from tui import (  # type: ignore[no-redef]
-            render_welcome, print_prompt, render_response, print_tool_exec,
+            render_welcome, render_response, print_tool_exec,
             print_status_bar, render_help, render_tools_list, render_error,
             render_goodbye, check_connectivity,
             start_waiting, stop_waiting, print_user_message, get_user_input,

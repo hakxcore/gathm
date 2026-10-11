@@ -13,9 +13,11 @@
 langchain-core
 langchain-ollama
 langgraph
+langgraph-sdk>=0.4.4  # security floor; keep aligned with pyproject.toml
 python-dotenv
 rich>=13.0
 prompt_toolkit>=3.0
 requests
+urllib3>=2.8.0  # security floor for requests
 beautifulsoup4
 playwright

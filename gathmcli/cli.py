@@ -19,7 +19,6 @@ between the terminal and the thing meant to receive the signal.
 from __future__ import annotations
 
 import os
-import platform
 import shutil
 import sys
 from pathlib import Path
@@ -124,9 +123,8 @@ def ensure_executable(bundle: Path) -> None:
     if marker.exists():
         return
 
-    patterns = ("gathm", "install", "*.sh", "*.bash")
     targets: list = []
-    for name in ("gathm", "install"):
+    for name in ("gathm", "install", "uninstall"):
         candidate = bundle / name
         if candidate.is_file():
             targets.append(candidate)

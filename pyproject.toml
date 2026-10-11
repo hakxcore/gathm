@@ -7,7 +7,7 @@ name = "gathm"
 version = "3.0.0"
 description = "A local-first personal AI assistant with voice, chat, and tools when needed"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "hakxcore" }]
 keywords = ["assistant", "voice", "chat", "cli", "llm", "llama.cpp", "ollama", "termux", "agent"]
@@ -31,10 +31,12 @@ dependencies = [
     "langchain-core",
     "langchain-ollama",
     "langgraph",
+    "langgraph-sdk>=0.4.4",  # patched resource-action authorization
     "python-dotenv",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
     "requests",
+    "urllib3>=2.8.0",       # patched streaming and HTTPS-proxy handling
     "beautifulsoup4",
 ]
 
@@ -79,7 +81,7 @@ Issues = "https://github.com/hakxcore/gathm/issues"
 # Gathm is mostly bash: one launcher, 16 library scripts, an orchestrator and
 # 56 tool directories. Restructuring that into src/ layout to satisfy a build
 # backend would rewrite every path in a codebase that works, so instead the
-# tree is force-included verbatim under gathmcli/_bundle/ and the console
+# selected runtime tree is mapped under gathmcli/_bundle/ and the console
 # script execs the launcher out of there.
 #
 # The alternative — declaring `lib`, `api` and `agent` as top-level packages —
@@ -88,10 +90,16 @@ Issues = "https://github.com/hakxcore/gathm/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gathmcli"]
+only-include = ["gathmcli", "lib", "pilot", "api", "gui", "agent", "tools", "config"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "gathm" = "gathmcli/_bundle/gathm"
 "install" = "gathmcli/_bundle/install"
+"uninstall" = "gathmcli/_bundle/uninstall"
+
+# Directory force-include bypasses exclusions and would ship local venvs and
+# credentials. Normal selection plus path mapping keeps exclusions effective.
+[tool.hatch.build.targets.wheel.sources]
 "lib" = "gathmcli/_bundle/lib"
 "pilot" = "gathmcli/_bundle/pilot"
 "api" = "gathmcli/_bundle/api"
@@ -105,6 +113,7 @@ include = [
     "gathmcli",
     "gathm",
     "install",
+    "uninstall",
     "lib",
     "pilot",
     "api",
@@ -125,7 +134,13 @@ exclude = [
     "**/__pycache__",
     "**/*.pyc",
     "**/*.pyo",
-    "pilot/venv",
+    "**/venv",
+    "**/.venv",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "tools/**/*.png",       # README screenshots, not runtime assets
     "**/.DS_Store",
     "**/node_modules",
+    "**/.env",
+    "**/.env.*",
 ]

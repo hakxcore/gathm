@@ -1,0 +1,306 @@
+{
+  "review_date": "2026-10-11",
+  "baseline_commit": "1a4fbd674a78e8233218373301dc73a53bbd3bf5",
+  "scope": "Tracked and nonignored working-tree source; current pilot virtualenv dependencies. Not Git history or ignored personal configuration.",
+  "tools": {
+    "bandit": "1.9.4",
+    "pip-audit": "2.10.1",
+    "ruff": "0.17.0",
+    "vulture": "2.16",
+    "shellcheck": "0.11.0",
+    "hatchling": "1.32.4"
+  },
+  "dependency_audit": {
+    "packages": 58,
+    "advisories_before": 4,
+    "advisories_after": 0,
+    "upgrades": [
+      {
+        "package": "langgraph-sdk",
+        "before": "0.4.2",
+        "after": "0.4.6",
+        "advisories": [
+          {
+            "id": "CVE-2026-104873",
+            "aliases": [
+              "GHSA-fvww-7h3r-vfhp"
+            ],
+            "fixed_versions": [
+              "0.4.4"
+            ]
+          }
+        ]
+      },
+      {
+        "package": "urllib3",
+        "before": "2.7.0",
+        "after": "2.8.0",
+        "advisories": [
+          {
+            "id": "PYSEC-2026-4177",
+            "aliases": [
+              "GHSA-vxq7-64xx-v4gw",
+              "CVE-2026-97689"
+            ],
+            "fixed_versions": [
+              "2.8.0"
+            ]
+          },
+          {
+            "id": "PYSEC-2026-4176",
+            "aliases": [
+              "CVE-2026-97688",
+              "GHSA-gh4c-6fx4-qh6g"
+            ],
+            "fixed_versions": [
+              "2.8.0"
+            ]
+          },
+          {
+            "id": "PYSEC-2026-4175",
+            "aliases": [
+              "CVE-2026-97687",
+              "GHSA-8988-9cw3-xx77"
+            ],
+            "fixed_versions": [
+              "2.8.0"
+            ]
+          }
+        ]
+      }
+    ],
+    "minimum_python": "3.10",
+    "pip_check": "passed"
+  },
+  "static_analysis": {
+    "bandit": {
+      "python_files": 22,
+      "severity_counts": {
+        "LOW": 72,
+        "MEDIUM": 9
+      },
+      "medium_findings": [
+        {
+          "file": "./bench/assistant_latency.py",
+          "line": 38,
+          "rule": "B310"
+        },
+        {
+          "file": "./bench/termux_latency.py",
+          "line": 44,
+          "rule": "B310"
+        },
+        {
+          "file": "./bench/termux_latency.py",
+          "line": 154,
+          "rule": "B310"
+        },
+        {
+          "file": "./lib/chat_openai_compat.py",
+          "line": 108,
+          "rule": "B310"
+        },
+        {
+          "file": "./lib/llamacpp.py",
+          "line": 417,
+          "rule": "B104"
+        },
+        {
+          "file": "./lib/llamacpp.py",
+          "line": 530,
+          "rule": "B310"
+        },
+        {
+          "file": "./lib/llamacpp.py",
+          "line": 546,
+          "rule": "B310"
+        },
+        {
+          "file": "./lib/llm.py",
+          "line": 349,
+          "rule": "B310"
+        },
+        {
+          "file": "./pilot/main.py",
+          "line": 1360,
+          "rule": "B604"
+        }
+      ],
+      "triage": "See security_best_practices_report.md; operator-configured URLs, display-address normalization, prompt formatting."
+    },
+    "ruff": {
+      "rules": [
+        "F401",
+        "F811",
+        "F821",
+        "F841"
+      ],
+      "findings": 0
+    },
+    "vulture": {
+      "retained_adapter_parameters": [
+        "pilot/browser.py:190 wait_until",
+        "pilot/browser.py:224 full_page"
+      ]
+    },
+    "shellcheck": {
+      "files": 80,
+      "errors": 0,
+      "warnings": 53,
+      "warning_codes": {
+        "2155": 27,
+        "2220": 8,
+        "2034": 18
+      },
+      "modified_installer_files_warning_clean": true
+    },
+    "credential_patterns": {
+      "text_files": 251,
+      "matches": 0,
+      "categories": [
+        "private_key",
+        "github_token",
+        "aws_access_id",
+        "provider_token"
+      ]
+    }
+  },
+  "validation": {
+    "python_unittest": {
+      "tests": 220,
+      "status": "passed"
+    },
+    "suites": [
+      {
+        "suite": "tests/packaging_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/sysexec_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/security_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/macos_speech_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/speech_stream_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/reply_stream_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/llamacpp_test.py",
+        "exit_code": 0,
+        "note": "Passed when rerun with loopback server access outside execution sandbox"
+      },
+      {
+        "suite": "bench/route_bench_test.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tools/validate_manifests.py",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/markdown_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/chunker_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/vad_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/speech_browser_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/voice_lifecycle_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/system_control_gui_test.js",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/launcher_test.sh",
+        "exit_code": 0,
+        "note": "Passed when rerun with loopback server access outside execution sandbox"
+      },
+      {
+        "suite": "tests/venv_paths_test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/netcheck_test.sh",
+        "exit_code": 0,
+        "note": "Passed when rerun with loopback server access outside execution sandbox"
+      },
+      {
+        "suite": "tests/compact_tool_test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/llamacpp_install_test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/install_reuse_test.sh",
+        "exit_code": 0
+      },
+      {
+        "suite": "tests/install_lifecycle_test.sh",
+        "exit_code": 0
+      }
+    ],
+    "chromium_streaming_and_approvals": {
+      "checks": 17,
+      "status": "passed",
+      "browser": "Chrome 154.0.8037.98"
+    },
+    "bash32_installer_lifecycle": {
+      "groups": 15,
+      "status": "passed"
+    },
+    "mac_installer_self_check": "passed",
+    "dirty_fixture_wheel": {
+      "required_files": 14,
+      "excluded_files": 9,
+      "status": "passed"
+    },
+    "archives": [
+      {
+        "archive": "gathm-3.0.0.tar.gz",
+        "bytes": 534779,
+        "entries": 216,
+        "unwanted_count": 0,
+        "missing": []
+      },
+      {
+        "archive": "gathm-3.0.0-py3-none-any.whl",
+        "bytes": 448394,
+        "entries": 162,
+        "unwanted_count": 0,
+        "missing": []
+      }
+    ],
+    "fresh_wheel_smoke": "No-dependency install; --version and --where passed"
+  },
+  "remaining_limitations": [
+    "Some installer downloads lack pinned independent checksums/signatures.",
+    "Permitted tools execute with current-user privileges; Termux Selenium disables Chromium sandbox.",
+    "Geolocation provider remains HTTP.",
+    "Native Windows/Linux/Android fresh installs and container build not run.",
+    "Optional native dependencies and Git history not exhaustively audited."
+  ]
+}

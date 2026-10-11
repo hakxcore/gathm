@@ -362,6 +362,12 @@ PY
 
 check_gui_deps() {
     (( START_GUI )) || return 0
+    if [[ ! -f "$INSTALL_DIR/api/server.py" ]]; then
+        pf_warn "API server not found — starting the terminal assistant only" \
+                "Restore the installation with: $(setup_advice)"
+        START_GUI=0
+        return 1
+    fi
     [[ -n "$PREFLIGHT_PY" ]] || return 0
     local missing
     missing="$("$PREFLIGHT_PY" - <<'PY' 2>/dev/null

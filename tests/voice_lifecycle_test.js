@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const controls = require('../gui/system-controls.js');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'gui', 'app.js'), 'utf8');
 function section(start, end) {
@@ -20,8 +21,9 @@ function section(start, end) {
 }
 const production = [
     section('let isSending = false;', '// -- Conversation memory'),
+    section('let systemControls = null;', 'function syncConversationView('),
     section('function updateComposerState()', 'function saveChat()'),
-    section('async function sendMessage(', "sendBtn.addEventListener('click'"),
+    section('// -- Send via API', "sendBtn.addEventListener('click'"),
     section('let audioCtx    = null;'),
 ].join('\n');
 
@@ -35,7 +37,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function element() {
     const attributes = {}, listeners = {}, classes = new Set();
     return {
-        style: {}, value: '', textContent: '', disabled: false, hidden: false,
+        style: {}, value: '', textContent: '', disabled: false, hidden: false, children: [],
         attributes, listeners,
         classList: {
             add(name) { classes.add(name); },
@@ -45,12 +47,12 @@ function element() {
         setAttribute(name, value) { attributes[name] = value; },
         removeAttribute(name) { delete attributes[name]; },
         addEventListener(name, handler) { listeners[name] = handler; },
-        appendChild() {}, remove() {}, focus() {},
+        appendChild(child) { this.children.push(child); }, remove() {}, focus() {},
         querySelectorAll() { return []; }, querySelector() { return null; },
     };
 }
 
-function harness({ permission, transcription } = {}) {
+function harness({ permission, transcription, confirmation } = {}) {
     const calls = [], messages = [], tracks = [], contexts = [];
     let cleared = 0, micRequests = 0;
     function stream() {
@@ -78,13 +80,13 @@ function harness({ permission, transcription } = {}) {
             micRequests++;
             return permission ? permission.promise : Promise.resolve(stream());
         } } },
-        window: { AudioContext },
+        window: { AudioContext, GathmControls: controls }, GathmControls: controls,
         freqBars: element(), aiOrb: element(), mainOrb: element(),
         botStatus: element(), micBtn: element(), convoBtn: element(),
         clearBtn: element(), voiceHint: element(), messageInput: element(),
         sendBtn: element(), chatArea: element(),
         speechAvailable: true, speakEnabled: true, API_BASE: '',
-        history: [], HISTORY_MAX: 12, speaking: Promise.resolve(),
+        history: [], HISTORY_MAX: 12, speaking: Promise.resolve(), speechGeneration: 0,
         GathmVAD: { VAD: class { reset() {} rearm() {} } },
         fetch: async function(url, options) {
             calls.push({ url, options });
@@ -95,6 +97,10 @@ function harness({ permission, transcription } = {}) {
             if (url.endsWith('/agent/chat')) {
                 return { ok: true, json: async () => ({ reply: 'A reply' }) };
             }
+            if (url.endsWith('/system/confirm')) {
+                if (confirmation) return confirmation.promise;
+                return { ok: true, json: async () => ({ ok: true, output: 'Stub result' }) };
+            }
             return { ok: true, json: async () => ({ available: true }) };
         },
         setInterval() { return 1; }, setTimeout() { return 1; }, clearInterval() {},
@@ -103,6 +109,7 @@ function harness({ permission, transcription } = {}) {
         stopSpeaking() {}, setOrbState() {}, checkConnectivity() {},
         autoGrow() {}, showTyping() {}, hideTyping() {}, saveChat() {},
         formatAgentReply(data) { return data.reply; }, speakReply() {},
+        readChatReply: response => response.json(),
         clearChat() { cleared++; },
         addMessage(text, sender) { messages.push({ text, sender }); },
         isSpeakingNow() { return false; },
@@ -113,6 +120,10 @@ function harness({ permission, transcription } = {}) {
         cleared: () => cleared, micRequests: () => micRequests,
         run: expression => vm.runInContext(expression, context),
         count: suffix => calls.filter(call => call.url.endsWith(suffix)).length,
+        approve() {
+            vm.runInContext('systemControls.offer({id: "a".repeat(43), summary: "A test action", expires_at: Date.now() / 1000 + 120})', context);
+            return context.chatArea.children.at(-1).children.at(-2).listeners.click;
+        },
     };
 }
 
@@ -180,7 +191,7 @@ async function main() {
         const h = harness();
         await flush();
         for (const command of ['/clear', '/reset']) {
-            for (const flag of ['isSending', 'voiceActive', 'voiceStarting', 'convoMode', 'isTranscribing', 'turnBusy']) {
+            for (const flag of ['isSending', 'voiceActive', 'voiceStarting', 'convoMode', 'isTranscribing', 'turnBusy', 'systemControlBusy']) {
                 h.run(flag + ' = true');
                 h.context.messageInput.value = command;
                 await h.context.sendMessage();
@@ -223,6 +234,53 @@ async function main() {
         assert.equal(h.context.clearBtn.disabled, false);
         assert.match(h.context.voiceHint.textContent, /microphone stays off/);
         assert(h.messages.some(message => /Microphone blocked/.test(message.text)));
+    });
+    await test('confirmation closes a microphone restarted after the proposal', async () => {
+        const confirmation = deferred(), h = harness({ confirmation });
+        await flush();
+        const approve = h.approve();
+        await h.context.startConversation();
+        h.run('pcmChunks = [new Float32Array(16000)]; capturing = true');
+        const pending = approve();
+        assert.equal(h.run('voiceActive || voiceStarting || convoMode'), false);
+        assert(h.tracks.every(track => track.stopped));
+        assert(h.contexts.every(context => context.closed));
+        assert(h.context.micBtn.disabled && h.context.convoBtn.disabled);
+        assert(h.context.clearBtn.disabled && h.context.messageInput.disabled);
+        assert.equal(h.count('/transcribe'), 0);
+        confirmation.resolve({ ok: true, json: async () => ({ ok: true, output: 'Stub result' }) });
+        await pending;
+        assert.equal(h.context.messageInput.disabled, false);
+        assert.equal(h.run('systemControlBusy'), false);
+    });
+    await test('confirmation invalidates a pending microphone permission', async () => {
+        const permission = deferred(), h = harness({ permission });
+        await flush();
+        const approve = h.approve();
+        const starting = h.context.startVoice();
+        await flush();
+        await approve();
+        permission.resolve(h.stream());
+        await starting;
+        assert.equal(h.run('voiceActive || voiceStarting'), false);
+        assert(h.tracks.every(track => track.stopped));
+        assert.equal(h.contexts.length, 0);
+    });
+    await test('confirmation discards a late dictation even after the action finishes', async () => {
+        const transcription = deferred(), h = harness({ transcription });
+        await flush();
+        const approve = h.approve();
+        await h.context.startVoice();
+        h.run('pcmChunks = [new Float32Array(16000)]');
+        h.context.stopVoice();
+        await flush();
+        assert.equal(h.count('/transcribe'), 1);
+        await approve();
+        transcription.resolve({ ok: true, json: async () => ({ text: 'Late dictated command' }) });
+        await flush();
+        assert.equal(h.count('/agent/chat'), 0);
+        assert.equal(h.context.messageInput.value, '');
+        assert.equal(h.run('isTranscribing'), false);
     });
     console.log('\n' + passed + ' passed');
 }

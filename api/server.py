@@ -73,7 +73,7 @@ _SYSTEM_APPROVALS = ApprovalStore()
 
 try:
     from fastapi import FastAPI, HTTPException, Request, Response, status
-    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
     import uvicorn
@@ -102,7 +102,6 @@ except ImportError:
     class Request: pass
     class Response: pass
     class JSONResponse: pass
-    class FileResponse: pass
     class StreamingResponse: pass
     class HTTPException(Exception):
         def __init__(self, status_code: int, detail: str = None, headers: dict = None):

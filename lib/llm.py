@@ -36,9 +36,9 @@ File-based overrides (set by install or 'gathm pilot --set-model'):
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 BACKENDS = ("llamacpp", "ollama", "gemini", "anthropic")
 

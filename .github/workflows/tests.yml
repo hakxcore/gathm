@@ -24,7 +24,7 @@ jobs:
         python: ["3.11"]
         include:
           - os: ubuntu-latest
-            python: "3.9"      # the floor declared in pyproject
+            python: "3.10"      # the floor declared in pyproject
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +67,7 @@ jobs:
           node tests/vad_test.js
           node tests/speech_browser_test.js
           node tests/voice_lifecycle_test.js
+          node tests/system_control_gui_test.js
 
       - name: Launcher suite
         run: bash tests/launcher_test.sh
@@ -96,6 +97,26 @@ jobs:
       - name: Installer self-check
         run: ./install --check
 
+  installer-lifecycle:
+    name: Installer lifecycle / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Isolated install and uninstall fixtures
+        run: bash tests/install_lifecycle_test.sh
+      - name: POSIX and Windows virtualenv layouts
+        run: bash tests/venv_paths_test.sh
+      - name: macOS system Bash compatibility
+        if: runner.os == 'macOS'
+        run: /bin/bash tests/install_lifecycle_test.sh
+
   streaming-browser:
     name: Streaming text and speech in Chromium
     runs-on: ubuntu-latest
@@ -122,7 +143,8 @@ jobs:
 
       - name: Build
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build hatchling
+          python tests/wheel_contents_test.py
           python -m build
 
       # The check no other test can make: from a checkout every file is on disk
@@ -135,7 +157,7 @@ jobs:
           /tmp/verify/bin/pip install --quiet dist/*.whl
           /tmp/verify/bin/gathm --version
           bundle=$(/tmp/verify/bin/gathm --where)
-          for needed in gathm install lib pilot api gui agent tools config; do
+          for needed in gathm install uninstall lib pilot api gui agent tools config; do
             test -e "$bundle/$needed" || { echo "::error::$needed missing"; exit 1; }
           done
           test "$(ls "$bundle/tools" | wc -l)" -ge 50

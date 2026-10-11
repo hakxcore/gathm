@@ -13,7 +13,7 @@ async function main() {
     let pw;
     try { pw = require(process.env.GATHM_PW_PATH || 'playwright-core'); }
     catch (_) { console.log('SKIP: playwright-core is not installed'); return; }
-    const waiting = new Map(), calls = [], errors = [];
+    const waiting = new Map(), calls = [], errors = [], confirmations = [];
     const wav = Buffer.alloc(44 + 8000 * 2 / 2);
     wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4);
     wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
@@ -34,6 +34,12 @@ async function main() {
         const buffers = [];
         for await (const part of req) buffers.push(part);
         const body = JSON.parse(Buffer.concat(buffers).toString() || '{}');
+        if (url === '/api/v1/system/confirm') {
+            confirmations.push(body);
+            res.setHeader('content-type', 'application/json');
+            res.end(JSON.stringify({ok: true, output: body.approve ? 'Simulated volume action completed.' : 'Cancelled; no action ran.'}));
+            return;
+        }
         if (url === '/api/v1/agent/chat' && body.query !== 'legacy') {
             res.writeHead(200, { 'content-type': 'text/event-stream' });
             res.flushHeaders();
@@ -159,6 +165,47 @@ async function main() {
                 assert.deepEqual(calls.slice(offset), []));
             assert.equal(await page.evaluate('history.length'), 0);
             assert((await page.locator('#chatArea').innerText()).includes('can’t reach Gathm'));
+            await page.close();
+        }
+        {
+            const { page, res } = await open('system-approval');
+            const approval = {id:'a'.repeat(43), summary:'Set volume to 30%.', command:'control volume set 30',
+                target:'Test device (macos)', warning:'<script>display as text</script>', expires_at:Date.now()/1000+120};
+            event(res, {event:'result', data:{reply:'Review this action.', approval}});
+            res.end();
+            await page.waitForFunction('!isSending');
+            check('structured system proposal displays exact target without executing', () =>
+                assert.equal(confirmations.length, 0));
+            assert((await page.locator('.system-approval').innerText()).includes('Test device (macos)'));
+            assert((await page.locator('.system-approval').innerText()).includes(approval.warning));
+            const tokenPersisted = await page.evaluate(id => JSON.stringify({transcript,history,storage:localStorage.getItem('gathmChat')}).includes(id), approval.id);
+            check('approval token stays out of persisted chat and model history', () =>
+                assert.equal(tokenPersisted, false));
+            await page.getByRole('button', {name:'Approve once', exact:true}).click();
+            await page.waitForFunction('!systemControlBusy');
+            check('human approval runs one exact request and displays its actual result', () =>
+                assert.deepEqual(confirmations, [{id:approval.id, approve:true}]));
+            assert((await page.locator('#chatArea').innerText()).includes('Simulated volume action completed.'));
+            await page.reload();
+            await page.waitForFunction('speechAvailable');
+            const restoredCards = await page.locator('.system-approval').count();
+            check('reloading never restores an executable approval card', () =>
+                assert.equal(restoredCards, 0));
+            await page.close();
+        }
+        {
+            const { page, res } = await open('system-cancel');
+            const approval = {id:'b'.repeat(43), summary:'Restart test device.', command:'control power restart',
+                target:'Test device (macos)', warning:'Save work first.', expires_at:Date.now()/1000+120};
+            event(res, {event:'result', data:{reply:'Review this action.', approval}});
+            res.end();
+            await page.waitForFunction('!isSending');
+            await page.getByRole('button', {name:'Clear chat', exact:true}).click();
+            await page.waitForFunction('transcript.length === 0');
+            // Wait for the cancellation request to reach this local stub.
+            for (let i=0; confirmations.length<2 && i<100; i++) await new Promise(resolve=>setTimeout(resolve,20));
+            check('clearing chat cancels a pending system action without executing it', () =>
+                assert.deepEqual(confirmations[1], {id:approval.id, approve:false}));
             await page.close();
         }
         check('no browser script errors', () => assert.deepEqual(errors, []));
