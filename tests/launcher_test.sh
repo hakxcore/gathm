@@ -2,6 +2,10 @@
 # Tests for the gathm launcher: GUI + Pilot startup, subcommand dispatch.
 # Builds a fixture tree with stub pilot/api/agent so nothing real is launched.
 REPO="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# macOS does not ship GNU timeout; mirror the runtime's bounded fallback.
+if ! command -v timeout >/dev/null 2>&1; then
+    timeout() { perl -e 'alarm shift; exec @ARGV; exit 127' "$@"; }
+fi
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
@@ -197,7 +201,15 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 OLLAMA
 FAKE_PID=$!
-sleep 1
+fake_ready=0
+for attempt in {1..50}; do
+    if curl -fsS --max-time 1 "http://127.0.0.1:$FAKE/api/tags" >/dev/null 2>&1; then
+        fake_ready=1
+        break
+    fi
+    sleep 0.1
+done
+[[ "$fake_ready" == 1 ]] && ok "model fixture is ready" || bad "model fixture is ready" "server did not start"
 doctor_with_model() {
     HOME="$FIX/home" GATHM_GUI_PORT="$PORT" \
     OLLAMA_BASE_URL="http://127.0.0.1:$FAKE/v1" GATHM_OLLAMA_MODEL="$1" \

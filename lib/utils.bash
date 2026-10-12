@@ -106,7 +106,7 @@ run_bounded() {
     elif command -v gtimeout >/dev/null 2>&1; then
         gtimeout "$seconds" "$@"
     elif command -v perl >/dev/null 2>&1; then
-        perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+        perl -e 'alarm shift; exec @ARGV; exit 127' "$seconds" "$@"
     else
         # No bound available: still run, rather than failing outright.
         "$@"

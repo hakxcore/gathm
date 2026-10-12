@@ -853,4 +853,12 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # The launcher and Pilot must use the same checkout configuration.
+    # Keep the standalone diagnostics usable before optional deps are present.
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        pass
+    else:
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     raise SystemExit(main(sys.argv[1:]))

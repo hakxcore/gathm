@@ -237,7 +237,6 @@ class ConnectivitySocketTests(unittest.TestCase):
                               ("offline", "Offline"), ("online", "Online")):
             with self.subTest(status=status), \
                     patch.object(tui, "check_connectivity") as probe, \
-                    patch.object(tui.os, "system"), \
                     patch.object(tui, "_print_panel") as panel:
                 tui.render_welcome("Test model", 0, "Test platform", status)
                 content = panel.call_args.args[0].plain

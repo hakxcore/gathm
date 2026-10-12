@@ -605,7 +605,9 @@ def _run_tracked(argv: list, timeout: int, cwd: str | None = None) -> tuple[int,
         kwargs["start_new_session"] = True
     if cwd and os.path.isdir(cwd):
         kwargs["cwd"] = cwd
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    # Speech tools take input through arguments/files; stdin belongs to the UI.
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, **kwargs)
     with _proc_lock:
         _procs.append(proc)

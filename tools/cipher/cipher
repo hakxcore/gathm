@@ -73,16 +73,13 @@ if [[ $# -eq 0 ]]; then
   exit 0
 fi
 
-# Check for required command-line tools
-check_dependencies base32 base64
-
 while getopts "e:d:vh" opt; do
   case "$opt" in
     \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
     h)  usage; exit 0 ;;
     v)  echo "Version $currentVersion"; exit 0 ;;
-    e)  encryptText "$OPTARG"; exit 0 ;;
-    d)  decryptText "$OPTARG"; exit 0 ;;
+    e)  check_dependencies base32 base64; encryptText "$OPTARG"; exit 0 ;;
+    d)  check_dependencies base32 base64; decryptText "$OPTARG"; exit 0 ;;
     :)  echo "Option -$OPTARG requires an argument." >&2; exit 1 ;;
   esac
 done

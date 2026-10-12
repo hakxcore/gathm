@@ -169,10 +169,46 @@ pf_fail() {
     return 0
 }
 
+# Resolve the public configuration once per launcher command. Parsing dotenv
+# in Python keeps its contents inert and uses the same precedence as Pilot.
+_LLM_CONFIG_CHECKED=0
+_LLM_CONFIG_BACKEND=""
+_LLM_CONFIG_MODEL=""
+_LLM_CONFIG_URL=""
+_LLM_CONFIG_HAS_KEY=""
+load_llm_config() {
+    (( _LLM_CONFIG_CHECKED )) && return 0
+    _LLM_CONFIG_CHECKED=1
+    local py="${PREFLIGHT_PY:-}" config
+    [[ -n "$py" ]] || py="$(pick_python)" || return 0
+    [[ -f "$INSTALL_DIR/lib/llm.py" ]] || return 0
+    config="$(run_bounded 5 "$py" - "$INSTALL_DIR" <<'PYCONFIG' 2>/dev/null
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from dotenv import load_dotenv
+load_dotenv(Path(sys.argv[1]) / ".env")
+from lib.llm import LLMConfig
+config = LLMConfig.from_env()
+values = (config.backend, config.model, config.base_url or "", "1" if config.api_key else "0")
+if any("\n" in value or "\r" in value for value in values):
+    raise ValueError("Configuration values must fit on one line")
+print("\n".join(values))
+PYCONFIG
+)" || return 0
+    {
+        IFS= read -r _LLM_CONFIG_BACKEND
+        IFS= read -r _LLM_CONFIG_MODEL
+        IFS= read -r _LLM_CONFIG_URL
+        IFS= read -r _LLM_CONFIG_HAS_KEY
+    } <<< "$config"
+}
+
 # The LLM endpoint, from the same environment lib/llm.py reads, so the
 # launcher and Pilot can never disagree about where the model is.
 ollama_root() {
-    local base="${OLLAMA_BASE_URL:-http://localhost:11434/v1}"
+    load_llm_config
+    local base="${_LLM_CONFIG_URL:-${OLLAMA_BASE_URL:-http://localhost:11434/v1}}"
     base="${base%/}"
     base="${base%/v1}"
     echo "$base"
@@ -200,6 +236,8 @@ llamacpp_cli() {
 # preflight asks three separate times.
 _LLM_BACKEND_CACHE=""
 llm_backend() {
+    load_llm_config
+    [[ -n "$_LLM_CONFIG_BACKEND" ]] && { echo "$_LLM_CONFIG_BACKEND"; return 0; }
     [[ -n "$_LLM_BACKEND_CACHE" ]] && { echo "$_LLM_BACKEND_CACHE"; return 0; }
 
     local resolved=""
@@ -233,6 +271,8 @@ llm_backend() {
 }
 
 llm_model() {
+    load_llm_config
+    [[ -n "$_LLM_CONFIG_MODEL" ]] && { echo "$_LLM_CONFIG_MODEL"; return 0; }
     if [[ "$(llm_backend)" == "llamacpp" ]]; then
         local name
         name="$(llamacpp_cli model 2>/dev/null | tail -1)"
@@ -445,6 +485,7 @@ check_llamacpp() {
 
 check_llm() {
     local backend model
+    load_llm_config
     backend="$(llm_backend)"
 
     # Before llm_model: on llama.cpp the name comes from lib/llamacpp.py, which
@@ -459,8 +500,14 @@ check_llm() {
     if [[ "$backend" != "ollama" ]]; then
         # A hosted backend needs a key, not a server. Check the key exists;
         # whether it is valid is not something to spend startup time on.
-        local key="${GATHM_LLM_API_KEY:-${OPENAI_API_KEY:-${GEMINI_API_KEY:-}}}"
-        if [[ -z "$key" ]]; then
+        local has_key="$_LLM_CONFIG_HAS_KEY"
+        if [[ -z "$has_key" ]]; then
+            case "$backend" in
+                anthropic) [[ -n "${ANTHROPIC_API_KEY:-}" ]] && has_key=1 ;;
+                gemini) [[ -n "${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}" ]] && has_key=1 ;;
+            esac
+        fi
+        if [[ "$has_key" != 1 ]]; then
             pf_warn "LLM backend '$backend' has no API key set" \
                     "Gathm cannot answer yet. Set the key for $backend."
             return 1
@@ -767,6 +814,7 @@ cmd_llm() {
     local sub="${1:-status}"
     shift || true
 
+    load_llm_config
     local backend; backend="$(llm_backend)"
     if [[ "$backend" != "llamacpp" ]]; then
         case "$sub" in
