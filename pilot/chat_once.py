@@ -117,7 +117,7 @@ def run_turn(req: dict, on_token=None):
     reply = None
     try:
         last_tool_output = ""
-        for output in pilot.app.stream(state, config={"recursion_limit": pilot.AGENT_MAX_STEPS}):
+        for output in pilot.stream_agent(state, config={"recursion_limit": pilot.AGENT_MAX_STEPS}):
             for key, value in output.items():
                 messages = value.get("messages") or []
                 if messages:

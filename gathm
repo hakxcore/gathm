@@ -872,6 +872,8 @@ Usage:
   gathm doctor                   Check your setup: Python, deps, the LLM, model
   gathm llm <cmd>                Manage the local llama.cpp server
                                  (status|start|stop|restart|doctor|url|model|log)
+  gathm harness <cmd>            Learn from tool sessions with your review
+                                 (enable|disable|status|list|show|approve|reject|reflect)
   gathm stop                     Stop the GUI server (and the LLM Gathm started)
   gathm <agent-command> [...]    Run orchestrator command (run/ask/plan/...)
   gathm <tool> [args...]         Shortcut for: gathm run <tool> [args...]
@@ -964,6 +966,13 @@ main() {
         llm)
             shift
             cmd_llm "$@"
+            return $?
+            ;;
+        harness)
+            shift
+            local harness_py
+            harness_py="$(pick_python)" || return 1
+            "$harness_py" "$INSTALL_DIR/lib/harness.py" "$@"
             return $?
             ;;
         help|-h|--help)

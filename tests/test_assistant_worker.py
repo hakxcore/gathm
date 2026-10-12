@@ -182,6 +182,7 @@ class Graph:
         if pilot._TOKEN_SINK: pilot._TOKEN_SINK.feed(text)
         yield {'agent':{'next_step':'end','messages':[AIMessage(content=text)]}}
 pilot.app=Graph();sys.modules['main']=pilot
+pilot.stream_agent=pilot.app.stream
 sys.argv=[sys.argv[1],'--worker']
 runpy.run_path(sys.argv[0],run_name='__main__')
 '''

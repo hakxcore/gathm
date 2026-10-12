@@ -15,7 +15,7 @@ def main():
             shutil.copyfile(source / name, root / name)
         required = [
             "gathmcli/__init__.py", "gathmcli/cli.py", "gathm", "install", "uninstall",
-            "lib/install_common.bash", "pilot/main.py", "api/server.py",
+            "lib/install_common.bash", "lib/harness.py", "pilot/main.py", "api/server.py",
             "gui/index.html", "gui/logo.png", "agent/orchestrator.sh",
             "tools/example/example", "tools/example/tool.yaml", "config/policies.yaml",
         ]

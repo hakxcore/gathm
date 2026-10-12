@@ -902,6 +902,9 @@ def _recover_bare_shell_command(content: str, tools) -> str:
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], lambda x, y: x + y]
     next_step: str
+    learned_context: str
+    harness_active: bool
+    harness_events: Annotated[list, lambda x, y: x + y]
 
 def _require_langchain_runtime() -> None:
     if not LANGCHAIN_AVAILABLE:
@@ -1310,7 +1313,7 @@ def call_model(state: AgentState):
     if _is_small_talk(_last):
         from langchain_core.messages import AIMessage as _AIMsg
         _llm = _build_llm()
-        _resp = _invoke_spoken(_llm, [HumanMessage(content=_SMALL_TALK_PROMPT),
+        _resp = _invoke_spoken(_llm, [HumanMessage(content=_SMALL_TALK_PROMPT + state.get("learned_context", "")),
                                       *state["messages"]])
         _text = _final_text(_resp.content)
         return {"messages": [_AIMsg(content=_text)], "next_step": "end"}
@@ -1406,7 +1409,7 @@ AVAILABLE TOOLS — optional capabilities for this request:
 {_CONTROL_HELP if 'control' in available_tools else ''}
 {system_help}
 {browser_help}
-{offline_notice}"""
+{offline_notice}""" + state.get("learned_context", "")
     messages = [HumanMessage(content=system_prompt)] + state["messages"]
     llm = _build_llm()
     response = _invoke_spoken(llm, messages)
@@ -1608,6 +1611,11 @@ def tool_node(state: AgentState):
 
         print_tool_exec(normalized_input)
         result = run_gathm_tool_raw(normalized_input)
+        learning = {}
+        if state.get("harness_active"):
+            learning = {"harness_events": [{"command": normalized_input, "output": result,
+                        "outcome": "cancelled" if result.lower().startswith("cancelled") else
+                        "failed" if _looks_like_tool_failure(result) else "returned"}]}
 
         if normalized_input == "control" or normalized_input.startswith("control "):
             # Device output is authoritative, including cancellations/errors.
@@ -1615,7 +1623,7 @@ def tool_node(state: AgentState):
             if "\n" in result:
                 fence = "`" * max(3, 1 + max((len(m) for m in re.findall(r"`+", result)), default=0))
                 result = fence + "text\n" + result + "\n" + fence
-            return {"messages": [AIMessage(content=result)], "next_step": "end"}
+            return {"messages": [AIMessage(content=result)], "next_step": "end", **learning}
 
         # Label a failure as a failure. Left as a bare "Observation:", a tool
         # error was answered with the canned engineer line and the actual
@@ -1627,9 +1635,9 @@ def tool_node(state: AgentState):
                 f"{_clean_observation(result)}\n"
                 "Tell the user what failed and quote that error, without promising "
                 "a background repair. Do not try the same tool again."
-            ))]}
+            ))], **learning}
         return {"messages": [HumanMessage(content=
-                                          f"Observation: {_clean_observation(result)}")]}
+                                          f"Observation: {_clean_observation(result)}")], **learning}
     return {"messages": [HumanMessage(content="Error: Could not parse tool input.")]}
 
 def should_continue(state: AgentState):
@@ -1655,6 +1663,47 @@ else:
     llm = None
     workflow = None
     app = None
+
+
+def stream_agent(state, config):
+    """Shared GUI/TUI turn boundary: recall once, capture only real tool results.
+
+    Learning failures must not fail or replay a user's action. Incomplete and
+    cancelled streams are labelled explicitly; they never count as success.
+    """
+    harness = None
+    events = []
+    completion = "interrupted"
+    try:
+        from lib.harness import Harness
+        candidate = Harness()
+        if os.environ.get("GATHM_HARNESS_CHILD") != "1" and candidate.enabled():
+            harness = candidate
+            state = {**state, "harness_active": True,
+                     "learned_context": harness.recall(_last_user_question(state["messages"]))}
+    except Exception:
+        pass  # read-only/locked/corrupt learning state cannot stop chat
+    try:
+        for output in app.stream(state, config=config):
+            for value in output.values():
+                events.extend(value.get("harness_events") or [])
+                if value.get("next_step") == "end":
+                    completion = "complete"
+            yield output
+    except ControlApprovalRequired:
+        completion = "pending_approval"
+        raise
+    except Exception:
+        completion = "failed"
+        raise
+    finally:
+        if harness is not None:
+            try:
+                if harness.capture(_last_user_question(state["messages"]), events, completion):
+                    harness.start_reflection()
+            except Exception:
+                pass  # never retry an action because its learning record failed
+
 
 def _voice_input(arg: str) -> Optional[str]:
     """/listen — record from the mic and return the transcript as the query.
@@ -1779,6 +1828,11 @@ def _handle_slash_command(cmd: str) -> bool:
         render_tools_list(tool_info)
         return True
 
+    if cmd_lower == "/learn" or cmd_lower == "/harness" or cmd_lower.startswith("/harness "):
+        args = ["reflect"] if cmd_lower == "/learn" else shlex.split(cmd.strip())[1:]
+        subprocess.run([sys.executable, str(GATHM_ROOT / "lib/harness.py"), *args], check=False)
+        return True
+
     if cmd_lower == "/control" or cmd_lower.startswith("/control "):
         command = cmd.strip()[len("/control"):].strip() or "status"
         try:
@@ -1889,7 +1943,7 @@ def main():
             start_waiting()
             _last_tool_output = ""
             try:
-                for output in app.stream(state, config={"recursion_limit": AGENT_MAX_STEPS}):
+                for output in stream_agent(state, config={"recursion_limit": AGENT_MAX_STEPS}):
                     for key, value in output.items():
                         messages = value.get("messages") or []
                         # Remember the data as it goes past, so a loop that
