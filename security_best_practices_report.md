@@ -1,6 +1,6 @@
 # Gathm cleanup and security review
 
-Review date: 2026-10-11. Baseline: `1a4fbd6`, plus the pending installer and system-control regression work.
+Review date: 2026-10-11. Reviewed changes: `1a4fbd6` through `ec2818c`, including the installer and system-control regression work.
 
 ## Executive summary
 
@@ -14,7 +14,7 @@ Python **3.10+ is now required** because the patched dependency releases no long
 
 Reviewed the Bash launcher, installers, tools and shared libraries; Python FastAPI server, Pilot, model clients, system controls and optional engineer entry point; browser JavaScript; dependency manifests; release configuration; and regression tests. Manual attention focused on authentication, same-origin restrictions, permissions, command execution, confirmation ownership, filesystem targets, downloads, and rendering untrusted text.
 
-Machine-readable results: [scan-results-2026-10-11.json](docs/security/scan-results-2026-10-11.json). Raw logs remain local under ignored `build/security-audit/`.
+Machine-readable results: [scan-results-2026-10-11.json](docs/security/scan-results-2026-10-11.json). Temporary build copies and raw validation logs were removed after the review; the recorded results remain available here and in the linked evidence file.
 
 - Bandit scanned 22 Python source files outside `tests/`: 0 high, 9 medium, 72 low heuristic findings after cleanup.
 - Ruff F401/F811/F821/F841 checks: no remaining findings in that source set.
@@ -106,4 +106,4 @@ Passed locally on macOS:
 - The real Mac `./install --check`, Bash syntax, targeted ShellCheck, and `git diff --check`.
 - Source archive and wheel builds, dirty-fixture packaging regression, and a fresh dependency-free wheel install with working `gathm --version` and `gathm --where`.
 
-Initial loopback-server tests were blocked by the execution sandbox; reruns with local-server access passed. Fresh native Windows, Linux, and Android installations were not performed in this review. The workflow includes Linux/macOS checks and Windows installer fixtures; their results must be read from GitHub after the push. Optional engineer/browser/model native dependencies and historical Git secrets were not exhaustively audited. The September review remains available in Git history and its dated evidence file; this report records the current checkout review.
+Initial loopback-server tests were blocked by the execution sandbox; reruns with local-server access passed. Fresh native Windows, Linux, and Android installations were not performed in this review. The workflow includes Linux/macOS checks and Windows installer fixtures; GitHub prevented those jobs from starting because the repository account was locked for billing. Optional engineer/browser/model native dependencies and historical Git secrets were not exhaustively audited. The superseded September review and its evidence remain available in Git history.
