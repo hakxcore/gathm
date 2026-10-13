@@ -119,14 +119,14 @@ class Harness:
         self.path = self.directory / "learning.sqlite3"
 
     @contextmanager
-    def db(self):
+    def db(self, timeout=1):
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.is_symlink():
             raise ValueError("Harness database must not be a symlink")
         # Precreate with private permissions; SQLite's journal inherits them.
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         os.close(fd)
-        conn = sqlite3.connect(self.path, timeout=1)
+        conn = sqlite3.connect(self.path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         try:
             conn.executescript("""
@@ -140,6 +140,9 @@ class Harness:
                     helpful INTEGER DEFAULT 0, unhelpful INTEGER DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, created REAL, action TEXT, lesson TEXT);
+                CREATE TABLE IF NOT EXISTS lesson_vectors (
+                    lesson_id TEXT PRIMARY KEY, model TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, vector BLOB NOT NULL);
             """)
             conn.execute("BEGIN IMMEDIATE")
             yield conn
@@ -147,6 +150,18 @@ class Harness:
         except BaseException:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def read_db(self):
+        # Recall must not migrate schema or reserve a write lock just to read.
+        if self.path.is_symlink():
+            raise ValueError("Harness database must not be a symlink")
+        conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0.01)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
         finally:
             conn.close()
 
@@ -169,7 +184,7 @@ class Harness:
             return False
         if not self.path.exists():
             return True  # lazy storage; inspecting defaults does not create a DB
-        with self.db() as db:
+        with self.read_db() as db:
             return self._get(db, "enabled", "1") == "1"
 
     def enable(self, enabled=True):
@@ -182,8 +197,10 @@ class Harness:
             self._audit(db, "enable" if enabled else "disable")
 
     def status(self):
+        from lib import semantic_memory
         result = {"enabled": os.environ.get("GATHM_HARNESS_DISABLED") != "1",
                   "scope": self.scope, "directory": str(self.directory),
+                  "semantic": semantic_memory.status(),
                   "episodes": 0, "pending": 0, "active": 0, "archived": 0, "rejected": 0}
         if not self.path.exists():
             return result
@@ -232,7 +249,7 @@ class Harness:
     def lessons(self, status=None):
         if not self.path.exists():
             return []
-        with self.db() as db:
+        with self.read_db() as db:
             rows = db.execute("SELECT * FROM lessons" + (" WHERE status=?" if status else "") +
                               " ORDER BY created DESC", (status,) if status else ())
             return [dict(row) for row in rows]
@@ -329,20 +346,45 @@ class Harness:
             self._audit(db, action, lesson_id)
             db.execute("DELETE FROM lessons WHERE status IN ('archived','rejected') AND id NOT IN "
                        "(SELECT id FROM lessons WHERE status IN ('archived','rejected') ORDER BY created DESC LIMIT 100)")
+            db.execute("DELETE FROM lesson_vectors WHERE lesson_id NOT IN "
+                       "(SELECT id FROM lessons WHERE status='active')")
+
+    @staticmethod
+    def eligible(row):
+        return (row["status"] == "active"
+                and all(redact(row[key]) == row[key] for key in ("trigger", "guidance"))
+                and not _weakens_guardrails(row["trigger"] + " " + row["guidance"]))
 
     def recall(self, query):
+        try:
+            return self._recall(query)
+        except (OSError, ValueError, sqlite3.Error):
+            return ""  # busy/corrupt memory cannot stall or fail a chat
+
+    def _recall(self, query):
         if not self.enabled():
             return ""
         words = _terms(query)
+        rows = [row for row in self.lessons("active") if self.eligible(row)]
+        from lib import semantic_memory
+        try:
+            semantic = semantic_memory.scores(self, rows, query)
+        except Exception:
+            semantic = {}  # optional embeddings never break keyword recall
+        closest = sorted(semantic.items(), key=lambda item: item[1], reverse=True)
+        semantic_choice = None
+        if (closest and closest[0][1] >= semantic_memory.MIN_SIMILARITY
+                and (len(closest) == 1 or closest[0][1] - closest[1][1] >= semantic_memory.MIN_MARGIN)):
+            semantic_choice = closest[0][0]
         ranked = []
-        for row in self.lessons("active"):
-            if any(redact(row[key]) != row[key] for key in ("trigger", "guidance")):
-                continue  # credentials may have become known since approval
-            if _weakens_guardrails(row["trigger"] + " " + row["guidance"]):
-                continue
+        for row in rows:
             matches = words & _terms(row["trigger"])
-            if len(matches) >= 2:
-                ranked.append((len(matches), row["helpful"] - row["unhelpful"], row["id"], row))
+            similarity = semantic.get(row["id"], 0)
+            if len(matches) >= 2 or row["id"] == semantic_choice:
+                # Preserve strong keyword matches; semantics adds paraphrases
+                # only when one lesson is a clear match. Feedback breaks ties.
+                score = (1 + len(matches) if len(matches) >= 2 else 0) + similarity
+                ranked.append((score, row["helpful"] - row["unhelpful"], row["id"], row))
         chosen, used = [], 0
         for _, _, _, row in sorted(ranked, reverse=True)[:3]:
             note = {"id": row["id"], "when": row["trigger"], "lesson": row["guidance"]}
@@ -352,12 +394,13 @@ class Harness:
                 used += size
         if not chosen:
             return ""
-        with self.db() as db:
+        with self.db(timeout=0.01) as db:
             if self._get(db, "enabled", "1") != "1":
                 return ""
             # Recheck status after the read so a concurrent archive wins.
             chosen = [note for note in chosen if db.execute(
-                "SELECT 1 FROM lessons WHERE id=? AND status='active'", (note["id"],)).fetchone()]
+                "SELECT 1 FROM lessons WHERE id=? AND status='active' AND trigger=? AND guidance=?",
+                (note["id"], note["when"], note["lesson"])).fetchone()]
             for note in chosen:
                 db.execute("UPDATE lessons SET offered=offered+1 WHERE id=?", (note["id"],))
         if not chosen:
@@ -472,7 +515,7 @@ def _complete(messages):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Review and manage Gathm's learned lessons")
     subs = parser.add_subparsers(dest="command")
-    for name in ("status", "enable", "disable"):
+    for name in ("status", "enable", "disable", "prepare", "index"):
         subs.add_parser(name)
     listing = subs.add_parser("list")
     listing.add_argument("--status", choices=("pending", "active", "archived", "rejected"))
@@ -507,6 +550,9 @@ def main(argv=None):
                 result = harness.reflect(automatic=args.automatic)
             finally:
                 timer.cancel()
+        elif args.command in ("prepare", "index"):
+            from lib import semantic_memory
+            result = semantic_memory.prepare() if args.command == "prepare" else semantic_memory.index(harness)
         else:
             harness.review(args.id, args.command)
             result = {"id": args.id, "action": args.command}

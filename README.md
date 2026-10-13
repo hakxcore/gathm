@@ -24,6 +24,7 @@ your device. Text chat is available alongside them.
 - [Examples](./docs/examples/README.md)
 - [Use Cases](./docs/use-cases/README.md)
 - [Learning Harness](./docs/learning-harness.md)
+- [Tencent VectorDB assessment](./docs/tencent-vectordb-evaluation.md)
 
 ## Why Gathm
 

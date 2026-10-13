@@ -6,9 +6,10 @@ This is a source review. Memanto and its backend were not installed or benchmark
 
 ## Recommendation
 
-Keep Gathm's SQLite harness as the default. Consider Memanto as an optional
-semantic search service when testing shows that the current word matching misses
-useful approved lessons. Integrating it is technically feasible through its
+Keep Gathm's SQLite harness as the default. Gathm now also offers optional local
+semantic recall with a small offline encoder. Consider Memanto as an optional
+service only if testing shows an improvement over this local baseline.
+Integrating it is technically feasible through its
 Python client or REST API, but it adds services and does not replace Gathm's
 approval workflow or conversation checkpoints.
 
@@ -16,10 +17,11 @@ approval workflow or conversation checkpoints.
 
 Memanto provides typed memories, semantic retrieval, conflict reports, retention
 policies, portable exports, and a memory dashboard. These are useful directions
-for Gathm. In particular, semantic retrieval could match paraphrases that share
-fewer than the two significant words required by the current harness. That
-benefit needs measurement on Gathm's own questions; it was not demonstrated by
-this review. See the [project README](https://github.com/moorcheh-ai/memanto).
+for Gathm. Gathm's optional local semantic recall now addresses some paraphrases
+that keyword matching misses. Memanto's additional maintenance and sharing
+features need measurement on Gathm's own questions; their benefit over the local
+baseline was not demonstrated by this review. See the
+[project README](https://github.com/moorcheh-ai/memanto).
 
 Gathm already has selective capture, reflection, persistent SQLite storage,
 owner/scope isolation, evidence, review, recall, feedback, and retirement. Adding
@@ -28,7 +30,7 @@ a second independent learning loop would duplicate those responsibilities.
 | Concern | Existing Gathm harness | Memanto integration implications |
 | --- | --- | --- |
 | Storage | Embedded SQLite; no extra service | Moorcheh Cloud or a local Moorcheh service |
-| Search | Bounded word matching | Semantic retrieval via the configured backend |
+| Search | Word matching plus optional local semantic recall | Semantic retrieval via the configured backend |
 | Approval | Pending lessons excluded from replies | Preserve this gate in Gathm; regular Memanto writes default to active |
 | Memory maintenance | Exact-trigger revisions and explicit retirement | Policies, conflict management, exports, and dashboard |
 | Conversation continuity | Limited recent context; no shared durable task checkpoint | Still requires separate work in Gathm |

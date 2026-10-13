@@ -27,6 +27,7 @@ class HarnessFixture:
         self.addCleanup(self.temp.cleanup)
         self.env = patch.dict(os.environ, {"GATHM_HARNESS_DIR": self.temp.name,
             "GATHM_HARNESS_SCOPE": "test", "GATHM_HARNESS_DISABLED": "0",
+            "GATHM_HARNESS_SEMANTIC": "0",
             "GATHM_HARNESS_CHILD": "0", "GATHM_CHAT_OWNER": "local-test"})
         self.env.start()
         self.addCleanup(self.env.stop)

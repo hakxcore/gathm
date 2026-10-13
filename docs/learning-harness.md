@@ -120,7 +120,9 @@ gathm harness approve LESSON_ID
 ## Recall, feedback, and retirement
 
 Approved lessons matching at least two significant words in the question are
-offered as fallible reference notes. Up to three fit within a 2,400-character
+offered as fallible reference notes. With the optional local embedding model
+prepared, semantic search can also add one clear paraphrase match. Up to three
+lessons fit within a 2,400-character
 content budget per turn. Recall runs once per turn, preserving a stable prompt
 through its tool steps. Current instructions, fresh results, disabled tools,
 and existing device/shell confirmations retain precedence. Learning does not
@@ -144,6 +146,63 @@ evicted based on unreliable usage signals. The latest 200 episodes, 100 retired
 lessons, and 500 audit entries are retained; older entries are pruned. Superseded
 lessons are archived with their evidence. To restore retired guidance, `teach`
 it again and review the new proposal.
+
+## Local semantic recall and latency
+
+SQLite remains the authoritative store for approval, evidence, and ownership.
+Normalized 384-dimensional vectors for approved lessons are stored in a separate
+SQLite table. At the 50-lesson limit, an exact cosine scan is small enough to
+avoid an additional vector database service or native SQLite extension.
+
+Install the optional CPU embedding runtime and prepare its model once:
+
+```bash
+# Packaged installation:
+pip install 'gathm[memory]'
+gathm harness prepare
+
+# From this checkout instead:
+pilot/venv/bin/python -m pip install -e '.[memory]'
+./gathm harness prepare
+```
+
+`prepare` downloads public `BAAI/bge-small-en-v1.5` model files into Gathm's
+embedding cache. No conversations are sent for this download. Chat loads those
+local files directly and never downloads models. The default embedding model
+is for English; cross-language recall is not claimed. Systems without supported
+FastEmbed/ONNX Runtime wheels, including unverified Termux environments, keep
+keyword recall and the same learning/review workflow.
+
+After preparation, semantic recall is used automatically when approved lessons
+exist. An optional `gathm harness index` command builds vectors for the current
+approved library in advance. Otherwise a background worker builds missing
+vectors lazily. Approving a revision or archiving a lesson removes its old
+vector; inference also checks the current lesson version before saving a vector.
+Rebuilding the model changes the cache fingerprint and invalidates old vectors.
+
+Each process has one daemon embedding worker and at most one outstanding job.
+The encoder uses one CPU inference thread. The chat path waits at most 25 ms for
+semantic work, then proceeds with keyword recall. Cold model loading and
+indexing happen in the worker, so the first turn may use keyword recall. Repeated
+query vectors have a bounded, owner-scoped, 64-entry memory cache; query text is
+redacted and bounded before encoding and is not stored in the vector table.
+Embedding failures back off for 60 seconds and leave keyword recall available.
+
+Semantic-only recall requires cosine similarity of at least 0.70 and a margin
+of 0.04 over the next candidate. Ambiguous matches are omitted. Current approval,
+owner/scope, lesson text, and context limits are rechecked before prompt use.
+SQLite recall uses short lock timeouts; contention omits memory instead of
+waiting on the usual one-second write timeout. The 25 ms budget is for the
+embedding wait, not a hard deadline for the entire database/recall operation.
+
+On this macOS development machine, a fixed synthetic evaluation with 50 active
+lessons measured warm unique-query recall at about 18 ms median and 20 ms p95,
+versus about 5 ms median and 6 ms p95 for keyword recall. Repeated-query recall
+was about 13 ms median. Cold fallback took about 37 ms including normal recall
+work. Eight of twelve held-out paraphrases recalled the expected lesson, versus
+zero using the existing keyword matcher; none of five unrelated questions
+recalled guidance. These are small development measurements, not production
+latency guarantees or a general accuracy benchmark.
 
 ## Storage and privacy
 
@@ -179,12 +238,15 @@ existing prompt. Configuration:
 | `GATHM_CONFIG_DIR` | Existing Gathm state root, used when the override is absent |
 | `GATHM_HARNESS_SCOPE` | Stable workspace name, default `personal`; use different names for unrelated projects |
 | `GATHM_HARNESS_DISABLED=1` | Process-level switch that disables capture, recall, and reflection |
+| `GATHM_HARNESS_SEMANTIC=0` | Use keyword recall without embedding work; learning stays enabled |
+| `GATHM_HARNESS_EMBEDDING_DIR` | Override the shared cache of public embedding model files |
 
 Learning defaults to enabled in a new namespace and in existing stores with no
 explicit enable/disable setting. An explicitly disabled namespace stays disabled.
 Changing scope selects a different library, which is enabled by default. Storage
 is created lazily on the first qualifying capture; checking empty status does
-not create a database. No new Python packages are needed.
+not create a database. Basic learning needs no new Python packages; local
+semantic recall uses the optional `memory` dependency extra.
 
 ## Verification
 
@@ -194,3 +256,12 @@ the real compiled agent graph, and the shell CLI. Its model is deterministic.
 These tests verify the mechanism; they do not demonstrate better real-world
 answers. Measure that separately with representative tasks before and after
 approving lessons, including failures and irrelevant-lesson cases.
+
+`tests/test_semantic_memory.py` covers paraphrases, stale/corrupt vectors,
+approval/archive races, namespace isolation, redaction, failures, and bounded
+fallback. The opt-in offline evaluation uses the real prepared encoder:
+
+```bash
+pilot/venv/bin/python tests/eval_harness_recall.py --held-out \
+  --output /tmp/gathm-recall-results.json
+```

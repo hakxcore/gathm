@@ -41,6 +41,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local semantic recall. Keyword learning remains available without native wheels.
+memory = ["fastembed==0.9.0"]
 # The browser GUI and the REST API.
 gui = [
     "fastapi>=0.111.0",
