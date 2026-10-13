@@ -463,7 +463,7 @@ def run_chat_agent(query: str, history: list = None, timeout: int | None = None,
         state = Path(env.get("GATHM_CONFIG_DIR") or Path.home() / ".gathm")
         watched = [GATHM_ROOT / ".env", PILOT_DIR / ".env", CHAT_SCRIPT,
                    PILOT_DIR / "main.py", PILOT_DIR / "browser.py"]
-        watched += [GATHM_ROOT / "lib" / name for name in ("llm.py", "llamacpp.py", "sysexec.py", "system_control.py", "control_intent.py")]
+        watched += [GATHM_ROOT / "lib" / name for name in ("llm.py", "llamacpp.py", "sysexec.py", "system_control.py", "control_intent.py", "harness.py")]
         watched += [state / name for name in ("model", "llm_backend", "llamacpp_model", "llamacpp_bin")]
         stamps = []
         for path in watched:

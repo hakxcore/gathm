@@ -1666,7 +1666,7 @@ else:
 
 
 def stream_agent(state, config):
-    """Shared GUI/TUI turn boundary: recall once, capture only real tool results.
+    """Shared GUI/TUI boundary: recall once, capture grounded lesson candidates.
 
     Learning failures must not fail or replay a user's action. Incomplete and
     cancelled streams are labelled explicitly; they never count as success.
@@ -1699,7 +1699,13 @@ def stream_agent(state, config):
     finally:
         if harness is not None:
             try:
-                if harness.capture(_last_user_question(state["messages"]), events, completion):
+                context = []
+                for message in state["messages"][:-1]:
+                    role = getattr(message, "type", None)
+                    if role in ("human", "ai"):
+                        context.append({"role": "user" if role == "human" else "assistant_unverified",
+                                        "content": str(message.content)})
+                if harness.capture(_last_user_question(state["messages"]), events, completion, context[-2:]):
                     harness.start_reflection()
             except Exception:
                 pass  # never retry an action because its learning record failed

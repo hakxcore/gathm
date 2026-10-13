@@ -1,6 +1,7 @@
 # Learning harness
 
-Gathm can turn tool experience into reusable lessons. This improves the context
+Gathm turns tool experience and explicit user preferences or corrections into
+proposed reusable lessons. Learning is enabled by default. This improves the context
 available to its model; it does not train model weights or establish that the
 model is getting more accurate. The design is inspired by
 [AutoHarness](https://github.com/tigerless-labs/autoharness), with an explicit
@@ -9,19 +10,35 @@ human review gate for every new lesson and revision.
 ## Start learning
 
 ```bash
-gathm harness enable
 gathm harness status
 ```
 
-Learning is off until enabled. Once enabled, normal tool-using conversations in
-the terminal assistant and browser GUI record short local episodes. An episode
+No activation step is needed. The terminal assistant and browser GUI record
+selected, short local episodes as you use Gathm. A tool episode
 contains the question, up to six tool commands, bounded output snippets, and
-whether the turn completed, failed, or was interrupted. Ordinary conversation,
-full history, and final model claims are not captured. Direct Bash orchestrator
+whether the turn completed, failed, or was interrupted.
+
+Conversation-only episodes are selected conservatively from explicit preferences
+or corrections, for example:
+
+- "I prefer concise bullet points when explaining database storage."
+- "From now on, use small examples when explaining programming concepts."
+- "No, use decimal units when explaining storage capacity."
+
+A completed preference turn stores the user's request. A correction can also
+include the preceding user/assistant exchange, with assistant text labelled
+unverified. Each field is bounded and redacted. Greetings, ordinary factual
+questions, incomplete conversation turns, and recognized one-off or private
+requests are skipped. "Don't learn this" skips capture for that request.
+
+These English phrase checks are deliberately narrow; not every natural-language
+preference is detected. `/harness teach` remains available for explicit lessons.
+Full histories and current model answers are not saved as learning evidence.
+Existing browser transcripts are not bulk-imported. Direct Bash orchestrator
 commands (`gathm ask`, `gathm run`) are outside this first version.
 
 After five recorded turns, a separate process asks the configured model for up
-to three short procedural lessons. It can propose text; it cannot execute tools,
+to three short procedures or communication preferences. It can propose text; it cannot execute tools,
 change Gathm's source, or approve its own output. A process stops after at most
 75 seconds. Reflection errors keep episodes available for retry and do not
 interrupt chat or replay actions. A database lease prevents overlapping passes.
@@ -32,9 +49,31 @@ To reflect on fewer episodes now:
 gathm harness reflect
 ```
 
-In the terminal assistant, use `/harness enable`, `/harness status`, and `/learn`.
+In the terminal assistant, use `/harness status` and `/learn`.
 Review browser-session lessons through the same CLI; there is no browser review
 screen in this version.
+
+An explicit `gathm harness disable` setting survives restarts and upgrades.
+Use `gathm harness enable` to resume after disabling. Learning happens in response
+to new qualifying turns, not continuously while Gathm is idle.
+
+## Conversation state versus lasting lessons
+
+Gathm already has short-term state in LangGraph's `AgentState`: recent messages,
+tool results, the next step, and recalled lessons are passed through the current
+reasoning loop. Holding a variable alone does not give a model knowledge; Gathm
+includes the relevant messages and notes in each model request.
+
+| Layer | Stored where | Lifetime |
+| --- | --- | --- |
+| Terminal conversation | Process memory; latest 12 messages by default (`PILOT_MAX_HISTORY`) | Until terminal assistant exits |
+| Browser conversation | Browser `localStorage`; up to 200 displayed messages, latest 12 turns sent as model context | Survives reloads in that browser; cleared by Clear chat/browser storage removal |
+| API conversation | Caller supplies `history` each turn | The server worker does not independently remember prior chats |
+| Learned lessons | SQLite file in the user's scoped Gathm state directory | Across restarts, until retired or the state is removed |
+
+There is no shared, durable conversation checkpoint that resumes an entire task
+across terminal and browser, and no unlimited conversation window. The harness
+adds selective long-term guidance without changing those existing state limits.
 
 ## Review before use
 
@@ -50,6 +89,17 @@ gathm harness reject LESSON_ID
 it would replace. Check that the guidance follows from the evidence and applies
 beyond a single task. Tool output labelled `returned` means it produced an
 output; it is not proof the requested task succeeded.
+
+Conversation proposals must cite an exact quote from the current user request;
+previous assistant statements cannot supply that quote. Common attempts to weaken
+approval, permission, or safety rules are rejected by a local lint before storage.
+The same exact lesson is not proposed again after you reject it (within retained
+history); an explicit `teach` can submit it again for your review.
+
+The model is instructed to omit unsupported claims, changing facts, jokes,
+insults, and one-off instructions. These instructions and pattern checks cannot
+prove a lesson is correct or beneficial. A user correction can also be mistaken.
+Your review remains the final boundary before any new lesson influences replies.
 
 Pending lessons never enter the model's prompt. Approval makes a lesson eligible
 for subsequent turns. A revision leaves the current approved lesson active until
@@ -97,8 +147,11 @@ it again and review the new proposal.
 
 ## Storage and privacy
 
-State lives in private SQLite files under `~/.gathm/harness/` (or the configured
+Learning data lives in private SQLite files under `~/.gathm/harness/` (or the configured
 Gathm state directory). The namespace includes the OS, scope, and API principal.
+The `learning.sqlite3` file holds episodes, proposed/approved lessons, feedback,
+settings, and a bounded audit trail. SQLite is embedded in Python: no external
+database server or vector database needs to be installed.
 The local GUI and terminal share a namespace. Authenticated API clients have
 separate namespaces, so one client's lessons cannot enter another's prompts.
 Local administrators can inspect such a namespace by setting `GATHM_CHAT_OWNER`
@@ -108,8 +161,8 @@ Secret patterns and credential values present in the process environment are
 redacted before storage and reflection. This is best effort, not a guarantee
 that every secret or personal detail is removed. Hosted backends receive the
 redacted episode snippets for reflection, and approved recalled notes during
-chat; local backends keep inference on their configured server. Do not enable
-capture for sessions whose contents must not be stored or sent to that backend.
+chat; local backends keep inference on their configured server. Disable capture
+for sessions whose contents must not be stored or sent to that backend.
 
 ```bash
 gathm harness disable       # stops capture and recall, keeps your library
@@ -127,8 +180,11 @@ existing prompt. Configuration:
 | `GATHM_HARNESS_SCOPE` | Stable workspace name, default `personal`; use different names for unrelated projects |
 | `GATHM_HARNESS_DISABLED=1` | Process-level switch that disables capture, recall, and reflection |
 
-An enabled namespace remains enabled across restarts. Changing the scope selects
-a different library, which starts disabled. No new Python packages are needed.
+Learning defaults to enabled in a new namespace and in existing stores with no
+explicit enable/disable setting. An explicitly disabled namespace stays disabled.
+Changing scope selects a different library, which is enabled by default. Storage
+is created lazily on the first qualifying capture; checking empty status does
+not create a database. No new Python packages are needed.
 
 ## Verification
 

@@ -10,7 +10,8 @@ need current information or an action, it can use tools to help.
 - Conversation context for follow-up questions and ideas
 - Local models through llama.cpp or Ollama, with optional hosted model backends
 - Tools for current information, system tasks, and existing automation workflows
-- Optional learning from tool sessions, with your review before lessons are reused
+- Learning from tool sessions and explicit preferences or corrections by default,
+  with your review before lessons are reused
 - Support for Linux, macOS, Termux, and Windows through WSL/Git Bash/MSYS2
 
 Voice input and spoken replies depend on the speech capabilities installed on

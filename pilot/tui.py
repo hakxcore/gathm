@@ -390,8 +390,8 @@ def render_help() -> None:
         ("/model", "Show the model in use"),
         ("/tools", "Explore tools for information and actions"),
         ("/control", "Device controls and availability; /control volume set 40 asks before changing it"),
-        ("/harness", "Learning status; /harness list shows lessons awaiting review"),
-        ("/learn", "Propose lessons from recorded tool sessions; review is required before use"),
+        ("/harness", "Learning is on by default; inspect lessons or use /harness disable to pause"),
+        ("/learn", "Propose lessons from recorded experience; review is required before use"),
         ("/help or ?", "Show this guide"),
         ("/quit", "Leave Gathm"),
     ]:
