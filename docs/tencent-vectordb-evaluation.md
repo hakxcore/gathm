@@ -1,5 +1,9 @@
 # Tencent Cloud VectorDB fit for Gathm
 
+Scope clarification: this document covers the managed Cloud VectorDB product.
+The local TencentDB Agent Memory repository is assessed separately in
+[TencentDB Agent Memory fit for Gathm](./tencent-agent-memory-evaluation.md).
+
 Reviewed on 2026-10-13. This assesses Tencent Cloud VectorDB, the vector search
 product relevant to agent memory; TencentDB also includes other database
 products. No cloud instance was provisioned or benchmarked.

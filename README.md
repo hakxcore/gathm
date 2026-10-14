@@ -25,6 +25,7 @@ your device. Text chat is available alongside them.
 - [Use Cases](./docs/use-cases/README.md)
 - [Learning Harness](./docs/learning-harness.md)
 - [Tencent VectorDB assessment](./docs/tencent-vectordb-evaluation.md)
+- [Local TencentDB Agent Memory assessment](./docs/tencent-agent-memory-evaluation.md)
 
 ## Why Gathm
 
