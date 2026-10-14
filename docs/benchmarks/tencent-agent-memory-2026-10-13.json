@@ -1,0 +1,325 @@
+{
+  "reviewed_date": "2026-10-13",
+  "source_commit": "badbd2179d06f4e0e1f2133bd3482880beab8a02",
+  "gathm_runtime_commit": "2961151a14bb225e50a133092b2c09c9d62fce0a",
+  "decision": "Keep current Gathm recall; do not integrate Tencent MemoryCore for the current 50-lesson library.",
+  "environment": {
+    "node_version": "v26.3.0",
+    "python_version": "3.11.15",
+    "platform": "darwin",
+    "chat_model_size_bytes": 2019373888,
+    "fixture": {
+      "approved_lessons": 50,
+      "positive_queries": 12,
+      "negative_queries": 5,
+      "unique_timing_queries": 60,
+      "api_candidate_limit": 3
+    }
+  },
+  "method": {
+    "embedding_model": "BAAI/bge-small-en-v1.5",
+    "dimensions": 384,
+    "embedding_threads": 1,
+    "capture_extraction_and_external_telemetry": false,
+    "bm25_sparse_encoder_enabled": false,
+    "gate_cosine_similarity": 0.7,
+    "gate_minimum_margin": 0.04,
+    "memory_unit": "bytes; gateway RSS after forced GC, excluding embedding and chat processes",
+    "latency_scope": "Gathm prompt-ready recall vs raw Tencent HTTP candidate search; no production adapter latency measured",
+    "startup_includes_one_second_settle": true,
+    "synthetic_only": true
+  },
+  "final_validation": {
+    "cold_gathm_recall_ms": 33.53183400031412,
+    "chat_load_errors": [],
+    "chat_load_completions_ms": [
+      8802.036
+    ],
+    "variants": {
+      "gathm": {
+        "timing": {
+          "median_ms": 16.404,
+          "p95_ms": 17.323,
+          "max_ms": 18.293
+        },
+        "hits": 8,
+        "unrelated_return_count": 0,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 18.561,
+            "p95_ms": 19.346,
+            "max_ms": 19.621
+          },
+          "hits": 8,
+          "unrelated_return_count": 0
+        }
+      },
+      "same-bge": {
+        "timing": {
+          "median_ms": 5.343,
+          "p95_ms": 6.28,
+          "max_ms": 6.359
+        },
+        "hits": 11,
+        "unrelated_return_count": 5,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 7.243,
+            "p95_ms": 8.199,
+            "max_ms": 8.559
+          },
+          "hits": 11,
+          "unrelated_return_count": 5
+        },
+        "runtime": {
+          "launch_to_ready_ms": 1662.517,
+          "memory_after_gc": {
+            "rss": 306216960,
+            "heapTotal": 99467264,
+            "heapUsed": 52802960,
+            "external": 57369201,
+            "arrayBuffers": 47776498
+          },
+          "fts": true,
+          "vectors": true,
+          "records": 50
+        },
+        "offline_shared_relevance_gate": {
+          "hits": 7,
+          "unrelated_return_count": 0,
+          "note": "Post-hoc diagnostic only; separate complete-fixture local scoring. Adapter latency and lifecycle are not measured."
+        }
+      },
+      "default-fts": {
+        "timing": {
+          "median_ms": 0.707,
+          "p95_ms": 0.856,
+          "max_ms": 0.952
+        },
+        "hits": 5,
+        "unrelated_return_count": 4,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 0.548,
+            "p95_ms": 0.636,
+            "max_ms": 0.721
+          },
+          "hits": 5,
+          "unrelated_return_count": 4
+        },
+        "runtime": {
+          "launch_to_ready_ms": 1671.377,
+          "memory_after_gc": {
+            "rss": 303071232,
+            "heapTotal": 98942976,
+            "heapUsed": 52780504,
+            "external": 57367665,
+            "arrayBuffers": 47774962
+          },
+          "fts": true,
+          "vectors": false,
+          "records": 50
+        },
+        "offline_shared_relevance_gate": {
+          "hits": 3,
+          "unrelated_return_count": 0,
+          "note": "Post-hoc diagnostic only; separate complete-fixture local scoring. Adapter latency and lifecycle are not measured."
+        }
+      }
+    }
+  },
+  "repeat_without_sparse_bm25": {
+    "cold_gathm_recall_ms": 32.99637499731034,
+    "chat_load_errors": [],
+    "chat_load_completions_ms": [
+      8808.048
+    ],
+    "variants": {
+      "gathm": {
+        "timing": {
+          "median_ms": 16.054,
+          "p95_ms": 17.069,
+          "max_ms": 19.237
+        },
+        "hits": 8,
+        "unrelated_return_count": 0,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 18.064,
+            "p95_ms": 18.949,
+            "max_ms": 19.297
+          },
+          "hits": 8,
+          "unrelated_return_count": 0
+        }
+      },
+      "same-bge": {
+        "timing": {
+          "median_ms": 5.431,
+          "p95_ms": 6.273,
+          "max_ms": 6.365
+        },
+        "hits": 11,
+        "unrelated_return_count": 5,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 7.299,
+            "p95_ms": 8.169,
+            "max_ms": 8.817
+          },
+          "hits": 11,
+          "unrelated_return_count": 5
+        },
+        "runtime": {
+          "launch_to_ready_ms": 1676.356,
+          "memory_after_gc": {
+            "rss": 318537728,
+            "heapTotal": 99991552,
+            "heapUsed": 53068112,
+            "external": 57369825,
+            "arrayBuffers": 47776506
+          },
+          "fts": true,
+          "vectors": true,
+          "records": 50
+        },
+        "offline_shared_relevance_gate": {
+          "hits": 7,
+          "unrelated_return_count": 0,
+          "note": "Post-hoc diagnostic only; separate complete-fixture local scoring. Adapter latency and lifecycle are not measured."
+        }
+      },
+      "default-fts": {
+        "timing": {
+          "median_ms": 0.611,
+          "p95_ms": 0.693,
+          "max_ms": 0.78
+        },
+        "hits": 5,
+        "unrelated_return_count": 4,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 0.558,
+            "p95_ms": 0.686,
+            "max_ms": 0.827
+          },
+          "hits": 5,
+          "unrelated_return_count": 4
+        },
+        "runtime": {
+          "launch_to_ready_ms": 1464.962,
+          "memory_after_gc": {
+            "rss": 303366144,
+            "heapTotal": 97894400,
+            "heapUsed": 52778496,
+            "external": 57367665,
+            "arrayBuffers": 47774962
+          },
+          "fts": true,
+          "vectors": false,
+          "records": 50
+        },
+        "offline_shared_relevance_gate": {
+          "hits": 3,
+          "unrelated_return_count": 0,
+          "note": "Post-hoc diagnostic only; separate complete-fixture local scoring. Adapter latency and lifecycle are not measured."
+        }
+      }
+    }
+  },
+  "earlier_with_sparse_bm25": {
+    "cold_gathm_recall_ms": 34.92033300426556,
+    "chat_load_errors": [],
+    "chat_load_completions_ms": [
+      9383.938
+    ],
+    "variants": {
+      "gathm": {
+        "timing": {
+          "median_ms": 16.711,
+          "p95_ms": 17.587,
+          "max_ms": 18.13
+        },
+        "hits": 8,
+        "unrelated_return_count": 0,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 18.739,
+            "p95_ms": 19.517,
+            "max_ms": 20.145
+          },
+          "hits": 8,
+          "unrelated_return_count": 0
+        }
+      },
+      "same-bge": {
+        "timing": {
+          "median_ms": 5.807,
+          "p95_ms": 6.713,
+          "max_ms": 6.965
+        },
+        "hits": 11,
+        "unrelated_return_count": 5,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 7.595,
+            "p95_ms": 8.34,
+            "max_ms": 10.63
+          },
+          "hits": 11,
+          "unrelated_return_count": 5
+        },
+        "runtime": {
+          "launch_to_ready_ms": 4391.256,
+          "memory_after_gc": {
+            "rss": 2042773504,
+            "heapTotal": 587595776,
+            "heapUsed": 528717960,
+            "external": 57369825,
+            "arrayBuffers": 47776506
+          },
+          "fts": true,
+          "vectors": true,
+          "records": 50
+        }
+      },
+      "default-fts": {
+        "timing": {
+          "median_ms": 0.65,
+          "p95_ms": 0.718,
+          "max_ms": 0.824
+        },
+        "hits": 5,
+        "unrelated_return_count": 4,
+        "under_chat_load": {
+          "timing": {
+            "median_ms": 0.572,
+            "p95_ms": 0.637,
+            "max_ms": 0.678
+          },
+          "hits": 5,
+          "unrelated_return_count": 4
+        },
+        "runtime": {
+          "launch_to_ready_ms": 4821.628,
+          "memory_after_gc": {
+            "rss": 1747156992,
+            "heapTotal": 568459264,
+            "heapUsed": 528464608,
+            "external": 57367665,
+            "arrayBuffers": 47774962
+          },
+          "fts": true,
+          "vectors": false,
+          "records": 50
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Single host and small fixed synthetic fixture; not a production quality or capacity test.",
+    "No automatic extraction, multi-owner concurrency, approval publishing adapter, generation TTFT, or answer quality benchmark.",
+    "Offline gate diagnostic scores the complete synthetic fixture separately and filters the top three API candidates; more candidates might improve hits.",
+    "Native embedding provider is disabled by upstream user config; it was not benchmarked."
+  ]
+}
