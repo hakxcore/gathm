@@ -53,7 +53,7 @@ enumerate_subdomains() {
   fi
 
   local tmp_json
-  tmp_json=$(mktemp 2>/dev/null || echo "/tmp/gathm-subdomains-$$.json")
+  tmp_json=$(mktemp) || { echo 'Error: cannot create a private response file.' >&2; return 1; }
   trap 'rm -f "$tmp_json"' EXIT
   printf '%s' "$response" > "$tmp_json"
 

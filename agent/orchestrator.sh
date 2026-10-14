@@ -131,13 +131,13 @@ _sanitize_input() {
     local input="$*"
     # Block command injection patterns
     if [[ "$input" == *'$('* || "$input" == *'`'* || "$input" == *'&&'* || "$input" == *'||'* || "$input" == *';'* ]]; then
-        log_warn "$AGENT_NAME" "Blocked potentially dangerous input: $input"
+        log_warn "$AGENT_NAME" "Blocked potentially dangerous input (${#input} characters)"
         echo "Error: Input contains blocked characters." >&2
         return 1
     fi
     # Block path traversal
     if [[ "$input" == *'../'* ]]; then
-        log_warn "$AGENT_NAME" "Blocked path traversal attempt: $input"
+        log_warn "$AGENT_NAME" "Blocked path traversal attempt (${#input} characters)"
         echo "Error: Path traversal not allowed." >&2
         return 1
     fi
@@ -198,12 +198,12 @@ cmd_run() {
         return 1
     fi
 
-    audit_log "tool_execute" "agent" "$tool_name" "args=${tool_args[*]}"
+    audit_log "tool_execute" "agent" "$tool_name" "arg_count=${#tool_args[@]}"
 
     # Check cache first (skip for tools that modify state)
     local skip_cache=false
     case "$tool_name" in
-        todo|transfer|crypt) skip_cache=true ;;
+        todo|transfer|crypt|cipher|transcribe|imganalyze|pwned) skip_cache=true ;;
     esac
 
     if [[ "$skip_cache" == "false" ]]; then
@@ -332,8 +332,8 @@ cmd_ask() {
         return 1
     fi
 
-    log_info "$AGENT_NAME" "Processing query: $query"
-    audit_log "agent_query" "agent" "orchestrator" "query=$query"
+    log_info "$AGENT_NAME" "Processing query (${#query} characters)"
+    audit_log "agent_query" "agent" "orchestrator" "query_chars=${#query}"
 
     local query_lower
     query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
@@ -379,7 +379,7 @@ cmd_ask() {
             echo "Available capabilities:"
             cmd_list
         fi
-        log_warn "$AGENT_NAME" "No tool match for query: $query"
+        log_warn "$AGENT_NAME" "No tool match for query (${#query} characters)"
     fi
 }
 
@@ -514,8 +514,8 @@ cmd_chain() {
         return 1
     fi
 
-    log_info "$AGENT_NAME" "Executing pipeline: $pipeline"
-    audit_log "pipeline_execute" "agent" "orchestrator" "pipeline=$pipeline"
+    log_info "$AGENT_NAME" "Executing pipeline (${#pipeline} characters)"
+    audit_log "pipeline_execute" "agent" "orchestrator" "spec_chars=${#pipeline}"
 
     local prev_output=""
     local step=0
@@ -845,8 +845,8 @@ cmd_parallel() {
         return 1
     fi
 
-    log_info "$AGENT_NAME" "Parallel execution: $tools_spec"
-    audit_log "parallel_execute" "agent" "orchestrator" "tools=$tools_spec"
+    log_info "$AGENT_NAME" "Parallel execution requested (${#tools_spec} characters)"
+    audit_log "parallel_execute" "agent" "orchestrator" "spec_chars=${#tools_spec}"
 
     # Split by comma
     local IFS_OLD="$IFS"

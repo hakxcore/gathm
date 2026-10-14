@@ -37,6 +37,8 @@ def _path(text):
 
 def _request_text(text):
     text = text.strip().replace("’", "'").replace("“", '"').replace("”", '"')
+    text = re.sub(r"^(?:okay|ok)[, ]+leave it[, ]+", "", text, flags=re.I)
+    text = re.sub(r"^(?:can|could)(?: you)? help me (?:to )?", "", text, flags=re.I)
     text = re.sub(r"[.!?]$", "", text).strip()
     text = re.sub(r"^(?:(?:now|please)\s+|(?:can|could|would)\s+you\s+)+", "", text, flags=re.I)
     return re.sub(r"\s+(?:please|now)$", "", text, flags=re.I)
@@ -47,8 +49,12 @@ def needs_control_evidence(text):
     text = _request_text(text)
     if re.match(r"^(?:how\s+(?:do|can|would|should)|explain|teach|write a story|translate|what is a)\b", text, re.I):
         return False
+    if re.match(r"^(?:open|launch)\b", text, re.I) and not re.search(r"(?:https?://|www\.)", text, re.I):
+        return True
+    if _match(r"(?:you )?do (?:it|that|and tell me|it and tell me)", text):
+        return True
     subject = r"\b(?:volume|brightness|audio|screenshot|apps?|applications?|files?|folders?|directories|process(?:es)?|restart|reboot|shutdown|computer|device|mac|trash)\b"
-    intent = r"\b(?:open|launch|list|show|check|set|change|adjust(?:ed)?|increase|decrease|raise|lower|reduce|turn|mute|unmute|create|make|move|rename|trash|stop|kill|take|capture|restart|reboot|shutdown|shut|lock|sleep|current|installed|running)\b"
+    intent = r"\b(?:open|launch|list|show|check|count|many|set|change|adjust(?:ed)?|increase|decrease|raise|lower|reduce|turn|mute|unmute|create|make|move|rename|trash|stop|kill|take|capture|restart|reboot|shutdown|shut|lock|sleep|current|installed|running)\b"
     return bool(re.search(subject, text, re.I) and re.search(intent, text, re.I))
 
 
@@ -60,6 +66,10 @@ def route_control_request(text):
     text = _request_text(text)
     if not text or "\n" in text or re.search(r"[;|]", text):
         return None
+    if _match(r"(?:play|pleay|pause|resume)(?: (?:some|my|the))? music(?: on (?:my|the) (?:system|mac|computer))?", text):
+        return {"reply": "Music playback control is not supported by this connector. Nothing played. I can open an installed music app when you ask, but cannot select songs or type inside it."}
+    if re.match(r"^(?:open|launch)\b.+\band\s+(?:write|type|enter)\b", text, re.I):
+        return {"reply": "Writing or typing inside apps is not supported by this connector. Nothing has run. You can ask to open the app, then enter the text yourself."}
     # Avoid promoting conditions, explanations, negation, or multiple targets
     # into a single executable proposal. Exact quoted names are still allowed.
     if re.search(r"\b(?:not|don't|never|unless|if|or|when|after|then)\b", text, re.I):
@@ -90,6 +100,10 @@ def route_control_request(text):
         return _command("power", "restart" if kind in {"restart", "reboot"} else "lock" if kind == "lock" else "shutdown")
     if _match(r"put(?: my| this| the)? (?:computer|device|laptop|mac|system) to sleep", text):
         return _command("power", "sleep")
+    counting = _match(r"(?:find(?: out)? )?(?:how many|count(?: the)?|number of) (?:files|items)(?: (?:are there|are))?(?: (?:on|in))? (.+?)(?: folder)?", text)
+    if counting:
+        path = _path(re.sub(r"^(?:my|the) ", "", counting[1], flags=re.I))
+        return _command("files", "count", path) if path else _clarify()
     listing = _match(r"(?:list|show)(?: me)?(?: the)? (?:files|contents) in (.+?)(?: folder)?", text)
     if listing:
         path = _path(re.sub(r"^(?:my|the) ", "", listing[1], flags=re.I))
@@ -123,5 +137,22 @@ def route_control_request(text):
         if re.search(r"(?:[a-z]+://|\bwww\.)", target, re.I):
             return None  # URL navigation belongs to the browser tool.
         path = _path(target)
+        if target.casefold() in {"music", "apple music"} and not re.match(r"(?:the )?(?:file|folder) ", opened[1], re.I):
+            path = None  # "open music" means the app; an explicit folder stays a path
         return _command("files", "open", path) if path else _command("apps", "open", _unquote(target))
     return None
+
+
+def read_only_followup(messages):
+    """Resolve a short 'you do it' only to the immediately preceding read request.
+
+    This is never an approval for a mutation or a search through old actions.
+    """
+    humans = [str(m.content) for m in messages if getattr(m, "type", None) == "human"
+              and not str(m.content).lstrip().startswith(("Observation:", "Error:"))]
+    if len(humans) < 2 or not _match(r"(?:you )?do (?:it|that|and tell me|it and tell me)", _request_text(humans[-1])):
+        return ""
+    plan = route_control_request(humans[-2]) or {}
+    command = " ".join(shlex.split(plan.get("command", ""))[:2])
+    return humans[-2] if command in {"status", "volume get", "brightness get", "apps list",
+                                       "processes list", "files list", "files count"} else ""

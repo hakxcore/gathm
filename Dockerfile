@@ -32,7 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Installing Playwright's Python package does not download browser binaries.
 COPY api/requirements.txt /tmp/gathm-api-requirements.txt
 COPY pilot/requirements.txt /tmp/gathm-pilot-requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt \
+RUN pip3 install --no-cache-dir --upgrade 'pip>=26.2' 'setuptools>=83.0.0' && \
+    pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt \
     -r /tmp/gathm-pilot-requirements.txt && \
     python3 -c "from langchain_core.messages import HumanMessage; from langgraph.graph import StateGraph; import langchain_ollama, rich, prompt_toolkit, fastapi, uvicorn"
 
@@ -40,8 +41,8 @@ RUN pip3 install --no-cache-dir -r /tmp/gathm-api-requirements.txt \
 ARG GATHM_USER=gathm
 ARG GATHM_UID=1000
 ARG GATHM_GID=1000
-RUN groupadd -g ${GATHM_GID} ${GATHM_USER} 2>/dev/null || true && \
-    useradd -m -u ${GATHM_UID} -g ${GATHM_GID} -s /bin/bash ${GATHM_USER} 2>/dev/null || true
+RUN groupadd -g "${GATHM_GID}" "${GATHM_USER}" 2>/dev/null || true && \
+    useradd -m -u "${GATHM_UID}" -g "${GATHM_GID}" -s /bin/bash "${GATHM_USER}" 2>/dev/null || true
 
 # Create app directory
 WORKDIR /opt/gathm
@@ -64,8 +65,10 @@ RUN ln -sf /opt/gathm/gathm /usr/local/bin/gathm && \
     ln -sf /opt/gathm/agent/orchestrator.sh /usr/local/bin/gathm-agent
 
 # Create data directories owned by the non-root user
-RUN mkdir -p /home/${GATHM_USER}/.gathm/{logs,health,agent/plans} && \
-    chown -R ${GATHM_USER}:${GATHM_USER} /home/${GATHM_USER}/.gathm
+RUN mkdir -p "/home/${GATHM_USER}/.gathm/logs" "/home/${GATHM_USER}/.gathm/health" \
+    "/home/${GATHM_USER}/.gathm/agent/plans" && \
+    chmod 700 "/home/${GATHM_USER}/.gathm" && \
+    chown -R "${GATHM_USER}:${GATHM_USER}" "/home/${GATHM_USER}/.gathm"
 
 # Switch to non-root user
 USER ${GATHM_USER}

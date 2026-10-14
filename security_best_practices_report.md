@@ -1,109 +1,190 @@
-# Gathm cleanup and security review
+# Gathm installation, security and web fallback review
 
-Review date: 2026-10-11. Reviewed changes: `1a4fbd6` through `ec2818c`, including the installer and system-control regression work.
+Review completed: 2026-10-14. Base commit: `677f051`. This review covers the
+installation/security fixes and automatic web fallback on `codex/learning-harness`.
+Separate local Whisper and macOS connector changes are excluded from this push.
+The [2026-10-11 scan record](docs/security/scan-results-2026-10-11.json) remains
+available for the previous review.
 
-## Executive summary
+## Result and scope
 
-The review fixed vulnerable dependency versions, a release-packaging bug that included local virtual environments, missing nested credential exclusions, and an HTTP news-feed default. Unused imports and a shell-based terminal-clear call were removed. Useful system-control tests, benchmarks, documentation, and the original logo were retained.
+The review fixed installer failure reporting and unsafe temporary downloads,
+stale-PID service termination, raw arguments in logs/cache metadata, cache
+isolation, sensitive learning capture, and cleartext geolocation. Uninstall now
+keeps user data unless `--purge-data` is explicitly selected. The assistant also
+uses real results for explicit searches and selected changing facts, and tries
+one bounded web search for recognized uncertainty about public questions,
+and handles missing internet without repeatedly retrying or inventing a result.
 
-After upgrading, pip-audit reported **zero known advisories across 58 installed Python packages**. This result covers the audited environment, not every optional dependency, native runtime, or future dependency resolution. No new exploitable application-level high/critical issue was confirmed by the source review. The remaining trust and transport limitations below still apply.
+Reviewed first-party Python, shell, JavaScript, manifests, CI and Docker files.
+Manual review covered API authentication and same-origin checks, role/tool
+allowlists, job and approval ownership, subprocess boundaries, SQLite bindings,
+model/learning state, installer/download ownership and browser text rendering.
+Virtualenvs, downloaded third-party sources and ignored personal configuration
+were excluded. No live installation or uninstallation was performed on this
+machine, and no remote exploitation test was performed.
 
-Python **3.10+ is now required** because the patched dependency releases no longer support Python 3.9. The package metadata, installer, documentation, and minimum-version CI job agree.
-
-## Scope and evidence
-
-Reviewed the Bash launcher, installers, tools and shared libraries; Python FastAPI server, Pilot, model clients, system controls and optional engineer entry point; browser JavaScript; dependency manifests; release configuration; and regression tests. Manual attention focused on authentication, same-origin restrictions, permissions, command execution, confirmation ownership, filesystem targets, downloads, and rendering untrusted text.
-
-Machine-readable results: [scan-results-2026-10-11.json](docs/security/scan-results-2026-10-11.json). Temporary build copies and raw validation logs were removed after the review; the recorded results remain available here and in the linked evidence file.
-
-- Bandit scanned 22 Python source files outside `tests/`: 0 high, 9 medium, 72 low heuristic findings after cleanup.
-- Ruff F401/F811/F821/F841 checks: no remaining findings in that source set.
-- Vulture: two intentionally retained adapter parameters (`wait_until`, `full_page`) required for browser API compatibility.
-- ShellCheck checked 80 Bash files: 0 errors, 53 existing warnings (27 SC2155, 8 SC2220, 18 SC2034). The modified installer, uninstaller, shared installer library, and lifecycle test have no warning-level findings.
-- A redacted scan for common private-key, GitHub, AWS, and provider-token patterns found no matches in repository text files. This was a pattern scan of tracked and nonignored files, not Git history or ignored personal configuration.
-- pip-audit: four advisories affecting two packages before upgrades; zero afterward. `pip check` also passed.
+Machine-readable results: [scan-results-2026-10-14.json](docs/security/scan-results-2026-10-14.json).
 
 ## Fixed findings
 
-### SEC-2026-01 — High, conditional: vulnerable dependency releases
+### Dependency bootstrap — conditional dependency risk
 
-Evidence: `pyproject.toml:34`, `pyproject.toml:39`, and `pilot/requirements.txt:17`.
+The installed environment initially contained pip 24.0 and setuptools 79.0.1,
+with seven distinct known advisories across those packages (14 scanner records
+including advisory aliases). The environment now uses pip 26.2.1 and setuptools
+84.0.0. Fresh installer environments and the Docker bootstrap require patched
+minimum versions. Pilot and Engineer upgrade only their own virtualenvs, and a
+failed Engineer setup cannot fall back into Pilot. An offline installation with
+missing or vulnerable bootstrap tools fails with a useful error.
 
-The installed `langgraph-sdk` 0.4.2 had an authorization-decorator advisory. Gathm does not use the affected LangGraph server authorization decorators, so this is an installed vulnerable dependency rather than a demonstrated bypass of Gathm's own API authorization. The minimum is now 0.4.4; the audited environment runs 0.4.6. See the [upstream authorization advisory](https://github.com/langchain-ai/langgraph/security/advisories/GHSA-fvww-7h3r-vfhp).
+The final installed-environment audit found no known advisories in 90 audited
+third-party packages (91 installed entries including the local Gathm package); a separate resolution of declared Pilot/API/optional Engineer
+requirements found none across 73 packages. The editable Gathm package has no
+published vulnerability metadata and is not certified by this dependency scan.
+See [pip release notes](https://pip.pypa.io/en/stable/news/), the
+[pip index advisory](https://github.com/advisories/GHSA-qwm4-qh6w-59xr), and the
+[setuptools advisory](https://github.com/pypa/setuptools/security/advisories/GHSA-h35f-9h28-mq5c).
 
-The installed `urllib3` 2.7.0 had three advisories concerning chunked-response buffering, deflate decompression, and HTTPS proxy TLS handling. Malicious upstream responses could affect availability; proxy impact depends on configuration. The declared minimum and installed version are now 2.8.0. See the upstream advisories for [chunked responses](https://github.com/urllib3/urllib3/security/advisories/GHSA-vxq7-64xx-v4gw), [decompression](https://github.com/urllib3/urllib3/security/advisories/GHSA-gh4c-6fx4-qh6g), and [proxy TLS](https://github.com/urllib3/urllib3/security/advisories/GHSA-8988-9cw3-xx77).
+### Installer and service lifecycle — medium hardening
 
-### SEC-2026-02 — Medium: wheels could include local environment files
+Temporary download allocation now fails closed instead of using predictable
+fallback paths. Audio checksum requests fail closed even when platform checksum
+commands are missing. GitHub runtime assets with a supplied SHA-256 digest are
+verified before extraction; see the [GitHub asset API](https://docs.github.com/en/rest/releases/assets?apiVersion=2022-11-28).
+The Linux Ollama installer is downloaded completely into a private temporary
+file before execution, with HTTPS-only redirects and bounded timeouts. A partial
+script is never executed. Required dependency failures cannot report success.
 
-Evidence: `pyproject.toml:91`, `pyproject.toml:102`, `pyproject.toml:133`; regression: `tests/wheel_contents_test.py:1`.
+Installer-written `.env` files use atomic private replacement, preserve unrelated
+settings and reject symlink targets. API/model keys are not placed in installer
+command arguments. GUI/Ollama/llama.cpp shutdown requires a matching PID, process
+creation identity and checkout ownership. PID files alone no longer authorize
+signalling a process. Old services without identity records remain running for
+manual shutdown. Windows shell fixtures check the MSYS/native PID distinction;
+macOS and Linux creation-identity paths have isolated regression coverage.
 
-Directory `force-include` copied local virtual environments despite global exclusions. A direct build from this checkout produced a 58,902,357-byte wheel with 3,309 unwanted entries. That behavior also risked including credentials placed inside a bundled directory; no actual credential disclosure was demonstrated.
+Uninstall defaults to retaining models, settings, history and lessons; explicit
+`--purge-data` retains the existing foreign-install ownership safeguards. The
+source checkout and its `.env` are retained. Real deletion runs only in disposable
+fixture homes during tests. This change does not stop or uninstall independently
+managed system services.
 
-Runtime directories now use normal selection and source-path mapping. Forced inclusion remains only for the three known root scripts. Explicit exclusions cover environments, caches, node_modules, `.env` variants, and tool-documentation screenshots. The same checkout now produces a 448,394-byte wheel with 162 entries. Required runtime files remain present. A dirty-fixture regression checks 14 required files and nine unwanted files, including credentials and virtual environments. Both wheel and source archive were inspected. See [Hatch's file-selection and path-mapping documentation](https://hatch.pypa.io/latest/config/build/).
+### Logs, cache and learning privacy — medium hardening
 
-### SEC-2026-03 — Medium hardening: nested Docker credential files
+Retry, recovery and orchestration logs no longer record raw arguments, user
+queries or command specifications. Log/cache directories and new files use
+private permissions. Cache keys include argument boundaries and the API
+principal, preventing accidental collisions between argument lists or callers.
+Metadata stores argument counts instead of argument values. Numeric metadata is
+validated before Bash arithmetic; malformed values cannot be evaluated as code.
+Sensitive and mutating tools bypass caching.
 
-Evidence: `.dockerignore:6`, `.gitignore:5`.
+Learning skips whole turns involving crypto/cipher, breach checks, media
+analysis/transcription and file transfers, including recognized paths and run
+aliases. Compound chain/parallel commands are skipped conservatively. Lesson
+review remains required. New cache names avoid older entries; historical logs,
+caches and learning records are not silently deleted or retroactively redacted.
 
-Nested `.env` and `.env.*` paths are explicitly excluded from Docker contexts, alongside dependency directories and caches. Git also ignores `.env` variants while allowing `.env.example`. Docker builds were not executed because the local Docker daemon was unavailable.
+### Transport and release hardening
 
-### SEC-2026-04 — Low: news feed used cleartext HTTP
+Geolocation now uses verified HTTPS at ipwho.is while retaining the existing
+field layout. IPv4/IPv6 input is checked before lookup; provider errors fail
+clearly. The provider's [documentation](https://ipwhois.io/documentation) describes
+its HTTPS endpoint and free quota. CI has read-only default repository permission,
+release versions enter shell commands through quoted variables, Docker creates
+private state paths without relying on Bash brace expansion, and additional CI checks were prepared for dependency advisories, high-severity
+Python findings and changed shell code. The three workflow edits remain local:
+GitHub rejected workflow updates because the available credential/integration
+lacks workflow write permission. They are excluded from the application push.
 
-Evidence: `tools/news/news:10`.
+### Automatic public knowledge fallback
 
-The default BBC RSS endpoint now uses HTTPS. The same provider's TLS endpoint was fetched and parsed successfully with 30 items. This removes the cleartext default without changing the service or output format.
+Approved memory and model knowledge remain the first source. A recognized
+uncertain factual reply can trigger one search without another planning model
+call; a successful local answer does not invoke the network. Tool instructions
+also request lookups for current facts and unseen external content. The fallback
+uses only the current standalone public question and applies conservative
+English privacy/offline heuristics. Model-added terms, recalled lessons and
+conversation history are excluded from the search query. Tool permissions still
+apply. Direct CLI websearch remains available separately.
 
-### SEC-2026-05 — Cleanup and installer safety
+Explicit searches bypass model guessing; successful searches return actual
+snippets/URLs directly, with no model-written biography. Tool errors also end
+the turn with the real error instead of generated repair commands. Failed or
+offline searches do not assert an identity or pretend a lookup ran. Agent
+searches use at most three snippets, a five-second network budget, a bounded
+response size and an eight-second subprocess ceiling. Offline detection blocks
+search; failures or empty results pause searches for 30 seconds in that worker.
+Only one search runs per turn, within the graph's tool budget. Actual result URLs
+are retained with the answer. Search content is untrusted evidence. Failed
+lookups require a local-knowledge caveat, and uncertain answer openings are held
+from streaming while the fallback is selected. No new service or database is
+required. A live DuckDuckGo smoke test returned three public documentation links.
 
-Evidence: `pilot/tui.py:239`, `lib/install_common.bash:1`, `tests/install_lifecycle_test.sh:1`.
+### Grounding regressions from reported conversations
 
-Removed unused Python imports, an unused API response fallback, and an unused packaging variable. Rich now clears the terminal directly instead of invoking a shell. The previous constant clear command was a scanner finding, not demonstrated input injection.
+Assistant instructions now use the system-message role, and the chat temperature
+is 0.2 by default for consistent sampling (`GATHM_LLM_TEMPERATURE` remains an
+explicit override). Lower temperature is not a factual correctness guarantee.
+Exact-name search requests and common freshness questions route to actual search
+results before model generation. Unsupported model-written action claims are
+blocked when no current-turn tool evidence exists; the guard also holds recognized
+claims from streaming. This remains a language heuristic, not a formal verifier.
 
-Included the pending installer/uninstaller fixes: shared platform and ownership handling, isolated virtualenv repair without global-pip fallback, safe shortcut publication, preservation of foreign commands and shared data, noninteractive error handling, and an explicit dry-run/keep-data uninstall flow. Destructive tests run in temporary fixture homes; the real installation was not uninstalled.
+A typed `files count` operation counts complete immediate directory entries,
+separating files, folders, symlinks and other entries, including hidden names and
+never following links. A short "you do and tell me" follow-up can reuse only the
+immediately preceding read-only request; it cannot approve a mutation. macOS app
+aliases resolve against the actual installed-app inventory and retain confirmation.
+Opening Music chooses the app; an explicit Music folder remains a folder. Writing
+inside Notes and controlling local playback return truthful unsupported-capability
+messages instead of made-up paths, package names or successful actions.
 
-## Existing protections rechecked
+See [grounded replies and recovery](docs/factual-grounding.md). Existing fabricated
+chat history is retained; start a fresh chat after updating so old assistant claims
+do not continue to prime the model.
 
-- API authentication, loopback Host/client restrictions, same-origin browser checks, permissions, and job ownership: `api/server.py:816` and the security/API regression suites.
-- System-control proposals require capability checks; confirmations consume an expiring, owner-bound, single-use random ticket: `api/server.py:1119`, `api/system_approvals.py:22`, `api/system_approvals.py:33`.
-- Typed operations revalidate the proposed action and target before execution: `lib/system_control.py:522`. Filesystem changes use platform-specific non-overwriting rename operations: `lib/system_control.py:568`.
-- Approval cards render values as text, keep tickets out of saved chat/model history, and cancel pending proposals when chat is cleared: `gui/system-controls.js:37`. Real-browser tests verified approval, cancellation, persistence, and streaming behavior without performing real system actions.
+## Static analysis and secret checks
 
-## Remaining limitations and hardening work
+- Syntax checked 61 Python files (including the extensionless websearch tool),
+  83 shell files and 14 JavaScript files: no errors.
+- Bandit: zero high findings or scan errors. Production/benchmark code has
+  80 low and 12 medium heuristic findings. Medium triage: eight configured URL
+  opens (B310), two SQL expressions with bounded identifiers/bound values (B608),
+  wildcard client-address display normalization (B104), and prompt formatting's
+  `shell=` keyword (B604), which does not execute a process.
+- Ruff F401/F811/F821/F841: no production findings. Existing test-only unused
+  imports/variables were not changed as part of this work.
+- ShellCheck: zero errors, 54 pre-existing warnings across the full shell set.
+  The targeted installer/shared-security files pass at warning severity.
+- Common credential/private-key pattern scans found no matches in the reviewed
+  current source or 1,085 Git-history blobs. One history blob larger than 2 MiB
+  was skipped. This is not entropy-based secret detection or a guarantee that
+  history contains no credentials.
 
-### SEC-2026-06 — Medium: download provenance
+## Validation and remaining limits
 
-Evidence: `install:2135`, `install:2988`.
+Passed: full Python unittest discovery; 19 web fallback tests and 15 transcript-based
+grounding tests; 17 API/security
+boundary tests; 344 shell-command checks; 40 reply-streaming checks; 104 packaging
+checks; 63 llama.cpp lifecycle checks; 62 launcher checks; installer lifecycle,
+reuse, download/checksum, virtualenv-path, cache and geolocation fixtures; and six
+JavaScript suites. Install/security fixtures also pass macOS Bash 3.2. Wheel and
+source archive build successfully, and the dirty-package fixture retains 15
+required files while excluding nine local environment/credential files. See the
+machine-readable record for exact suite counts.
 
-Some runtime downloads and the Linux Ollama installer still trust upstream HTTPS without independently pinned checksums or signatures. Compromise of an upstream release or delivery account could run code as the installing user. Custom audio downloads support `GATHM_AUDIOCPP_BIN_SHA256`. A broader signed/pinned release policy remains future work.
+No native Windows/Linux/Termux installation or Docker image build was executed
+locally; CI covers platform fixtures. Native runtimes, optional dependencies
+outside the resolved set and third-party binaries are not certified by pip-audit.
+Some downloads still rely on upstream HTTPS without an independently pinned
+checksum/signature. Same-user attackers can alter trusted files and race process
+signals; creation checks prevent stale-record mistakes, not hostile-user isolation.
 
-### SEC-2026-07 — Medium: permitted tools run with the user's privileges
-
-Evidence: `lib/sysexec.py:431`, `pilot/browser.py:268`, and [SECURITY.md](SECURITY.md).
-
-Tool permission checks and explicit approvals are not operating-system isolation. Trusted administrators can enable shell execution or use the engineer; approved code runs as the current account. The Termux Selenium path also uses Chromium's `--no-sandbox`. Gathm should not be presented as a sandbox for hostile code or an untrusted multiuser service.
-
-### SEC-2026-08 — Low: geolocation still uses a cleartext provider endpoint
-
-Evidence: `tools/geo/geo:79`, `tools/geo/tool.yaml:16`.
-
-The existing `ip-api.com` endpoint uses HTTP, allowing an on-path observer to see the requested lookup and alter its public-data response. Provider migration or verified HTTPS support is still needed. It was not silently switched to a different service or an unverified paid endpoint.
-
-### Static-analysis triage
-
-The nine medium Bandit findings are seven `urlopen` calls using operator-configured model/benchmark endpoints (B310), wildcard-bind display-address normalization (B104), and the prompt-formatting keyword `shell=` (B604), which does not launch a process. They do not establish a new untrusted-input exploit under the documented local-operator trust model. Endpoint configuration and redirect restrictions could be tightened further if that model changes.
-
-Low findings primarily concern subprocess use, deliberate error recovery, and assertions. The remaining ShellCheck warnings were recorded, not globally suppressed. No claim is made that scanner silence would prove security.
-
-## Validation and practical limits
-
-Passed locally on macOS:
-
-- 220 Python unit tests, plus the dedicated 17-test security suite and 344 shell-execution checks.
-- Packaging (104), llama.cpp runtime (63), launcher (61), and model-install fixture (55) checks.
-- Installer lifecycle: 15 fixture groups under Bash 5 and macOS Bash 3.2; runtime reuse (18) and virtualenv-layout (14) checks.
-- Remaining speech, routing, compact-output, connectivity, manifest, Markdown, VAD, and GUI unit suites.
-- 17 real Chromium streaming/approval checks. Model and speech services were deterministic stubs; no shutdown, restart, or other real system mutation was performed.
-- The real Mac `./install --check`, Bash syntax, targeted ShellCheck, and `git diff --check`.
-- Source archive and wheel builds, dirty-fixture packaging regression, and a fresh dependency-free wheel install with working `gathm --version` and `gathm --where`.
-
-Initial loopback-server tests were blocked by the execution sandbox; reruns with local-server access passed. Fresh native Windows, Linux, and Android installations were not performed in this review. The workflow includes Linux/macOS checks and Windows installer fixtures; GitHub prevented those jobs from starting because the repository account was locked for billing. Optional engineer/browser/model native dependencies and historical Git secrets were not exhaustively audited. The superseded September review and its evidence remain available in Git history.
+Permitted tools execute as the current account; approvals and API roles are not
+an OS sandbox. Termux Chromium still uses `--no-sandbox`. Privacy/uncertainty
+heuristics can miss secrets or confident model mistakes, and a search snippet or
+user correction can be wrong. The fallback is not a factual accuracy guarantee.
+Hosted models still need their provider connection; offline chat requires a
+prepared local model. No claim of complete security is made.

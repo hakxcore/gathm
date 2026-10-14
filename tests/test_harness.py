@@ -35,6 +35,15 @@ class HarnessFixture:
 
 
 class HarnessTests(HarnessFixture, unittest.TestCase):
+    def test_sensitive_tool_turns_never_become_learning_evidence(self):
+        for command in ("cipher -d fixture", "gathm run crypt fixture", "run pwned fixture",
+                        "/tmp/transcribe audio.wav", "imganalyze private.png", "transfer private.txt",
+                        "gathm chain 'cipher -d fixture | define word'",
+                        "gathm parallel 'pwned fixture' 'define word'"):
+            event = {"command": command, "outcome": "returned", "output": "private content"}
+            self.assertFalse(self.store.capture("I prefer brief explanations in future", [event], "complete"))
+        self.assertFalse(self.store.path.exists())
+
     def proposal(self, evidence=1, guidance=GUIDANCE):
         return {"trigger": TRIGGER, "guidance": guidance, "evidence": [evidence]}
 
@@ -513,17 +522,34 @@ class HarnessGraphTests(HarnessFixture, unittest.TestCase):
                 patch.object(pilot, "current_connectivity", return_value="online"), \
                 patch.object(pilot, "_invoke_spoken", return_value=AIMessage(
                     content="Action: gathm\nAction Input: weather -f Delhi")), \
-                patch.object(pilot, "run_gathm_tool_raw", return_value="Error: network unavailable"), \
+                patch.object(pilot, "run_gathm_tool_raw", return_value="Tomorrow in Delhi: cloudy"), \
                 patch.object(pilot, "print_tool_exec"):
             stream = pilot.stream_agent({"messages": [HumanMessage(content="Weather tomorrow in Delhi")]},
                                         {"recursion_limit": pilot.AGENT_MAX_STEPS})
             next(stream)  # proposed action
-            next(stream)  # observed failure
+            next(stream)  # observed result
             stream.close()  # no completed model answer
         with self.store.db() as db:
             body = json.loads(db.execute("SELECT body FROM episodes").fetchone()[0])
         self.assertEqual(body["completion"], "interrupted")
+        self.assertEqual(body["events"][0]["outcome"], "returned")
+
+    def test_error_reply_completes_without_marking_the_tool_successful(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+        self.store.enable()
+        with patch.object(pilot, "_build_llm", return_value=object()), \
+                patch.object(pilot, "current_connectivity", return_value="online"), \
+                patch.object(pilot, "_invoke_spoken", return_value=AIMessage(
+                    content="Action: gathm\nAction Input: weather -f Delhi")) as model, \
+                patch.object(pilot, "run_gathm_tool_raw", return_value="Error: network unavailable"), \
+                patch.object(pilot, "print_tool_exec"):
+            list(pilot.stream_agent({"messages": [HumanMessage(content="Weather tomorrow in Delhi")]},
+                                    {"recursion_limit": pilot.AGENT_MAX_STEPS}))
+        with self.store.db() as db:
+            body = json.loads(db.execute("SELECT body FROM episodes").fetchone()[0])
+        self.assertEqual(body["completion"], "complete")
         self.assertEqual(body["events"][0]["outcome"], "failed")
+        self.assertEqual(model.call_count, 1)
 
     def test_browser_entrypoint_uses_shared_learning_boundary(self):
         from langchain_core.messages import AIMessage

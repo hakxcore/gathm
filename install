@@ -10,6 +10,7 @@
 # ============================================================
 
 set -euo pipefail
+umask 077
 # ERR trap: print the exact line that caused set -e to fire.
 # Helps diagnose silent aborts.  Printed to stderr so it shows even when
 # stdout is redirected.
@@ -765,6 +766,36 @@ _venv_pip() {
     fi
 }
 
+# Refresh Python's bundled packaging tools before installing application code.
+# This never invokes system pip or changes the global Python environment.
+_upgrade_venv_toolchain() {
+    local root="$1" pip_install="$2" python_cmd
+    python_cmd=$(_venv_python "$root") || return 1
+    if "$python_cmd" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+import re
+for name, minimum in (("pip", (26, 2)), ("setuptools", (83, 0))):
+    try:
+        parts = tuple(int(v) for v in re.match(r"^(\d+(?:\.\d+)*)", version(name))[1].split("."))
+    except (PackageNotFoundError, TypeError):
+        raise SystemExit(1)
+    if parts < minimum:
+        raise SystemExit(1)
+PY
+    then return 0; fi
+    [[ "${GATHM_ONLINE:-true}" == true ]] || {
+        warn "Python packaging tools need an update; connect to the internet and re-run ./install"
+        return 1
+    }
+    info "Updating pip and setuptools inside the selected virtualenv..."
+    "$pip_install" --upgrade 'pip>=26.2' 'setuptools>=83.0.0'
+}
+
+_upgrade_pilot_toolchain() {
+    _ensure_venv || return 1
+    _upgrade_venv_toolchain "$GATHM_VENV" _venv_pip
+}
+
 # ── Engineer venv ──
 _init_engineer_venv() {
     ENGINEER_VENV="$SCRIPT_DIR/engineer/venv"
@@ -790,7 +821,7 @@ _ensure_engineer_venv() {
         fi
         info "Creating Engineer Python venv at $ENGINEER_VENV..."
         "$python_cmd" -m venv "$ENGINEER_VENV" || {
-            warn "Engineer venv creation failed — will share pilot venv as fallback"
+            warn "Engineer venv creation failed — Pilot was left unchanged"
             ENGINEER_VENV=""
             return 1
         }
@@ -799,7 +830,7 @@ _ensure_engineer_venv() {
 }
 
 _engineer_venv_pip() {
-    _ensure_engineer_venv || { _venv_pip "$@"; return $?; }
+    _ensure_engineer_venv || return 1
     local python_cmd
     if python_cmd=$(_venv_python "$ENGINEER_VENV"); then
         "$python_cmd" -m pip install -q "$@"
@@ -1194,17 +1225,17 @@ try:
 except ValueError:
     raise SystemExit(1)
 
-assets = [(a.get("name", ""), a.get("browser_download_url", ""))
+assets = [(a.get("name", ""), a.get("browser_download_url", ""), a.get("digest") or "")
           for a in release.get("assets", [])]
 tag = release.get("tag_name", "")
 
 for pattern in os.environ.get("GATHM_ASSET_PATTERNS", "").split():
     needles = pattern.split(",")
-    for name, url in assets:
+    for name, url, digest in assets:
         if not name.endswith(".zip"):
             continue
         if all(needle in name for needle in needles):
-            print("%s\t%s" % (url, tag))
+            print("%s\t%s%s" % (url, tag, "\t" + digest if digest else ""))
             raise SystemExit(0)
 raise SystemExit(1)
 ' 2>/dev/null
@@ -1407,21 +1438,19 @@ _llamacpp_binary_runs() {
 
 # Download and unpack the official prebuilt binaries.
 _llamacpp_install_prebuilt() {
-    local platform="$1" resolved url tag
+    local platform="$1" resolved url tag digest
     resolved=$(_llamacpp_release_asset "$platform") || {
         warn "Could not find a llama.cpp release build for this machine"
         return 1
     }
-    url="${resolved%%$'\t'*}"
-    tag="${resolved##*$'\t'}"
+    IFS=$'\t' read -r url tag digest <<< "$resolved"
     [[ -n "$url" ]] || return 1
 
     info "Downloading llama.cpp ${BOLD}${tag}${RESET} (about 20-60 MB)."
     info "Live progress follows. This is a download, not a hang."
     echo ""
 
-    local tmpdir; tmpdir=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/gathm-llamacpp-$$")
-    mkdir -p "$tmpdir" 2>/dev/null || true
+    local tmpdir; tmpdir=$(mktemp -d) || { warn "Cannot create a private download directory"; return 1; }
     local zip_path="$tmpdir/llamacpp.zip"
 
     if ! curl -fL --progress-bar -o "$zip_path" "$url"; then
@@ -1430,6 +1459,28 @@ _llamacpp_install_prebuilt() {
         return 1
     fi
     echo ""
+
+    if [[ -n "$digest" ]]; then
+        if ! _install_python - "$zip_path" "$digest" <<'PY'
+import hashlib, re, sys
+if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", sys.argv[2]):
+    raise SystemExit("invalid release checksum")
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as source:
+    for block in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(block)
+if digest.hexdigest() != sys.argv[2].split(":", 1)[1].lower():
+    raise SystemExit("release checksum mismatch")
+PY
+        then
+            rm -rf "$tmpdir"
+            warn "llama.cpp release checksum verification failed; refusing the archive"
+            return 1
+        fi
+        ok "llama.cpp release checksum verified"
+    else
+        warn "Release metadata has no checksum; this download relies on upstream HTTPS"
+    fi
 
     if ! _llamacpp_unpack "$zip_path" "$tmpdir/unpacked"; then
         rm -rf "$tmpdir" 2>/dev/null || true
@@ -2129,10 +2180,18 @@ install_ollama() {
             fi
             ;;
         *)
-            # Linux (all distros), WSL — keep install.sh in the foreground so the
-            # user sees its real-time progress messages (downloading bundle, setting
-            # up systemd, etc.) instead of staring at a silent screen.
-            curl -fsSL https://ollama.com/install.sh | sh || install_rc=$?
+            # Do not execute a partially downloaded installer on network failure.
+            # The complete upstream script still runs visibly in the foreground.
+            local installer_script
+            installer_script=$(mktemp) || { step_fail "Cannot create a private installer file"; return 1; }
+            if curl -fsSL --connect-timeout 10 --max-time 120 \
+                    --proto '=https' --proto-redir '=https' \
+                    -o "$installer_script" https://ollama.com/install.sh; then
+                sh "$installer_script" || install_rc=$?
+            else
+                install_rc=1
+            fi
+            rm -f "$installer_script"
             ;;
     esac
 
@@ -2154,6 +2213,7 @@ install_ollama() {
         start_ollama_serve
     else
         step_fail "Ollama installation failed after $(_format_elapsed $elapsed) — install manually from https://ollama.com"
+        return 1
     fi
 }
 
@@ -2170,9 +2230,13 @@ start_ollama_serve() {
     fi
 
     info "Starting Ollama server (ollama serve)..."
-    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
+    local _log_dir="$HOME/.gathm/logs"
+    mkdir -p "$_log_dir" || return 1
     nohup ollama serve &>"$_log_dir/ollama-serve.log" &
-    disown $! 2>/dev/null || true
+    local ollama_pid=$!
+    printf '%s\n' "$ollama_pid" > "$HOME/.gathm/ollama.pid"
+    gathm_record_process "$HOME/.gathm/ollama.pid" "$ollama_pid" "$SCRIPT_DIR" || true
+    disown "$ollama_pid" 2>/dev/null || true
 
     # Wait up to 10 s for it to come up
     local i=0
@@ -2240,19 +2304,12 @@ setup_gemini_fallback() {
         fi
     done
 
-    # Write API key + backend config to .env (preserving other vars)
-    local env_file="$SCRIPT_DIR/.env"
-    local preserved=""
-    if [[ -f "$env_file" ]]; then
-        preserved=$(grep -v '^GOOGLE_API_KEY=\|^GEMINI_API_KEY=\|^GATHM_LLM_BACKEND=\|^GATHM_GEMINI_MODEL=' "$env_file" 2>/dev/null || true)
-    fi
-    {
-        [[ -n "$preserved" ]] && echo "$preserved"
-        echo "GOOGLE_API_KEY=$gemini_key"
-        echo "GATHM_LLM_BACKEND=gemini"
-        echo "GATHM_GEMINI_MODEL=gemini-2.0-flash-lite"
-    } > "$env_file"
-    chmod 600 "$env_file" 2>/dev/null || true
+    # Use the same atomic private writer as runtime configuration, without
+    # exposing the credential in a subprocess command line.
+    _audiocpp_write_env GOOGLE_API_KEY "$gemini_key" || return 1
+    _audiocpp_write_env GEMINI_API_KEY "$gemini_key" || return 1
+    _audiocpp_write_env GATHM_LLM_BACKEND gemini || return 1
+    _audiocpp_write_env GATHM_GEMINI_MODEL gemini-2.0-flash-lite || return 1
 
     # Save backend + model to ~/.gathm/
     mkdir -p "$HOME/.gathm" 2>/dev/null || true
@@ -2703,6 +2760,8 @@ install_engineer_deps() {
     fi
 
     info "Installing engineer AI dependencies into engineer/venv (autogen-agentchat, autogen-ext)..."
+    _ensure_engineer_venv || return 1
+    _upgrade_venv_toolchain "$ENGINEER_VENV" _engineer_venv_pip || return 1
     _engineer_venv_pip -r "$req_file" && \
         ok "Engineer dependencies installed" || \
         warn "Engineer dependency install failed — run manually: pip install -r engineer/requirements.txt"
@@ -2717,6 +2776,7 @@ install_pilot_deps() {
     fi
 
     info "Installing Pilot AI dependencies (this may take a few minutes)..."
+    _upgrade_pilot_toolchain || return 1
 
     if [[ "$_GATHM_PLATFORM" == "termux" ]]; then
         # Pre-populate the venv with stubs for packages that require Rust/native
@@ -2776,6 +2836,8 @@ install_pilot_deps() {
             warn "Pilot dependency install failed — re-run ./install after fixing the pip error above"
             install_failed=1
         fi
+
+
     fi
 
     # The GUI/API server (api/server.py) needs FastAPI + uvicorn. Install them
@@ -3299,7 +3361,7 @@ _audiocpp_patch_termux_sentencepiece() {
     fi
 
     local tmp
-    tmp=$(mktemp 2>/dev/null) || tmp="$spm.gathm.tmp"
+    tmp=$(mktemp) || { warn "Cannot create a private sentencepiece patch file"; return 1; }
     # Insert immediately after the target is declared. Matching only up to
     # "STATIC" keeps this free of brace/dollar escaping for ${SPM_SRCS}.
     if awk -v ins="$line" '
@@ -3418,8 +3480,9 @@ _audiocpp_cache_restore() {
 _audiocpp_fetch_prebuilt() {
     [[ -n "$AUDIOCPP_BIN_URL" ]] || return 1
     local tmp="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"; tmp="${tmp:-/tmp}"
-    local out="$tmp/audiocpp_cli.download.$$"
-    rm -f "$out" 2>/dev/null || true
+    local out; out=$(mktemp "$tmp/gathm-audiocpp.XXXXXX") || {
+        warn "Cannot create a private audio download file"; return 1
+    }
 
     info "Downloading prebuilt audiocpp_cli from $AUDIOCPP_BIN_URL"
     if ! run_with_spinner "downloading audiocpp_cli" -- \
@@ -3435,9 +3498,20 @@ _audiocpp_fetch_prebuilt() {
             got=$(sha256sum "$out" 2>/dev/null | awk '{print $1}')
         elif command -v shasum &>/dev/null; then
             got=$(shasum -a 256 "$out" 2>/dev/null | awk '{print $1}')
+        else
+            got=$(_install_python - "$out" <<'PY'
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as source:
+    for block in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+            ) || got=""
         fi
         if [[ -z "$got" ]]; then
-            warn "No sha256 tool available — cannot verify the download"
+            warn "Cannot verify the requested checksum — refusing the download"
+            rm -f "$out"; return 1
         elif [[ "$got" != "$AUDIOCPP_BIN_SHA256" ]]; then
             # warn, not step_fail: the step has not failed, it falls back to
             # building from source. step_fail would also mark the step failed
@@ -3655,10 +3729,12 @@ _audiocpp_save_config() {
 # Upsert a literal dotenv value; sed replacement would corrupt '&', '|', and
 # backslashes in model paths. Preserve unrelated settings without evaluating them.
 _audiocpp_write_env() {
-    _install_python - "$SCRIPT_DIR/.env" "$1" "$2" <<'ENV'
-import re, sys
+    GATHM_INSTALL_ENV_VALUE="$2" _install_python - "$SCRIPT_DIR/.env" "$1" <<'ENV'
+import os, re, sys, tempfile
 from pathlib import Path
-path, key, value = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path, key, value = Path(sys.argv[1]), sys.argv[2], os.environ["GATHM_INSTALL_ENV_VALUE"]
+if path.is_symlink():
+    raise SystemExit("Refusing to overwrite a symlinked .env; update its target manually")
 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
     raise SystemExit("invalid configuration key")
 if not re.fullmatch(r"[A-Za-z0-9_./:@+-]*", value):
@@ -3667,7 +3743,14 @@ lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 pattern = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=")
 lines = [line for line in lines if not pattern.match(line)]
 lines.append(key + "=" + value)
-path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+fd, temporary = tempfile.mkstemp(prefix=".gathm-env-", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write("\n".join(lines) + "\n")
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 ENV
 }
 
@@ -4340,62 +4423,41 @@ start_gui_server() {
     # Restart our own server only. Anything else holding the port belongs to
     # someone else and is left alone.
     if curl -s --max-time 2 "$GUI_URL/" &>/dev/null; then
-        if ! command -v pgrep >/dev/null 2>&1; then
-            warn "GUI server already running at $GUI_URL, and pgrep is unavailable"
-            warn "so it cannot be identified. If the GUI behaves like older code,"
-            warn "restart it manually:  pkill -f api/server.py  then re-run ./install"
+        local old_pid="" pid_file="$HOME/.gathm/gui.pid"
+        [[ ! -f "$pid_file" ]] || IFS= read -r old_pid < "$pid_file" || true
+        if ! gathm_process_owned "$pid_file" "$old_pid" "$SCRIPT_DIR"; then
+            warn "Service already running at $GUI_URL; its ownership cannot be verified."
+            warn "Stop the old service manually before restarting it with the new code."
             return 0
         fi
-
-        # Match on the "api/server.py" suffix rather than $server_script's
-        # absolute path: the server may have been launched relative to another
-        # cwd or through the gathm-api shortcut, and an absolute-path match then
-        # silently misses it, leaving the stale process serving.
-        #
-        # Then filter hard. `pgrep -f` matches any process whose *command line*
-        # contains the pattern, which includes wrapper shells — and, in the
-        # wrong circumstances, this installer itself. Skip our own pid and our
-        # parent, and require the command line to actually be a Python process,
-        # which is what rules out a shell that merely mentions the path.
-        local _old_pids="" _p _cmd
-        for _p in $(pgrep -f 'api/server\.py' 2>/dev/null || true); do
-            [[ "$_p" == "$$" || "$_p" == "${PPID:-0}" ]] && continue
-            if [[ -r "/proc/$_p/cmdline" ]]; then
-                _cmd=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null) || _cmd=""
-                [[ "$_cmd" == *python* ]] || continue
-            fi
-            _old_pids+="$_p "
-        done
-        _old_pids="${_old_pids%% }"
-
-        if [[ -z "${_old_pids// /}" ]]; then
-            ok "GUI server already running at $GUI_URL (not ours — leaving it alone)"
-            return 0
-        fi
-
-        info "Restarting GUI server so it serves the current code (pid: ${_old_pids})..."
-        # shellcheck disable=SC2086  # word splitting is intended for the pid list
-        kill $_old_pids 2>/dev/null || true
+        info "Restarting this checkout's GUI server (pid: $old_pid)..."
+        kill "$old_pid" 2>/dev/null || return 1
         local _w=0
         while (( _w < 5 )) && curl -s --max-time 1 "$GUI_URL/" &>/dev/null; do
             sleep 1
             _w=$((_w + 1))
         done
         if curl -s --max-time 1 "$GUI_URL/" &>/dev/null; then
-            # shellcheck disable=SC2086
-            kill -9 $_old_pids 2>/dev/null || true
-            sleep 1
+            if gathm_process_owned "$pid_file" "$old_pid" "$SCRIPT_DIR"; then
+                kill -9 "$old_pid" 2>/dev/null || return 1
+                sleep 1
+            else
+                warn "Process identity changed; no additional signal was sent."
+                return 1
+            fi
         fi
     fi
 
     info "Starting GUI server on port $GUI_PORT..."
-    local _log_dir="${PREFIX:+$PREFIX/tmp}"; _log_dir="${_log_dir:-${TMPDIR:-/tmp}}"
+    local _log_dir="$HOME/.gathm/logs"
+    mkdir -p "$_log_dir" || return 1
     nohup "$python_cmd" "$server_script" --port "$GUI_PORT" &>"$_log_dir/gathm-gui.log" &
     local _gui_pid=$!
     # Record the pid where the launcher looks for it, so `gathm stop` can shut
     # down the server the installer started instead of telling the user to pkill.
     mkdir -p "$HOME/.gathm" 2>/dev/null || true
     echo "$_gui_pid" >"$HOME/.gathm/gui.pid" 2>/dev/null || true
+    gathm_record_process "$HOME/.gathm/gui.pid" "$_gui_pid" "$SCRIPT_DIR" || true
     disown "$_gui_pid" 2>/dev/null || true
 
     # Wait up to 15 s for the server to respond (Termux can be slow)
@@ -4845,7 +4907,7 @@ main() {
             echo "  (default)     Auto-detect platform and install"
             echo "  --check       Verify environment only"
             echo "  --audio-only  Install just the speech runtime (audio.cpp)"
-            echo "  --uninstall   Remove Gathm (--dry-run, --keep-data, --yes supported)"
+            echo "  --uninstall   Remove Gathm, retain data (--dry-run, --purge-data, --yes supported)"
             echo "  --help        Show this help"
             exit 0 ;;
         install)
@@ -4919,7 +4981,7 @@ main() {
     # Install the fallback only when there is no llama.cpp setup to reuse or
     # repair, or when explicitly requested alongside it.
     step_begin "Installing Ollama (optional fallback runtime)"
-    _install_ollama_fallback "$platform"
+    _install_ollama_fallback "$platform" || true
 
     step_begin "Selecting LLM model"
     if select_and_pull_llm_model; then
@@ -4936,6 +4998,9 @@ main() {
         step_done "Pilot dependency setup finished"
     else
         step_fail "Pilot dependency setup failed"
+        step_summary
+        fail "Setup incomplete. Resolve the Python dependency error and re-run ./install."
+        return 1
     fi
 
     step_begin "Installing Playwright browser engine"

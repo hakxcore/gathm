@@ -1,5 +1,5 @@
 name: websearch
-version: "1.0.0"
+version: "1.1.0"
 description: "Searches the WEB for information about anything — people, topics, current events. Use this whenever you need facts from the internet."
 category: data
 requires_internet: true

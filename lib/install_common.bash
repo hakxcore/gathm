@@ -1,5 +1,56 @@
 # Shared by install and uninstall; compatible with the macOS Bash 3.2 shell.
 
+# A PID may have been reused since the last launch. Match its creation time
+# before sending any signal, and fail closed when the OS cannot identify it.
+gathm_process_birth() {
+    local pid="$1" birth native_pid kernel
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    (( pid > 1 )) || return 1
+    kernel=$(uname -s 2>/dev/null) || return 1
+    case "$kernel" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Bash tracks the MSYS PID, while PowerShell uses WINPID.
+            native_pid=$(ps -p "$pid" 2>/dev/null | awk '
+                NR==1 { for (i=1; i<=NF; i++) if ($i=="WINPID") column=i; next }
+                column { offset=($1 !~ /^[0-9]+$/); print $(column+offset); exit }
+            ') || return 1
+            case "$native_pid" in ''|*[!0-9]*) return 1 ;; esac
+            birth=$(powershell.exe -NoProfile -NonInteractive -Command \
+                "(Get-Process -Id $native_pid -ErrorAction Stop).StartTime.ToUniversalTime().Ticks" 2>/dev/null) || return 1
+            birth=$(printf '%s' "$birth" | tr -d '\r\n')
+            [[ "$birth" =~ ^[0-9]+$ ]] || return 1
+            birth="$native_pid:$birth"
+            ;;
+        *) birth=$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>/dev/null) || return 1 ;;
+    esac
+    birth=$(printf '%s' "$birth" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [[ -n "$birth" ]] || return 1
+    printf '%s\n' "$birth"
+}
+
+gathm_record_process() {
+    local file="$1" pid="$2" root="${3:-}" birth prepared
+    rm -f "$file.birth" || return 1
+    birth=$(gathm_process_birth "$pid") || return 1
+    prepared=$(mktemp "${file}.XXXXXX") || return 1
+    if ! printf '%s|%s\n%s\n' "$pid" "$birth" "$root" > "$prepared" || ! mv -f "$prepared" "$file.birth"; then
+        rm -f "$prepared"; return 1
+    fi
+}
+
+gathm_process_owned() {
+    local file="$1" pid="$2" root="${3:-}" stored birth recorded_root
+    [[ -f "$file.birth" && ! -L "$file.birth" ]] || return 1
+    IFS= read -r stored < "$file.birth" || return 1
+    [[ "${stored%%|*}" == "$pid" ]] || return 1
+    if [[ -n "$root" ]]; then
+        recorded_root=$(sed -n '2p' "$file.birth") || return 1
+        [[ "$root" == "$recorded_root" ]] || return 1
+    fi
+    birth=$(gathm_process_birth "$pid") || return 1
+    [[ "${stored#*|}" == "$birth" ]]
+}
+
 gathm_detect_platform() {
     local kernel
     kernel=$(uname -s 2>/dev/null || printf unknown)

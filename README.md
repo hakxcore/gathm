@@ -12,6 +12,8 @@ need current information or an action, it can use tools to help.
 - Tools for current information, system tasks, and existing automation workflows
 - Learning from tool sessions and explicit preferences or corrections by default,
   with your review before lessons are reused
+- Automatic public web search when local knowledge is insufficient, with source
+  links and a graceful offline fallback
 - Support for Linux, macOS, Termux, and Windows through WSL/Git Bash/MSYS2
 
 Voice input and spoken replies depend on the speech capabilities installed on
@@ -24,6 +26,7 @@ your device. Text chat is available alongside them.
 - [Examples](./docs/examples/README.md)
 - [Use Cases](./docs/use-cases/README.md)
 - [Learning Harness](./docs/learning-harness.md)
+- [Grounded replies and recovery](./docs/factual-grounding.md)
 - [Tencent VectorDB assessment](./docs/tencent-vectordb-evaluation.md)
 - [Local TencentDB Agent Memory assessment](./docs/tencent-agent-memory-evaluation.md)
 
@@ -39,6 +42,23 @@ Start with what you need help with:
 
 Run `gathm` to open the browser interface and terminal assistant together,
 `gathm gui` for the browser, or `gathm tui` for the terminal.
+
+Gathm uses approved lessons, conversation context, and its model knowledge first.
+Explicit public searches and common requests for changing facts use actual web
+results. When uncertain about a standalone public factual question, it attempts
+one web search automatically; current facts should also use the available lookup tools.
+Known answers and small talk need no extra search or model call. If internet or
+search is unavailable, it uses supported local knowledge, explains what it cannot
+verify, and does not invent a current answer. Search failures pause further
+attempts for 30 seconds in that worker.
+
+Automatic queries use only the current public question, never recalled lessons
+or chat history. Contextual/private questions and requests to stay offline skip
+this fallback. These conservative English heuristics cannot detect every secret
+or every incorrect answer. Tool permissions still apply. Agent searches return
+up to three actual result snippets and links without model rewriting, with a
+five-second network budget and an eight-second subprocess ceiling. This does not make a hosted model work offline;
+offline conversation requires a prepared local model.
 
 ## Architecture
 
@@ -209,8 +229,9 @@ several gigabytes of weights is not something a status command should do.
 
 ```bash
 ./uninstall --dry-run             # preview without changing anything
-./uninstall --keep-data           # retain models, settings, and history
-./install --uninstall             # same uninstaller, including data removal
+./uninstall                      # retain models, settings, history, and lessons
+./uninstall --purge-data          # explicitly remove ~/.gathm data too
+./install --uninstall             # same uninstaller; --purge-data is supported
 ```
 
 Removal asks for confirmation. Add `--yes` for unattended use. Both commands
@@ -220,6 +241,8 @@ added by Gathm are removed. Unrecognized commands are kept; if another install
 may use the shared `~/.gathm` directory, that data is kept too. For pipx installs,
 use `pipx uninstall gathm` to remove the package-managed command afterward.
 Windows users should run these commands inside Git Bash, MSYS2, or WSL.
+Older running services without a creation record must be stopped manually;
+uninstall never treats a stale PID file as permission to stop another process.
 
 The installer requires Python 3.10+, repairs incomplete local virtualenvs, and
 returns an error if required verification fails. Set `GATHM_NO_LAUNCH=1` to skip
@@ -424,7 +447,7 @@ installer avoids compiling entirely:
 1. If `GATHM_AUDIOCPP_BIN_URL` is set, it downloads that binary (verifying
    `GATHM_AUDIOCPP_BIN_SHA256` when given).
 2. Otherwise it reuses the cached build in `~/.cache/gathm/audiocpp/`, kept
-   outside `~/.gathm` so `--uninstall` does not throw it away.
+   outside `~/.gathm` so an explicit `--uninstall --purge-data` does not remove it.
 3. Only if neither applies does it configure and compile.
 
 Both shortcuts are verified by actually running `--list-loaders` before being

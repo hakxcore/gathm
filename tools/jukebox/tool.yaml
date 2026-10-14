@@ -1,6 +1,6 @@
 name: jukebox
 version: "3.0.0"
-description: "Music player interface for the terminal"
+description: "Interactive telehack terminal music demo via telnet. Does not control local music apps, songs, or a media library."
 category: media
 requires_internet: true
 

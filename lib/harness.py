@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -215,6 +216,22 @@ class Harness:
     def capture(self, query, events, completion, context=()):
         if not self.enabled() or _private_request(query):
             return False
+        # Crypto outputs, breach/account data, transferred content and raw media
+        # are not evidence for a reusable lesson. Skip the whole turn so even
+        # its query cannot persist an otherwise unrecognizable secret.
+        sensitive = {"crypt", "cipher", "pwned", "transcribe", "imganalyze", "transfer",
+                     "chain", "parallel"}  # compound tool strings are not safe to classify here
+        for event in events:
+            try:
+                command = shlex.split(event["command"])
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return False
+            if command and command[0].replace("\\", "/").split("/")[-1] == "gathm":
+                command = command[1:]
+            if command and command[0] == "run":
+                command = command[1:]
+            if command and command[0].replace("\\", "/").split("/")[-1] in sensitive:
+                return False
         signal = _conversation_signal(query)
         if not events and (not signal or completion != "complete"):
             return False

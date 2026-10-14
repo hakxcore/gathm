@@ -72,7 +72,7 @@ class ChatOpenAICompatible(BaseChatModel):
     # module fails to import.
     base_url: str
     model: str
-    temperature: float = 0.7
+    temperature: float = 0.2
     max_tokens: Optional[int] = None
     timeout: float = 300.0
     api_key: str = "gathm-local"

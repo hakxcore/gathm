@@ -89,6 +89,10 @@ venv_repair() {
     fixture_python() { touch "$FIX/unwanted-system-pip"; }
     if _venv_pip example; then exit 1; fi
     assert test ! -e "$FIX/unwanted-system-pip"
+    _ensure_engineer_venv() { return 1; }
+    _venv_pip() { touch "$FIX/unwanted-pilot-pip"; }
+    if _engineer_venv_pip example; then exit 1; fi
+    assert test ! -e "$FIX/unwanted-pilot-pip"
 }
 shortcut_roundtrip() {
     clear_fixture_home; fixture shortcuts
@@ -109,14 +113,14 @@ shortcut_roundtrip() {
     assert test -f "$HOME/.gathm/models/model.gguf"
     if "$BASH" "$SCRIPT_DIR/uninstall" >/dev/null 2>&1; then exit 1; fi
     assert test -e "$HOME/.local/bin/gathm"
-    assert "$BASH" "$SCRIPT_DIR/uninstall" --yes --keep-data
+    assert "$BASH" "$SCRIPT_DIR/uninstall" --yes
     assert test -f "$HOME/.gathm/models/model.gguf"
     assert test ! -e "$HOME/.local/bin/gathm-api"
     assert test ! -e "$SCRIPT_DIR/pilot/venv"
     assert test ! -e "$SCRIPT_DIR/engineer/venv"
     assert test "$(grep -Fc 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc")" = 1
     assert test "$(ls -l "$HOME/.zshrc" | awk '{print $1}')" = "$before_mode"
-    assert "$BASH" "$SCRIPT_DIR/uninstall" --yes
+    assert "$BASH" "$SCRIPT_DIR/uninstall" --yes --purge-data
     assert test ! -e "$HOME/.gathm"
     assert "$BASH" "$SCRIPT_DIR/uninstall" --yes
 }
@@ -175,6 +179,9 @@ required_failure() {
     verify() { return 0; }
     assert main > "$FIX/main-output"
     assert test ! -e "$FIX/unexpected-launch"
+    install_pilot_deps() { return 1; }
+    if main > "$FIX/main-output"; then exit 1; fi
+    if grep -q 'Setup Complete!' "$FIX/main-output"; then exit 1; fi
 }
 privileges() {
     id() { echo 0; }
@@ -213,7 +220,7 @@ uninstall_failures() {
     mkdir -p "$HOME/.gathm" "$FIX/fail-bin"
     printf '#!/usr/bin/env bash\nexit 1\n' > "$FIX/fail-bin/rm"
     chmod +x "$FIX/fail-bin/rm"
-    if PATH="$FIX/fail-bin:$PATH" "$BASH" "$SCRIPT_DIR/uninstall" --yes > "$FIX/uninstall-failed" 2>&1; then exit 1; fi
+    if PATH="$FIX/fail-bin:$PATH" "$BASH" "$SCRIPT_DIR/uninstall" --yes --purge-data > "$FIX/uninstall-failed" 2>&1; then exit 1; fi
     assert grep -q 'Uninstall incomplete' "$FIX/uninstall-failed"
     assert test -d "$HOME/.gathm"
 }

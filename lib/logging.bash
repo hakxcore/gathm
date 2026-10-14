@@ -23,8 +23,13 @@ _log_level_value() {
 
 # Initialize logging
 init_logging() {
-    mkdir -p "$GATHM_LOG_DIR" 2>/dev/null || true
-    touch "$GATHM_LOG_FILE" "$GATHM_AUDIT_FILE" "$GATHM_METRICS_FILE" 2>/dev/null || true
+    (
+        umask 077
+        mkdir -p "$GATHM_LOG_DIR" || exit 1
+        chmod 700 "$GATHM_LOG_DIR" || exit 1
+        touch "$GATHM_LOG_FILE" "$GATHM_AUDIT_FILE" "$GATHM_METRICS_FILE" || exit 1
+        chmod 600 "$GATHM_LOG_FILE" "$GATHM_AUDIT_FILE" "$GATHM_METRICS_FILE"
+    ) 2>/dev/null
 }
 
 # Cross-platform millisecond timestamp

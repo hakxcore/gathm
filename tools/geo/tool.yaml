@@ -5,16 +5,16 @@ category: networking
 requires_internet: true
 
 dependencies:
-  system: [curl]
+  system: [curl, python3]
 
 apis:
   - name: ipify
     base_url: https://api.ipify.org
     health_endpoint: https://api.ipify.org
     auth_required: false
-  - name: ip-api
-    base_url: http://ip-api.com
-    health_endpoint: http://ip-api.com/json
+  - name: ipwhois
+    base_url: https://ipwho.is
+    health_endpoint: https://ipwho.is/8.8.8.8
     auth_required: false
   - name: ipinfo
     base_url: https://ipinfo.io
@@ -39,6 +39,9 @@ input_schema:
       description: "Returns geolocation data"
     - flag: "-a"
       description: "Specify IP for geolocation"
+      has_argument: true
+    - flag: "-o"
+      description: "Select supported geolocation fields"
       has_argument: true
     - flag: "-h"
       description: "Show help"

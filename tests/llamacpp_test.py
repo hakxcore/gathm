@@ -175,6 +175,8 @@ def main() -> int:
             if key.startswith(("GATHM_", "OLLAMA_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")):
                 del os.environ[key]
         os.environ["GATHM_CONFIG_DIR"] = str(workspace / "state")
+        # Never discover or reuse a real model server on the default port.
+        os.environ["GATHM_LLAMACPP_PORT"] = str(free_port())
         os.environ.update(overrides)
         (workspace / "state").mkdir(parents=True, exist_ok=True)
 

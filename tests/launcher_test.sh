@@ -23,7 +23,7 @@ cp "$REPO/gathm" "$FIX/gathm"
 cp "$REPO/lib/utils.bash" "$FIX/lib/utils.bash"
 cp "$REPO/lib/access.bash" "$FIX/lib/access.bash"
 # utils.bash sources siblings relative to itself; copy what exists.
-for f in logging.bash schema.bash deps.bash health.bash recovery.bash; do
+for f in logging.bash schema.bash deps.bash health.bash recovery.bash install_common.bash; do
     [[ -f "$REPO/lib/$f" ]] && cp "$REPO/lib/$f" "$FIX/lib/$f"
 done
 # The launcher asks lib/llamacpp.py where the model server is; without it the

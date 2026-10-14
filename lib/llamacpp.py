@@ -58,6 +58,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -456,8 +457,66 @@ def log_file() -> Path:
     return state_dir() / "llamacpp.log"
 
 
+def process_record() -> Path:
+    return state_dir() / "llamacpp-process.json"
+
+
+def _process_birth(pid: int) -> str | None:
+    """OS process creation identity; PID files alone are unsafe after PID reuse."""
+    if pid <= 1:
+        return None
+    try:
+        if os.name == "nt":
+            command = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                       f"(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks"]
+        else:
+            stat = Path(f"/proc/{pid}/stat")
+            if stat.exists():
+                fields = stat.read_text().rsplit(")", 1)[1].split()
+                return "proc:" + fields[19]  # starttime, field 22 (state is field 3)
+            command = ["ps", "-p", str(pid), "-o", "lstart="]
+        env = dict(os.environ, LC_ALL="C", TZ="UTC") if os.name == "posix" else None
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3, env=env)
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return None
+
+
+def _record_process(pid: int) -> None:
+    process_record().unlink(missing_ok=True)
+    birth = _process_birth(pid)
+    if birth is None:
+        return  # Never substitute a weaker identity if the OS probe failed.
+    fd, temporary = tempfile.mkstemp(prefix=".llamacpp-process-", dir=state_dir())
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump({"pid": pid, "birth": birth,
+                       "root": str(Path(__file__).resolve().parents[1])}, output)
+        os.replace(temporary, process_record())
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _owns_process(pid: int) -> bool:
+    try:
+        path = process_record()
+        if path.is_symlink() or path.stat().st_size > 4096:
+            return False
+        record = json.loads(path.read_text(encoding="utf-8"))
+        birth = record.get("birth")
+        return (record.get("pid") == pid and isinstance(birth, str) and bool(birth)
+                and record.get("root") == str(Path(__file__).resolve().parents[1])
+                and _process_birth(pid) == birth)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def _read_pid() -> int | None:
     try:
+        if pid_file().is_symlink() or pid_file().stat().st_size > 64:
+            return None
         text = pid_file().read_text(encoding="utf-8").strip()
     except OSError:
         return None
@@ -465,7 +524,7 @@ def _read_pid() -> int | None:
         pid = int(text.split()[0])
     except (ValueError, IndexError):
         return None
-    return pid if pid > 0 else None
+    return pid if pid > 1 else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -481,6 +540,17 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, owned by someone else
+    # An exited child may remain a zombie until its parent reaps it.
+    try:
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists():
+            return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                capture_output=True, text=True, timeout=3)
+        if result.returncode == 0 and result.stdout.strip().startswith("Z"):
+            return False
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        pass
     return True
 
 
@@ -499,8 +569,9 @@ def _terminate(pid: int, force: bool = False) -> None:
         return
     sig = getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
     try:
-        os.killpg(os.getpgid(pid), sig)
-        return
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+            return
     except (OSError, AttributeError):
         pass
     os.kill(pid, sig)
@@ -666,18 +737,29 @@ def start(cfg: LlamaCppConfig | None = None,
     proc: subprocess.Popen | None = None
     for minimal in (False, True):
         cmd = build_command(cfg, minimal=minimal)
+        descriptor = None
         try:
-            handle = open(log_file(), "ab")
+            descriptor = os.open(log_file(), os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            if os.name == "posix":
+                os.fchmod(descriptor, 0o600)
+            handle = os.fdopen(descriptor, "ab")
         except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
             handle = subprocess.DEVNULL  # type: ignore[assignment]
         try:
             if handle is not subprocess.DEVNULL:
                 handle.write(("\n=== %s: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"),
-                                                  " ".join(cmd))).encode())
+                                                  "starting local model runtime" +
+                                                  (" with fallback flags" if minimal else ""))).encode())
                 handle.flush()
             proc = _spawn(cmd, handle)
         except OSError as exc:
             return False, "could not run %s: %s" % (cfg.binary, exc)
+        finally:
+            if handle is not subprocess.DEVNULL:
+                handle.close()
 
         # An unknown flag kills llama-server within milliseconds. Give it a beat
         # and, if it is already gone, drop the tuning flags and try once more
@@ -693,6 +775,7 @@ def start(cfg: LlamaCppConfig | None = None,
 
     try:
         pid_file().write_text("%d\n" % proc.pid, encoding="utf-8")
+        _record_process(proc.pid)
     except OSError:
         pass
 
@@ -742,16 +825,17 @@ def stop(cfg: LlamaCppConfig | None = None) -> tuple[bool, str]:
     """
     cfg = cfg or LlamaCppConfig.from_env()
     pid = _read_pid()
-    try:
-        pid_file().unlink()
-    except OSError:
-        pass
-
     if pid is None or not _pid_alive(pid):
+        for path in (pid_file(), process_record()):
+            path.unlink(missing_ok=True)
         if is_running(cfg, timeout=1):
             return False, ("a llama-server is running at %s but Gathm did not start it"
                            % cfg.base_url)
         return True, "not running"
+
+    if not _owns_process(pid):
+        return False, ("cannot verify that pid %d is the process Gathm started; "
+                       "it was left running. Stop the old server manually." % pid)
 
     try:
         _terminate(pid)
@@ -760,13 +844,25 @@ def stop(cfg: LlamaCppConfig | None = None) -> tuple[bool, str]:
 
     for _ in range(10):
         if not _pid_alive(pid):
+            pid_file().unlink(missing_ok=True)
+            process_record().unlink(missing_ok=True)
             return True, "stopped (pid %d)" % pid
         time.sleep(1.0)
 
+    if not _owns_process(pid):
+        return False, "process identity changed while stopping; no further signal sent"
     try:
         _terminate(pid, force=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        return False, "could not force-stop pid %d: %s" % (pid, exc)
+    for _ in range(10):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    else:
+        return False, "process %d has not exited; its ownership record was retained" % pid
+    pid_file().unlink(missing_ok=True)
+    process_record().unlink(missing_ok=True)
     return True, "stopped (pid %d, forced)" % pid
 
 

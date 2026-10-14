@@ -27,6 +27,8 @@ done
 INSTALL_DIR="$(cd "$(dirname "$_gathm_self")" &>/dev/null && pwd)"
 AGENT_SCRIPT="$INSTALL_DIR/agent/orchestrator.sh"
 source "$INSTALL_DIR/lib/utils.bash"
+# shellcheck source=lib/install_common.bash
+source "$INSTALL_DIR/lib/install_common.bash"
 
 # --- Where the GUI lives ---
 GUI_HOST="${GATHM_GUI_HOST:-${GATHM_HOST:-127.0.0.1}}"
@@ -297,6 +299,7 @@ start_ollama() {
         set -m
         nohup ollama serve </dev/null >>"$OLLAMA_LOG" 2>&1 &
         echo $! >"$OLLAMA_PID_FILE" 2>/dev/null || true
+        gathm_record_process "$OLLAMA_PID_FILE" "$!" "$INSTALL_DIR" || true
     )
     local waited=0
     while (( waited < 10 )); do
@@ -635,6 +638,7 @@ start_gui() {
         nohup "$py" "$server_script" --host "$GUI_HOST" --port "$GUI_PORT" \
             </dev/null >>"$GUI_LOG" 2>&1 &
         echo $! >"$GUI_PID_FILE" 2>/dev/null || true
+        gathm_record_process "$GUI_PID_FILE" "$!" "$INSTALL_DIR" || true
     )
     local gui_pid; gui_pid="$(cat "$GUI_PID_FILE" 2>/dev/null || true)"
     if [[ -z "$gui_pid" ]]; then
@@ -674,10 +678,14 @@ stop_ollama() {
     local pid=""
     [[ -f "$OLLAMA_PID_FILE" ]] || return 0
     pid="$(cat "$OLLAMA_PID_FILE" 2>/dev/null)"
-    rm -f "$OLLAMA_PID_FILE" 2>/dev/null || true
     [[ -n "$pid" ]] || return 0
+    if ! gathm_process_owned "$OLLAMA_PID_FILE" "$pid" "$INSTALL_DIR"; then
+        echo 'Ollama process ownership could not be verified; left running.' >&2
+        return 1
+    fi
     kill -0 "$pid" 2>/dev/null || return 0
     kill "$pid" 2>/dev/null || true
+    rm -f "$OLLAMA_PID_FILE" "$OLLAMA_PID_FILE.birth" 2>/dev/null || true
     echo -e "${GREEN}[+]${RESETBG} Ollama stopped (pid $pid) — Gathm had started it."
     return 0
 }
@@ -687,16 +695,22 @@ stop_gui() {
     [[ -f "$GUI_PID_FILE" ]] && pid="$(cat "$GUI_PID_FILE" 2>/dev/null)"
 
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if ! gathm_process_owned "$GUI_PID_FILE" "$pid" "$INSTALL_DIR"; then
+            echo 'GUI process ownership could not be verified; left running.' >&2
+            return 1
+        fi
         kill "$pid" 2>/dev/null || true
         local waited=0
         while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do
             sleep 1
             waited=$((waited + 1))
         done
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+        if kill -0 "$pid" 2>/dev/null && gathm_process_owned "$GUI_PID_FILE" "$pid" "$INSTALL_DIR"; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
         stopped=1
     fi
-    rm -f "$GUI_PID_FILE" 2>/dev/null || true
+    rm -f "$GUI_PID_FILE" "$GUI_PID_FILE.birth" 2>/dev/null || true
 
     if (( stopped )); then
         echo -e "${GREEN}[+]${RESETBG} GUI server stopped (pid $pid)."

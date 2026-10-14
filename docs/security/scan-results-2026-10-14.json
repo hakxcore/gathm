@@ -1,0 +1,180 @@
+{
+  "date": "2026-10-14",
+  "tracked_and_proposed_files": 269,
+  "syntax": {
+    "python_files": 61,
+    "shell_files": 83,
+    "javascript_files": 14,
+    "failures": []
+  },
+  "bandit": {
+    "all_findings": {
+      "LOW": 142,
+      "MEDIUM": 30
+    },
+    "production_findings": {
+      "LOW": 80,
+      "MEDIUM": 12
+    },
+    "production_medium": [
+      {
+        "file": "./bench/assistant_latency.py",
+        "line": 38,
+        "id": "B310"
+      },
+      {
+        "file": "./bench/termux_latency.py",
+        "line": 44,
+        "id": "B310"
+      },
+      {
+        "file": "./bench/termux_latency.py",
+        "line": 154,
+        "id": "B310"
+      },
+      {
+        "file": "./lib/chat_openai_compat.py",
+        "line": 108,
+        "id": "B310"
+      },
+      {
+        "file": "./lib/harness.py",
+        "line": 270,
+        "id": "B608"
+      },
+      {
+        "file": "./lib/harness.py",
+        "line": 360,
+        "id": "B608"
+      },
+      {
+        "file": "./lib/llamacpp.py",
+        "line": 418,
+        "id": "B104"
+      },
+      {
+        "file": "./lib/llamacpp.py",
+        "line": 601,
+        "id": "B310"
+      },
+      {
+        "file": "./lib/llamacpp.py",
+        "line": 617,
+        "id": "B310"
+      },
+      {
+        "file": "./lib/llm.py",
+        "line": 349,
+        "id": "B310"
+      },
+      {
+        "file": "./pilot/main.py",
+        "line": 1393,
+        "id": "B604"
+      },
+      {
+        "file": "./tools/websearch/websearch",
+        "line": 52,
+        "id": "B310"
+      }
+    ],
+    "scan_errors": []
+  },
+  "shellcheck": {
+    "warning_count": 54,
+    "codes": {
+      "2155": 27,
+      "2220": 8,
+      "2034": 19
+    }
+  },
+  "secret_patterns": {
+    "files_checked": 269,
+    "large_files_skipped": [],
+    "matching_files": [],
+    "history_blobs_checked": 1085,
+    "history_large_blobs_skipped": 1,
+    "history_matching_files": []
+  },
+  "base_commit": "677f05141b56072b2499912b76b6d804d06a0e7f",
+  "excluded_local_changes": [
+    "Whisper implementation and optional installer block",
+    "separate macOS connector work"
+  ],
+  "dependency_audit": {
+    "installed_packages": 91,
+    "affected_packages": 0,
+    "declared_resolution_packages": 73,
+    "declared_affected_packages": 0,
+    "pip_version": "26.2.1",
+    "setuptools_version": "84.0.0",
+    "editable_project_not_certified": true,
+    "audited_third_party_packages": 90,
+    "unaudited_project": "gathm 3.0.0: no published advisory metadata"
+  },
+  "tests": {
+    "python_unittest_discovery": 328,
+    "web_fallback_included": 19,
+    "security_api": 17,
+    "system_execution_checks": 344,
+    "reply_streaming_checks": 40,
+    "packaging_checks": 104,
+    "llamacpp_lifecycle_checks": 63,
+    "launcher_checks": 62,
+    "installer_lifecycle_groups": 15,
+    "installer_security_groups": 9,
+    "installer_reuse_checks": 18,
+    "virtualenv_path_checks": 14,
+    "javascript_suites": 6,
+    "javascript_checks": 219,
+    "bash32_installer_and_cache_fixtures": "passed",
+    "cache_security": "passed",
+    "geolocation_security": "passed",
+    "package_dirty_fixture": {
+      "required_files": 15,
+      "excluded_local_files": 9
+    },
+    "wheel_and_sdist_build": "passed",
+    "live_public_search": "DuckDuckGo returned three public Python documentation results",
+    "transcript_grounding_regressions": 15,
+    "live_exact_handle_search": "Passed with real source URLs; no model generation"
+  },
+  "web_fallback": {
+    "default_enabled": true,
+    "max_searches_per_turn": 1,
+    "max_result_snippets": 3,
+    "network_budget_seconds": 5,
+    "subprocess_timeout_seconds": 8,
+    "failure_backoff_seconds": 30,
+    "query_source": "current standalone public question only",
+    "offline": "Explicit unverifiable status; local general knowledge remains available",
+    "heuristic_limits": "English uncertainty/privacy detection; confident errors and all PII cannot be detected",
+    "explicit_search": "Deterministic routing and actual search snippets; no model synthesis"
+  },
+  "limitations": [
+    "No native Windows/Linux/Termux install or local Docker build",
+    "Some downloads rely on upstream HTTPS without independent signatures/checksums",
+    "Permitted tools are not OS sandboxed; Termux Chromium uses --no-sandbox",
+    "Historical local records are not purged",
+    "Static/pattern scans and dependency advisories do not prove complete security"
+  ],
+  "grounding": {
+    "instruction_role": "system",
+    "chat_temperature_default": 0.2,
+    "exact_names": "preserved",
+    "desktop_counts": "typed filesystem count; direct entries including hidden; symlinks separate",
+    "followups": "immediately preceding read-only target only",
+    "app_aliases": "actual installed macOS inventory; confirmations retained",
+    "unsupported": "in-app writing and local playback honestly refused",
+    "claim_guard": "recognized unsupported current-turn action claims withheld; heuristic"
+  },
+  "github_workflows": {
+    "status": "prepared locally, excluded from application push",
+    "reason": "Available OAuth credential lacks workflow scope; connected integration cannot update refs",
+    "files": [
+      ".github/workflows/ci.yaml",
+      ".github/workflows/release.yaml",
+      ".github/workflows/tests.yml"
+    ]
+  }
+}

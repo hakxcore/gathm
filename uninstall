@@ -5,17 +5,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/install_common.bash
 source "$SCRIPT_DIR/lib/install_common.bash"
 
-DRY_RUN=0; KEEP_DATA=0; YES=0
+DRY_RUN=0; KEEP_DATA=1; YES=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --keep-data) KEEP_DATA=1 ;;
+        --purge-data) KEEP_DATA=0 ;;
         --yes|-y) YES=1 ;;
         --help|-h)
-            printf 'Usage: ./uninstall [--dry-run] [--keep-data] [--yes]\n'
-            printf 'Removes owned shortcuts and local virtualenvs. By default also removes\n'
-            printf '%s (settings, history, models, runtimes, and recovery files).\n' "$HOME/.gathm"
-            printf 'Use --keep-data to retain those files. The source checkout is kept.\n'
+            printf 'Usage: ./uninstall [--dry-run] [--purge-data|--keep-data] [--yes]\n'
+            printf 'Removes owned shortcuts and local virtualenvs; keeps user data by default.\n'
+            printf 'Use --purge-data to remove %s (settings, history, lessons, models, runtimes).\n' "$HOME/.gathm"
+            printf 'The source checkout, including its .env, is kept.\n'
             exit 0 ;;
         *) printf 'Unknown option: %s (use --help)\n' "$arg" >&2; exit 2 ;;
     esac
@@ -100,17 +101,16 @@ if (( ! YES )); then
 fi
 
 # Avoid trusting stale PID files as authority to kill an arbitrary process.
-# Only stop a running command whose arguments identify this Gathm runtime.
+# Only stop a process recorded by this checkout at the same creation time.
 _stop_owned_process() {
-    local file="$1" expected="$2" pid command_line n=0
+    local file="$1" pid n=0
     [[ -f "$file" ]] || return 0
     pid=$(cat "$file")
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     (( pid > 1 )) || return 0
     kill -0 "$pid" 2>/dev/null || return 0
-    command_line=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
-    if [[ -z "$expected" || "$command_line" != *"$expected"* ]]; then
-        printf 'Cannot verify process %s; stop Gathm before uninstalling.\n' "$pid" >&2
+    if ! gathm_process_owned "$file" "$pid" "$SCRIPT_DIR"; then
+        printf 'Process %s has no matching creation record; stop the old Gathm runtime manually.\n' "$pid" >&2
         return 1
     fi
     kill "$pid" 2>/dev/null || return 1
@@ -121,10 +121,20 @@ _stop_owned_process() {
     fi
 }
 if (( ! KEEP_PATH )) && [[ ! -L "$DATA_DIR" ]]; then
-    _stop_owned_process "$DATA_DIR/gui.pid" "$SCRIPT_DIR/api/server.py" || exit 1
-    llama_binary=""
-    [[ ! -f "$DATA_DIR/llamacpp_bin" ]] || IFS= read -r llama_binary < "$DATA_DIR/llamacpp_bin" || true
-    _stop_owned_process "$DATA_DIR/llamacpp.pid" "$llama_binary" || exit 1
+    _stop_owned_process "$DATA_DIR/gui.pid" || exit 1
+    _stop_owned_process "$DATA_DIR/ollama.pid" || exit 1
+    if [[ -f "$DATA_DIR/llamacpp.pid" ]]; then
+        python_cmd=""
+        for candidate in "$SCRIPT_DIR/pilot/venv/bin/python3" "$SCRIPT_DIR/pilot/venv/bin/python" \
+                "$SCRIPT_DIR/pilot/venv/Scripts/python.exe" python3 python; do
+            if command -v "$candidate" >/dev/null 2>&1; then python_cmd="$candidate"; break; fi
+        done
+        if [[ -n "$python_cmd" && -f "$SCRIPT_DIR/lib/llamacpp.py" ]]; then
+            "$python_cmd" "$SCRIPT_DIR/lib/llamacpp.py" stop || exit 1
+        else
+            _stop_owned_process "$DATA_DIR/llamacpp.pid" || exit 1
+        fi
+    fi
 fi
 
 errors=0

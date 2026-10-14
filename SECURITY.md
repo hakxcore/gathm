@@ -68,3 +68,45 @@ independently pinned checksum. Audio binaries support
 `GATHM_AUDIOCPP_BIN_SHA256`; use it for custom downloads. Review the remaining
 hardening work in [the security review](security_best_practices_report.md)
 before exposing Gathm as a service for multiple users.
+
+When a GitHub runtime asset supplies a SHA-256 digest, installation verifies it
+before extraction. Requested audio checksums fail closed if verification fails.
+Downloads use private temporary paths; a partial Ollama installer is not executed.
+Pilot and optional Engineer environments upgrade vulnerable pip/setuptools
+bootstrap versions within their own environment. Offline installs cannot repair
+missing or vulnerable dependencies; they report failure rather than success.
+
+Uninstall retains models, settings, history and lessons by default. Removing
+state requires `--purge-data`; the source checkout and its `.env` remain. Services
+are stopped only when PID, process creation identity and checkout ownership
+agree. Old services without records must be stopped manually. Creation identity
+limits stale-PID mistakes but is not isolation against a malicious same-user
+process racing a signal.
+
+## Local records and automatic search
+
+General orchestration/retry logs omit raw tool arguments and user queries.
+Typed device-control audit records retain action targets for accountability
+inside the private state directory. Cache
+metadata stores argument counts; cache keys include argument boundaries and the
+API principal. Sensitive and mutating tools bypass the cache. State, logs, cache
+and installer-written `.env` files use private permissions. These changes do not
+erase information already stored by older versions; review or remove historical
+records if needed. Same-user access is outside this privacy boundary.
+
+Automatic web fallback respects tool allowlists, offline instructions and a
+conservative public-question check. It sends the current question, not memory or
+history. Search providers receive that question and the network address. Privacy
+and uncertainty checks are heuristics, not a proof of secrecy or correctness.
+Search snippets remain untrusted and source links identify the returned evidence;
+they do not certify that a claim is true. Failed searches back off, and the
+assistant must state when online verification was unavailable.
+
+Explicit public searches and common freshness requests route to real lookup
+results before model generation. Search snippets and tool failures are returned
+directly, avoiding fabricated biographies or repair commands in a second model
+pass. Instructions use the system-message role. Recognized action claims without
+current-turn evidence are blocked; this language guard cannot detect every
+unsupported statement. File counts use a typed read-only operation and app aliases
+resolve only to installed inventory entries. Read-only follow-ups never approve
+a mutation, and app launches retain the normal confirmation requirement.

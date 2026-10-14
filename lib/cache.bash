@@ -9,24 +9,36 @@ GATHM_CACHE_ENABLED="${GATHM_CACHE_ENABLED:-true}"
 
 # Initialize cache directory
 init_cache() {
-    mkdir -p "$GATHM_CACHE_DIR" 2>/dev/null || true
+    (umask 077; mkdir -p "$GATHM_CACHE_DIR" && chmod 700 "$GATHM_CACHE_DIR") 2>/dev/null
+}
+
+_cacheable() {
+    case "$1" in
+        crypt|cipher|todo|transfer|transcribe|imganalyze|pwned) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+_cache_input() {
+    # NUL boundaries distinguish ["a b"] from ["a", "b"]. API callers have
+    # separate namespaces even when they invoke the same permitted tool.
+    printf '%s\0' cache-v2 "${GATHM_CHAT_OWNER:-local}" "$@"
 }
 
 # Generate a cache key from tool name + arguments
 # Usage: _cache_key TOOL_NAME [args...]
 _cache_key() {
-    local input="$*"
     if command -v sha256sum &>/dev/null; then
-        echo "$input" | sha256sum | cut -d' ' -f1
+        _cache_input "$@" | sha256sum | cut -d' ' -f1
     elif command -v shasum &>/dev/null; then
-        echo "$input" | shasum -a 256 | cut -d' ' -f1
+        _cache_input "$@" | shasum -a 256 | cut -d' ' -f1
     elif command -v md5sum &>/dev/null; then
-        echo "$input" | md5sum | cut -d' ' -f1
+        _cache_input "$@" | md5sum | cut -d' ' -f1
     elif command -v md5 &>/dev/null; then
-        echo "$input" | md5 | tr -d ' '
+        _cache_input "$@" | md5 | tr -d ' '
     else
         # Fallback: simple hash
-        printf '%s' "$input" | cksum | cut -d' ' -f1
+        _cache_input "$@" | cksum | cut -d' ' -f1
     fi
 }
 
@@ -35,6 +47,7 @@ _cache_key() {
 # Returns: cached output on stdout, exit code 0 if hit, 1 if miss
 cache_get() {
     [[ "$GATHM_CACHE_ENABLED" != "true" ]] && return 1
+    _cacheable "$1" || return 1
 
     local key
     key=$(_cache_key "$@")
@@ -49,11 +62,13 @@ cache_get() {
     cached_at=$(grep "^cached_at=" "$meta_file" 2>/dev/null | cut -d= -f2)
     ttl=$(grep "^ttl=" "$meta_file" 2>/dev/null | cut -d= -f2)
     ttl="${ttl:-$GATHM_CACHE_DEFAULT_TTL}"
+    # Never feed corrupted or injected metadata to Bash arithmetic.
+    [[ "$cached_at" =~ ^[0-9]{1,10}$ && "$ttl" =~ ^[0-9]{1,9}$ ]] || return 1
 
     # Check expiry
     local now
     now=$(date +%s)
-    if (( now - cached_at > ttl )); then
+    if (( now - 10#$cached_at > 10#$ttl )); then
         # Expired - clean up
         rm -f "$cache_file" "$meta_file" 2>/dev/null
         return 1
@@ -68,24 +83,34 @@ cache_get() {
 # Or:    echo "output" | cache_set TOOL_NAME ARGS...
 # Optional: GATHM_CACHE_TTL env var overrides default TTL
 cache_set() {
-    [[ "$GATHM_CACHE_ENABLED" != "true" ]] && return 0
+    if [[ "$GATHM_CACHE_ENABLED" != true ]] || ! _cacheable "$1"; then
+        cat >/dev/null
+        return 0
+    fi
+    init_cache || return 1
 
     local key
     key=$(_cache_key "$@")
     local cache_file="$GATHM_CACHE_DIR/${key}"
     local meta_file="$GATHM_CACHE_DIR/${key}.meta"
     local ttl="${GATHM_CACHE_TTL:-$GATHM_CACHE_DEFAULT_TTL}"
+    local prepared meta_prepared
+    prepared=$(mktemp "$GATHM_CACHE_DIR/.result.XXXXXX") || return 1
+    meta_prepared=$(mktemp "$GATHM_CACHE_DIR/.metadata.XXXXXX") || { rm -f "$prepared"; return 1; }
 
     # Read from stdin
-    cat > "$cache_file" 2>/dev/null || return 1
+    if ! cat > "$prepared"; then rm -f "$prepared" "$meta_prepared"; return 1; fi
 
     # Write metadata
-    cat > "$meta_file" 2>/dev/null << EOF
+    cat > "$meta_prepared" << EOF
 cached_at=$(date +%s)
 ttl=$ttl
 tool=$1
-args=${*:2}
+arg_count=$(($# - 1))
 EOF
+    if ! mv -f "$prepared" "$cache_file" || ! mv -f "$meta_prepared" "$meta_file"; then
+        rm -f "$prepared" "$meta_prepared"; return 1
+    fi
     return 0
 }
 
@@ -124,7 +149,8 @@ cache_cleanup() {
         ttl=$(grep "^ttl=" "$meta_file" 2>/dev/null | cut -d= -f2)
         ttl="${ttl:-$GATHM_CACHE_DEFAULT_TTL}"
 
-        if (( now - cached_at > ttl )); then
+        if [[ ! "$cached_at" =~ ^[0-9]{1,10}$ || ! "$ttl" =~ ^[0-9]{1,9}$ ]] \
+                || (( now - 10#$cached_at > 10#$ttl )); then
             local base="${meta_file%.meta}"
             rm -f "$base" "$meta_file" 2>/dev/null
             cleaned=$((cleaned + 1))
@@ -149,7 +175,8 @@ cache_stats() {
         ttl=$(grep "^ttl=" "$meta_file" 2>/dev/null | cut -d= -f2)
         ttl="${ttl:-$GATHM_CACHE_DEFAULT_TTL}"
 
-        if (( now - cached_at > ttl )); then
+        if [[ ! "$cached_at" =~ ^[0-9]{1,10}$ || ! "$ttl" =~ ^[0-9]{1,9}$ ]] \
+                || (( now - 10#$cached_at > 10#$ttl )); then
             expired=$((expired + 1))
         else
             active=$((active + 1))
@@ -178,12 +205,12 @@ cached_exec() {
     local cached_output
     cached_output=$(cache_get "$tool_name" "${tool_args[@]}")
     if [[ $? -eq 0 ]]; then
-        log_debug "cache" "Cache HIT for $tool_name ${tool_args[*]}" 2>/dev/null
+        log_debug "cache" "Cache HIT for $tool_name (${#tool_args[@]} arguments)" 2>/dev/null
         echo "$cached_output"
         return 0
     fi
 
-    log_debug "cache" "Cache MISS for $tool_name ${tool_args[*]}" 2>/dev/null
+    log_debug "cache" "Cache MISS for $tool_name (${#tool_args[@]} arguments)" 2>/dev/null
 
     # Execute and cache
     local tool_path

@@ -24,20 +24,20 @@ retry_with_backoff() {
 
     while [ "$attempt" -lt "$max_retries" ]; do
         attempt=$((attempt + 1))
-        log_debug "recovery" "Attempt $attempt/$max_retries: $*"
+        log_debug "recovery" "Attempt $attempt/$max_retries"
 
         "$@"
         exit_code=$?
 
         if [[ $exit_code -eq 0 ]]; then
             if [ "$attempt" -gt 1 ]; then
-                log_info "recovery" "Command succeeded on attempt $attempt: $*"
+                log_info "recovery" "Command succeeded on attempt $attempt"
             fi
             return 0
         fi
 
         if [ "$attempt" -lt "$max_retries" ]; then
-            log_warn "recovery" "Attempt $attempt failed (exit: $exit_code), retrying in ${delay}s: $*"
+            log_warn "recovery" "Attempt $attempt failed (exit: $exit_code), retrying in ${delay}s"
             sleep "$delay"
             delay=$((delay * GATHM_RETRY_BACKOFF))
             if [ "$delay" -gt "$GATHM_RETRY_MAX_DELAY" ]; then
@@ -46,7 +46,7 @@ retry_with_backoff() {
         fi
     done
 
-    log_error "recovery" "All $max_retries attempts failed for: $*"
+    log_error "recovery" "All $max_retries attempts failed"
     return $exit_code
 }
 
@@ -86,7 +86,7 @@ execute_with_recovery() {
 
     local new_chain="${chain:+${chain}:}${tool_name}"
 
-    log_info "recovery" "Executing tool with recovery: $tool_name" "\"args\":\"${tool_args[*]}\""
+    log_info "recovery" "Executing tool with recovery: $tool_name" "\"arg_count\":${#tool_args[@]}"
 
     # Step 1: Check circuit breaker
     if ! cb_allow_request "$tool_name"; then

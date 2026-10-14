@@ -37,6 +37,18 @@ Full histories and current model answers are not saved as learning evidence.
 Existing browser transcripts are not bulk-imported. Direct Bash orchestrator
 commands (`gathm ask`, `gathm run`) are outside this first version.
 
+Turns using cipher/crypt, breach checks, transcription, image analysis, or file
+transfer tools are excluded from learning capture, including recognized direct
+tool paths and `gathm run` aliases. Compound chain/parallel invocations are skipped
+conservatively. Existing historical records are not purged.
+Redaction and tool checks remain heuristic; review lessons before approving them.
+
+Approved lessons are local reference notes, not a complete factual knowledge
+base. If those notes and the model cannot answer a public question, the assistant
+can try one bounded web search. Only the current standalone public question goes
+to the provider. Search results are untrusted evidence; they never approve a
+lesson. Offline or failed lookups retain local answers with an explicit gap.
+
 After five recorded turns, a separate process asks the configured model for up
 to three short procedures or communication preferences. It can propose text; it cannot execute tools,
 change Gathm's source, or approve its own output. A process stops after at most

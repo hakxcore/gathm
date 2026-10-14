@@ -27,7 +27,7 @@ from lib.sysexec import platform_name
 ROOT = Path(__file__).resolve().parents[1]
 MAX_OUTPUT = 12000
 READ_ACTIONS = {"status", "volume.get", "brightness.get", "apps.list",
-                "files.list", "processes.list"}
+                "files.list", "files.count", "processes.list"}
 DOCUMENT_SUFFIXES = {".txt", ".md", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
                      ".webp", ".csv", ".docx", ".xlsx", ".pptx", ".mp3", ".wav", ".mp4"}
 
@@ -285,7 +285,7 @@ def prepare(command):
         action += "." + args.pop(0)
     arities = {"status": 0, "volume.get": 0, "volume.set": 1, "volume.mute": 0, "volume.unmute": 0,
                "brightness.get": 0, "brightness.set": 1, "apps.list": 0, "apps.open": 1,
-               "files.list": 1, "files.open": 1, "files.mkdir": 1, "files.move": 2, "files.trash": 1,
+               "files.list": 1, "files.count": 1, "files.open": 1, "files.mkdir": 1, "files.move": 2, "files.trash": 1,
                "processes.list": 0, "processes.stop": 1, "power.lock": 0, "power.sleep": 0,
                "power.restart": 0, "power.shutdown": 0, "screenshot": 0}
     if action not in arities or len(args) != arities[action]:
@@ -300,12 +300,12 @@ def prepare(command):
         args[0] = str(int(args[0]))
         summary = f"Set {action.split('.')[0]} to {args[0]}%."
     elif action.startswith("files."):
-        write = action != "files.list"
+        write = action not in {"files.list", "files.count"}
         paths = [_home_path(a, write=write, allow_missing=action == "files.mkdir" or
                             (action == "files.move" and i == 1)) for i, a in enumerate(args)]
         if action in {"files.mkdir", "files.move"} and paths[-1].exists():
             raise ValueError("The destination already exists; file controls never overwrite it.")
-        if action == "files.list" and not paths[0].is_dir():
+        if action in {"files.list", "files.count"} and not paths[0].is_dir():
             raise ValueError("Provide a folder to list.")
         if action == "files.open" and not paths[0].is_dir() and paths[0].suffix.lower() not in DOCUMENT_SUFFIXES:
             raise ValueError("Opening executable/script files is not supported. Use a document, media file, or folder.")
@@ -316,14 +316,17 @@ def prepare(command):
             plan["_identity"][str(path)] = _fingerprint(path) if path.exists() else None
             # A replaced parent may change the meaning of an approved destination.
             plan["_identity"]["parent:" + str(path.parent)] = _fingerprint(path.parent)[:2]
-        labels = {"files.list": "List folder", "files.open": "Open", "files.mkdir": "Create folder",
+        labels = {"files.list": "List folder", "files.count": "Count files in folder", "files.open": "Open", "files.mkdir": "Create folder",
                   "files.move": "Move", "files.trash": "Move to Gathm's recoverable trash"}
         summary = f"{labels[action]}: {args[0]}" + (f" → {args[1]}" if len(args) == 2 else "")
         if action == "files.trash":
             plan["warning"] = "The item will move to ~/.gathm/trash, with its original location recorded. It will not be permanently deleted."
     elif action == "apps.open":
+        aliases = {"apple music": "Music", "email": "Mail", "settings": "System Settings",
+                   "system preferences": "System Settings", "safari browser": "Safari"}
+        target = aliases.get(args[0].casefold(), args[0]) if plat == "macos" else args[0]
         matches = [p for p, name in _installed_apps(plat).items()
-                   if args[0] == p or args[0].casefold() == name.casefold()]
+                   if target == p or target.casefold() == name.casefold()]
         if len(matches) != 1:
             raise ValueError("Choose one installed app from 'control apps list'; the name is missing or ambiguous.")
         args = matches
@@ -381,7 +384,7 @@ def _status(plat):
     lines = [f"Device: {socket.gethostname()} ({plat}). Controls apply to the device running Gathm.",
              "Changes require one-time approval. Raw shell access is separate."]
     for action in ("volume.get", "volume.set", "brightness.get", "brightness.set", "apps.list", "apps.open",
-                   "files.list", "files.open", "files.mkdir", "files.move", "files.trash", "processes.list",
+                   "files.list", "files.count", "files.open", "files.mkdir", "files.move", "files.trash", "processes.list",
                    "processes.stop", "screenshot", "power.lock", "power.sleep", "power.restart", "power.shutdown"):
         try:
             _support(action, plat)
@@ -409,6 +412,15 @@ def _perform(plan):
     if action == "files.list":
         entries = sorted(Path(args[0]).iterdir(), key=lambda p: p.name.casefold())
         return "\n".join(p.name + ("/" if p.is_dir() else "") for p in entries[:300])[:MAX_OUTPUT] or "The folder is empty."
+    if action == "files.count":
+        counts = {"Files": 0, "Folders": 0, "Symlinks": 0, "Other": 0}
+        with os.scandir(args[0]) as entries:
+            for entry in entries:
+                kind = ("Symlinks" if entry.is_symlink() else "Files" if entry.is_file(follow_symlinks=False)
+                        else "Folders" if entry.is_dir(follow_symlinks=False) else "Other")
+                counts[kind] += 1
+        return ("Folder: " + args[0] + "\n" + "\n".join(f"{k}: {v}" for k, v in counts.items())
+                + "\nDirect entries only; hidden entries included; symlinks not followed.")
     if action == "files.mkdir":
         Path(args[0]).mkdir()
         return "Created folder: " + args[0]

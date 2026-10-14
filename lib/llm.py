@@ -359,10 +359,12 @@ class LLMProvider:
         cfg = self.config
         if cfg.backend == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import]
-            return ChatGoogleGenerativeAI(model=cfg.model, google_api_key=cfg.api_key)
+            return ChatGoogleGenerativeAI(model=cfg.model, google_api_key=cfg.api_key,
+                                          temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.2")))
         if cfg.backend == "anthropic":
             from langchain_anthropic import ChatAnthropic  # type: ignore[import]
-            return ChatAnthropic(model=cfg.model, api_key=cfg.api_key)
+            return ChatAnthropic(model=cfg.model, api_key=cfg.api_key,
+                                 temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.2")))
         if cfg.backend == "llamacpp":
             return self._langchain_llamacpp()
         # Default: Ollama
@@ -373,6 +375,7 @@ class LLMProvider:
         # cost is RAM, so it is tunable (Ollama accepts "30m", "1h", "-1" to
         # keep it forever, "0" to unload immediately).
         kwargs: dict = {"model": cfg.model,
+                        "temperature": float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.2")),
                         "keep_alive": os.environ.get("GATHM_OLLAMA_KEEP_ALIVE", "30m")}
         # A runaway generation is worse than a truncated one on CPU-only
         # hardware, but leave both unset unless asked so we do not silently
@@ -402,7 +405,7 @@ class LLMProvider:
                 # llama-server does not check it, but the OpenAI client refuses
                 # to send a request without one.
                 api_key="gathm-local",
-                temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.7")),
+                temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.2")),
                 timeout=float(os.environ.get("GATHM_LLM_TIMEOUT", "300")),
                 max_retries=1,
             )
@@ -425,7 +428,7 @@ class LLMProvider:
             return module.ChatOpenAICompatible(
                 base_url=base,
                 model=cfg.model,
-                temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.7")),
+                temperature=float(os.environ.get("GATHM_LLM_TEMPERATURE", "0.2")),
                 timeout=float(os.environ.get("GATHM_LLM_TIMEOUT", "300")),
             )
 

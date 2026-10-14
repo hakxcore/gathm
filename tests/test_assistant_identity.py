@@ -76,7 +76,7 @@ class AssistantIdentityTests(unittest.TestCase):
                  ("Write a note to a file in my home folder", "system touch ~/note.txt", "system"),
                  ("Help me plan tomorrow using the weather forecast in Delhi",
                   "weather -f Delhi", "weather"),
-                 ("Search for the latest space news", "websearch space news", "websearch")]
+                 ]
         for question, command, tool in cases:
             with self.subTest(question=question):
                 result, messages = self.invoke(question, f"Action: gathm\nAction Input: {command}")
@@ -101,7 +101,8 @@ class AssistantIdentityTests(unittest.TestCase):
         text = result["messages"][0].content
         self.assertIn("Error: network unreachable", text)
         self.assertNotIn("engineer has been notified", text)
-        self.assertIn("without promising a background repair", text)
+        self.assertEqual(text, "Error: network unreachable")
+        self.assertEqual(result["next_step"], "end")
 
     def test_error_reporting_only_promises_its_local_record(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(

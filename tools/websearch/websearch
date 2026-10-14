@@ -25,22 +25,34 @@ import html
 import json
 import os
 import re
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/124.0 Safari/537.36")
-TIMEOUT = int(os.environ.get("GATHM_WEBSEARCH_TIMEOUT", "20"))
+try:
+    TIMEOUT = max(1.0, min(float(os.environ.get("GATHM_WEBSEARCH_TIMEOUT", "6")), 15.0))
+except ValueError:
+    TIMEOUT = 6.0
+_DEADLINE = 0.0
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def _fetch(url: str, data: bytes | None = None, headers: dict | None = None) -> str:
     req = urllib.request.Request(url, data=data,
                                  headers={"User-Agent": UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        raw = resp.read()
+    remaining = _DEADLINE - time.monotonic() if _DEADLINE else TIMEOUT
+    if remaining <= 0:
+        raise TimeoutError("search deadline exceeded")
+    with urllib.request.urlopen(req, timeout=min(TIMEOUT, remaining)) as resp:
+        raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("search response exceeded size limit")
     return raw.decode("utf-8", errors="replace")
 
 
@@ -66,7 +78,7 @@ def parse_ddg(page: str) -> list:
         title = _clean(title_html)
         if not title:
             continue
-        url = href
+        url = html.unescape(href)
         # DuckDuckGo wraps results in a redirect: /l/?uddg=<encoded target>
         if "uddg=" in url:
             query = urllib.parse.urlparse(
@@ -111,6 +123,8 @@ def search_searx(query: str, count: int, base: str) -> list:
 
 def search(query: str, count: int) -> tuple[list, str, str]:
     """Return (results, backend, error). Falls through to the next backend."""
+    global _DEADLINE
+    _DEADLINE = time.monotonic() + TIMEOUT
     attempts = []
     key = os.environ.get("BRAVE_API_KEY")
     searx = os.environ.get("GATHM_SEARX_URL")
@@ -122,13 +136,21 @@ def search(query: str, count: int) -> tuple[list, str, str]:
 
     problems = []
     for name, fn in attempts:
+        if time.monotonic() >= _DEADLINE:
+            problems.append("search deadline exceeded")
+            break
         try:
             hits = fn()
         except urllib.error.HTTPError as exc:
             problems.append(f"{name}: HTTP {exc.code}")
             continue
-        except Exception as exc:  # noqa: BLE001
-            problems.append(f"{name}: {exc}")
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError):
+            # A disconnected host cannot benefit from trying each provider.
+            problems.append(f"{name}: network unavailable or timed out")
+            break
+        except Exception:  # noqa: BLE001
+            # Exception strings can contain configured endpoint credentials.
+            problems.append(f"{name}: invalid search response")
             continue
         if hits:
             return hits, name, ""
@@ -171,6 +193,8 @@ def main() -> int:
         print(__doc__)
         return 0
 
+    if os.environ.get("GATHM_WEBSEARCH_AGENT") == "1":
+        count, as_json = min(count, 3), True
     results, backend, error = search(query, count)
     if not results:
         print(f"Error: no results for '{query}' ({error or 'no backend answered'})")
