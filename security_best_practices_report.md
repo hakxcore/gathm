@@ -1,109 +1,79 @@
-# Gathm cleanup and security review
+# Gathm cleanup, latency and security review
 
-Review date: 2026-10-11. Reviewed changes: `1a4fbd6` through `ec2818c`, including the installer and system-control regression work.
+Date: 2026-10-16. Baseline: `85b2efc`. Scope: the complete tracked/nonignored source tree and the changes in this review.
 
 ## Executive summary
 
-The review fixed vulnerable dependency versions, a release-packaging bug that included local virtual environments, missing nested credential exclusions, and an HTTP news-feed default. Unused imports and a shell-based terminal-clear call were removed. Useful system-control tests, benchmarks, documentation, and the original logo were retained.
+Two confirmed medium-severity issues were fixed: cached permissions surviving removal of the policy file, and predictable temporary paths in installers/tools. No new confirmed exploitable high/critical application issue was found in the source review. Dependency audits returned zero known advisories for 58 installed packages and for an independently resolved 83-package graph including optional engineering, OpenAI-client and Selenium dependencies.
 
-After upgrading, pip-audit reported **zero known advisories across 58 installed Python packages**. This result covers the audited environment, not every optional dependency, native runtime, or future dependency resolution. No new exploitable application-level high/critical issue was confirmed by the source review. The remaining trust and transport limitations below still apply.
+Permission setup previously parsed 55 manifests before every protected API request. Its measured warm median fell from 43.520 ms to 0.373 ms; catalog loading fell from 42.996 ms to 1.157 ms. These are API preparation measurements, not end-to-end model or voice latency. File changes still invalidate metadata immediately, and cached return values are isolated from callers.
 
-Python **3.10+ is now required** because the patched dependency releases no longer support Python 3.9. The package metadata, installer, documentation, and minimum-version CI job agree.
-
-## Scope and evidence
-
-Reviewed the Bash launcher, installers, tools and shared libraries; Python FastAPI server, Pilot, model clients, system controls and optional engineer entry point; browser JavaScript; dependency manifests; release configuration; and regression tests. Manual attention focused on authentication, same-origin restrictions, permissions, command execution, confirmation ownership, filesystem targets, downloads, and rendering untrusted text.
-
-Machine-readable results: [scan-results-2026-10-11.json](docs/security/scan-results-2026-10-11.json). Temporary build copies and raw validation logs were removed after the review; the recorded results remain available here and in the linked evidence file.
-
-- Bandit scanned 22 Python source files outside `tests/`: 0 high, 9 medium, 72 low heuristic findings after cleanup.
-- Ruff F401/F811/F821/F841 checks: no remaining findings in that source set.
-- Vulture: two intentionally retained adapter parameters (`wait_until`, `full_page`) required for browser API compatibility.
-- ShellCheck checked 80 Bash files: 0 errors, 53 existing warnings (27 SC2155, 8 SC2220, 18 SC2034). The modified installer, uninstaller, shared installer library, and lifecycle test have no warning-level findings.
-- A redacted scan for common private-key, GitHub, AWS, and provider-token patterns found no matches in repository text files. This was a pattern scan of tracked and nonignored files, not Git history or ignored personal configuration.
-- pip-audit: four advisories affecting two packages before upgrades; zero afterward. `pip check` also passed.
+Unused test imports and an unused module construction were removed. A stale terminal-clear test mock was corrected. The superseded October 11 scan artifact was replaced by [current machine-readable evidence](docs/security/scan-results-2026-10-16.json); historical evidence remains in Git history. Active runtime files, regression tests, benchmark baselines, configuration and the original logo remain useful and were retained.
 
 ## Fixed findings
 
-### SEC-2026-01 — High, conditional: vulnerable dependency releases
+### SEC-16-01 — Medium: missing policies left cached authority active
 
-Evidence: `pyproject.toml:34`, `pyproject.toml:39`, and `pilot/requirements.txt:17`.
+- Rule: FASTAPI-AUTHZ-001, fail-closed authorization.
+- Location: `api/server.py:184` and `api/server.py:188` (`_file_stamp`, `_get_policies`).
+- Evidence before the fix: the `except OSError` branch returned the previous `_policies` dictionary. Only floating-point modification time controlled reloads.
+- Impact: after an operator removed or made the policy file inaccessible, new requests could continue using the last loaded grants. Replacements preserving modification time could also leave obsolete grants active. This requires a local configuration change; it is not a demonstrated unauthenticated remote takeover.
+- Fix: clear grants when policy metadata or contents cannot be read. Check file identity, size, nanosecond modification/change times and policy path for reloads. Removal now denies permission checks and recreation recovers using the new grants.
+- Verification: `tests/test_api_metadata.py` covers missing/unreadable policies, recovery and replacement with preserved modification time. The existing API authorization and system-approval suites also passed.
 
-The installed `langgraph-sdk` 0.4.2 had an authorization-decorator advisory. Gathm does not use the affected LangGraph server authorization decorators, so this is an installed vulnerable dependency rather than a demonstrated bypass of Gathm's own API authorization. The minimum is now 0.4.4; the audited environment runs 0.4.6. See the [upstream authorization advisory](https://github.com/langchain-ai/langgraph/security/advisories/GHSA-fvww-7h3r-vfhp).
+### SEC-16-02 — Medium: predictable temporary outputs could follow planted paths
 
-The installed `urllib3` 2.7.0 had three advisories concerning chunked-response buffering, deflate decompression, and HTTPS proxy TLS handling. Malicious upstream responses could affect availability; proxy impact depends on configuration. The declared minimum and installed version are now 2.8.0. See the upstream advisories for [chunked responses](https://github.com/urllib3/urllib3/security/advisories/GHSA-vxq7-64xx-v4gw), [decompression](https://github.com/urllib3/urllib3/security/advisories/GHSA-gh4c-6fx4-qh6g), and [proxy TLS](https://github.com/urllib3/urllib3/security/advisories/GHSA-8988-9cw3-xx77).
+- Rule: secure temporary-file creation / filesystem integrity.
+- Locations: `install:1424`, `install:3302`, `tools/subdomains/subdomains:56`, `tools/pdchain/pdchain:200`.
+- Evidence before the fix: failed allocations fell back to PID-based or fixed filenames; the default chain directory used a domain and second-resolution timestamp under `/tmp`.
+- Impact: another local user able to plant a guessed path could influence output destinations or read output. The installer/subdomain fallbacks required `mktemp` failure; the default chain directory was predictable during normal execution. This is a local shared-directory attack surface.
+- Fix: fail when private allocation fails, use an exclusive randomized patch file in its destination directory, and create the default chain directory with `mktemp -d`. The subdomain response runs in a subshell so its EXIT cleanup retains access to the local filename and no longer needs duplicated cleanup code. Explicit `pdchain -o` destinations remain operator-selected output paths.
+- Verification: four isolated tool tests cover successful cleanup, distinct private directories and allocation failures. Installer lifecycle fixtures additionally verify that failed allocation starts no download and leaves source files untouched; all 16 fixture groups pass under modern Bash and macOS Bash 3.2.
 
-### SEC-2026-02 — Medium: wheels could include local environment files
+## Latency change and cache safety
 
-Evidence: `pyproject.toml:91`, `pyproject.toml:102`, `pyproject.toml:133`; regression: `tests/wheel_contents_test.py:1`.
+Evidence: `api/server.py:306`, `api/server.py:319`, `api/server.py:324`, `api/server.py:817`.
 
-Directory `force-include` copied local virtual environments despite global exclusions. A direct build from this checkout produced a 58,902,357-byte wheel with 3,309 unwanted entries. That behavior also risked including credentials placed inside a bundled directory; no actual credential disclosure was demonstrated.
+Authorization now uses live executable names without parsing tool manifests. Catalog parsing uses a bounded 256-entry cache keyed by file metadata. Each read checks the current file stamp; no time-based authorization or metadata TTL was introduced. Returned manifest dictionaries are deep copies, preventing one caller from modifying another caller's cached nested values. Explicit policy denies and confirmation requirements retain priority.
 
-Runtime directories now use normal selection and source-path mapping. Forced inclusion remains only for the three known root scripts. Explicit exclusions cover environments, caches, node_modules, `.env` variants, and tool-documentation screenshots. The same checkout now produces a 448,394-byte wheel with 162 entries. Required runtime files remain present. A dirty-fixture regression checks 14 required files and nine unwanted files, including credentials and virtual environments. Both wheel and source archive were inspected. See [Hatch's file-selection and path-mapping documentation](https://hatch.pypa.io/latest/config/build/).
+Ten metadata regressions verify isolation, edited/replaced/removed manifests, live tool additions/removals, no parsing during permission setup, path validation, and policy revocation. The 50-sample before/after comparison, method and limitations are in [the latency guide](docs/testing/latency.md#api-metadata-overhead--2026-10-16) and [raw measurements](docs/testing/api-overhead-2026-10-16.json).
 
-### SEC-2026-03 — Medium hardening: nested Docker credential files
+## Scan coverage and triage
 
-Evidence: `.dockerignore:6`, `.gitignore:5`.
+- Manual review focused on API authentication/origin checks, role propagation, job and approval ownership, shell/system execution, uploads/static serving, model-client requests, browser rendering/storage, installers, tool outputs, containers and package selection.
+- Bandit 1.9.4 checked **23 runtime Python files**, including the extensionless web-search entry point: **0 high, 10 medium, 72 low** findings.
+- The medium findings are eight B310 URL-opening heuristics for operator-selected model/benchmark endpoints or the fixed web-search provider; B104 on loopback display-address normalization; and B604 on a prompt-formatting `shell=` keyword, which does not launch a process. They were reviewed under the documented trusted-operator model; they are not ten confirmed exploitable vulnerabilities.
+- Ruff 0.17.1 checked **51 Python files** for F401/F811/F821/F841: **0 findings** after removing unused imports and the unused construction.
+- Vulture 2.16 flags two intentionally retained Selenium adapter parameters, `wait_until` and `full_page`, used for interface compatibility with callers.
+- ShellCheck 0.11.0 checked **80 Bash files**: **0 errors, 53 pre-existing warnings** (SC2155: 27, SC2220: 8, SC2034: 18). The changed installer/tool scripts and lifecycle test are clean at warning severity. Warnings were recorded, not broadly suppressed.
+- A redacted scan of repository text found **0 common credential-pattern matches**. It covers private-key headers, GitHub tokens, AWS access IDs and provider-token patterns, reporting locations only. Ignored personal configuration and historical Git objects were outside this scan.
+- pip-audit 2.10.1 returned **0 advisories and 0 skipped packages** for both the 58-package installed environment and the 83-package resolved optional graph. The latter combines Pilot, API, engineer, `langchain-openai` and Selenium requirements for this Mac/Python environment. No optional runtime was installed into Gathm for the audit. `pip check` passed.
 
-Nested `.env` and `.env.*` paths are explicitly excluded from Docker contexts, alongside dependency directories and caches. Git also ignores `.env` variants while allowing `.env.example`. Docker builds were not executed because the local Docker daemon was unavailable.
+Sources/methods: [Bandit](https://bandit.readthedocs.io/), [pip-audit](https://github.com/pypa/pip-audit), [Ruff](https://docs.astral.sh/ruff/), [ShellCheck](https://www.shellcheck.net/). Scanner counts and dependency versions are recorded in the linked evidence file.
 
-### SEC-2026-04 — Low: news feed used cleartext HTTP
+## Remaining security limitations
 
-Evidence: `tools/news/news:10`.
+### SEC-16-03 — Medium: upstream download provenance
 
-The default BBC RSS endpoint now uses HTTPS. The same provider's TLS endpoint was fetched and parsed successfully with 30 items. This removes the cleartext default without changing the service or output format.
+Evidence: `install:2135`, `install:2988`. Some runtime downloads and the Linux Ollama installer trust upstream HTTPS without independently pinned checksums/signatures. A compromised upstream account/release could execute code as the installing user. Custom audio downloads support `GATHM_AUDIOCPP_BIN_SHA256`; a complete signed/pinned release policy remains future work.
 
-### SEC-2026-05 — Cleanup and installer safety
+### SEC-16-04 — Medium: permitted tools are not OS-isolated
 
-Evidence: `pilot/tui.py:239`, `lib/install_common.bash:1`, `tests/install_lifecycle_test.sh:1`.
+Evidence: `lib/sysexec.py:431`, `pilot/browser.py:268`, [SECURITY.md](SECURITY.md). Approved commands, optional engineering code and permitted tools execute as the account running Gathm. Termux Selenium uses Chromium's `--no-sandbox`. Role controls and human approvals restrict dispatch but do not provide an operating-system sandbox for hostile code or untrusted multiuser operation.
 
-Removed unused Python imports, an unused API response fallback, and an unused packaging variable. Rich now clears the terminal directly instead of invoking a shell. The previous constant clear command was a scanner finding, not demonstrated input injection.
+### SEC-16-05 — Low: cleartext geolocation lookup
 
-Included the pending installer/uninstaller fixes: shared platform and ownership handling, isolated virtualenv repair without global-pip fallback, safe shortcut publication, preservation of foreign commands and shared data, noninteractive error handling, and an explicit dry-run/keep-data uninstall flow. Destructive tests run in temporary fixture homes; the real installation was not uninstalled.
+Evidence: `tools/geo/geo:79` and `tools/geo/tool.yaml:16`. The existing free `ip-api.com` provider uses HTTP. An on-path observer could see a lookup target or alter the public-data response. A provider change or confirmed HTTPS service is still needed; this review did not silently substitute an unverified endpoint.
 
-## Existing protections rechecked
-
-- API authentication, loopback Host/client restrictions, same-origin browser checks, permissions, and job ownership: `api/server.py:816` and the security/API regression suites.
-- System-control proposals require capability checks; confirmations consume an expiring, owner-bound, single-use random ticket: `api/server.py:1119`, `api/system_approvals.py:22`, `api/system_approvals.py:33`.
-- Typed operations revalidate the proposed action and target before execution: `lib/system_control.py:522`. Filesystem changes use platform-specific non-overwriting rename operations: `lib/system_control.py:568`.
-- Approval cards render values as text, keep tickets out of saved chat/model history, and cancel pending proposals when chat is cleared: `gui/system-controls.js:37`. Real-browser tests verified approval, cancellation, persistence, and streaming behavior without performing real system actions.
-
-## Remaining limitations and hardening work
-
-### SEC-2026-06 — Medium: download provenance
-
-Evidence: `install:2135`, `install:2988`.
-
-Some runtime downloads and the Linux Ollama installer still trust upstream HTTPS without independently pinned checksums or signatures. Compromise of an upstream release or delivery account could run code as the installing user. Custom audio downloads support `GATHM_AUDIOCPP_BIN_SHA256`. A broader signed/pinned release policy remains future work.
-
-### SEC-2026-07 — Medium: permitted tools run with the user's privileges
-
-Evidence: `lib/sysexec.py:431`, `pilot/browser.py:268`, and [SECURITY.md](SECURITY.md).
-
-Tool permission checks and explicit approvals are not operating-system isolation. Trusted administrators can enable shell execution or use the engineer; approved code runs as the current account. The Termux Selenium path also uses Chromium's `--no-sandbox`. Gathm should not be presented as a sandbox for hostile code or an untrusted multiuser service.
-
-### SEC-2026-08 — Low: geolocation still uses a cleartext provider endpoint
-
-Evidence: `tools/geo/geo:79`, `tools/geo/tool.yaml:16`.
-
-The existing `ip-api.com` endpoint uses HTTP, allowing an on-path observer to see the requested lookup and alter its public-data response. Provider migration or verified HTTPS support is still needed. It was not silently switched to a different service or an unverified paid endpoint.
-
-### Static-analysis triage
-
-The nine medium Bandit findings are seven `urlopen` calls using operator-configured model/benchmark endpoints (B310), wildcard-bind display-address normalization (B104), and the prompt-formatting keyword `shell=` (B604), which does not launch a process. They do not establish a new untrusted-input exploit under the documented local-operator trust model. Endpoint configuration and redirect restrictions could be tightened further if that model changes.
-
-Low findings primarily concern subprocess use, deliberate error recovery, and assertions. The remaining ShellCheck warnings were recorded, not globally suppressed. No claim is made that scanner silence would prove security.
-
-## Validation and practical limits
+## Validation and limits
 
 Passed locally on macOS:
 
-- 220 Python unit tests, plus the dedicated 17-test security suite and 344 shell-execution checks.
-- Packaging (104), llama.cpp runtime (63), launcher (61), and model-install fixture (55) checks.
-- Installer lifecycle: 15 fixture groups under Bash 5 and macOS Bash 3.2; runtime reuse (18) and virtualenv-layout (14) checks.
-- Remaining speech, routing, compact-output, connectivity, manifest, Markdown, VAD, and GUI unit suites.
-- 17 real Chromium streaming/approval checks. Model and speech services were deterministic stubs; no shutdown, restart, or other real system mutation was performed.
-- The real Mac `./install --check`, Bash syntax, targeted ShellCheck, and `git diff --check`.
-- Source archive and wheel builds, dirty-fixture packaging regression, and a fresh dependency-free wheel install with working `gathm --version` and `gathm --where`.
+- **234 Python unit tests**, including 14 new metadata/temporary-file tests.
+- Dedicated security (17), system execution (344), packaging (104), llama.cpp runtime (63), model installer (55), routing (95), manifest (55), speech and reply-stream suites.
+- Launcher (61), virtualenv layouts (14), network checks (6), compact output (14), runtime reuse (18), and installer lifecycle (16 groups under Bash 5 and macOS Bash 3.2).
+- All six JavaScript unit suites and **17 real Chromium streaming/approval checks** using deterministic local model/speech stubs.
+- Real Mac installer self-check, targeted ShellCheck, Bash syntax and whitespace checks.
+- Dirty-wheel fixture regression and inspected source/wheel builds, with no local virtualenvs, caches, dependency directories or `.env` variants included and all required runtime paths present.
 
-Initial loopback-server tests were blocked by the execution sandbox; reruns with local-server access passed. Fresh native Windows, Linux, and Android installations were not performed in this review. The workflow includes Linux/macOS checks and Windows installer fixtures; GitHub prevented those jobs from starting because the repository account was locked for billing. Optional engineer/browser/model native dependencies and historical Git secrets were not exhaustively audited. The superseded September review and its evidence remain available in Git history.
+Initial full-suite testing exposed an obsolete `tui.os.system` mock left by earlier cleanup; it now patches Rich's actual `console.clear` call, and the full suite was rerun successfully. No real system shutdown, restart or uninstall was performed. Native Android/Linux/Windows installs and real-device voice/model latency were not retested. Optional native dependencies were resolved for this host, not every supported platform. No penetration-test or zero-vulnerability guarantee is implied by the automated scans; the remaining limitations above still apply.

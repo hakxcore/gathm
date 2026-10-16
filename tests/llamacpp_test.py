@@ -13,7 +13,6 @@ config file said so.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from unittest.mock import patch

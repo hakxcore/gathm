@@ -8,11 +8,9 @@ Run: python -m pytest tests/test_core.py -v
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import unittest

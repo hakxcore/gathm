@@ -1,6 +1,5 @@
 """Assistant routing and human approval; models and OS adapters are mocked."""
 import importlib.util
-import io
 import os
 from pathlib import Path
 import sys

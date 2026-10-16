@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from copy import deepcopy
+from functools import lru_cache
 import hashlib
 import ipaddress
 from contextvars import ContextVar
@@ -176,16 +178,27 @@ def _load_yaml(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 _policies: dict = {}
-_policies_mtime: float = 0.0
+_policies_mtime = None
+
+
+def _file_stamp(path: Path) -> tuple:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 def _get_policies() -> dict:
     global _policies, _policies_mtime
     try:
-        mtime = POLICIES_FILE.stat().st_mtime
+        mtime = (str(POLICIES_FILE), _file_stamp(POLICIES_FILE))
     except OSError:
+        # A missing/unreadable policy must revoke cached permissions.
+        _policies, _policies_mtime = {}, None
         return _policies
     if mtime != _policies_mtime:
-        _policies = _load_yaml(POLICIES_FILE)
+        try:
+            _policies = _load_yaml(POLICIES_FILE)
+        except OSError:
+            _policies, _policies_mtime = {}, None
+            return _policies
         _policies_mtime = mtime
     return _policies
 
@@ -293,20 +306,36 @@ def valid_tool_name(name: str) -> bool:
 def load_tool_manifest(tool_name: str) -> dict:
     if not valid_tool_name(tool_name):
         return {}
-    return _load_yaml(TOOLS_DIR / tool_name / "tool.yaml")
+    path = TOOLS_DIR / tool_name / "tool.yaml"
+    try:
+        stamp = _file_stamp(path)
+    except OSError:
+        return {}
+    # No time-based staleness: edits and atomic replacements change the key.
+    # Callers may alter nested metadata without mutating the shared cache.
+    return deepcopy(_cached_tool_manifest(path, stamp))
+
+
+@lru_cache(maxsize=256)
+def _cached_tool_manifest(path: Path, stamp: tuple) -> dict:
+    return _load_yaml(path)
+
+
+def _tool_names() -> list[str]:
+    return sorted(tool.name for tool in TOOLS_DIR.iterdir()
+                  if tool.is_dir() and (tool / tool.name).is_file())
 
 def list_tools() -> list[dict]:
     tools = []
-    for tool_dir in sorted(TOOLS_DIR.iterdir()):
-        if tool_dir.is_dir() and (tool_dir / tool_dir.name).exists():
-            m = load_tool_manifest(tool_dir.name)
-            tools.append({
-                "name": tool_dir.name,
-                "description": m.get("description", "No description"),
-                "version": m.get("version", "unknown"),
-                "category": m.get("category", "unknown"),
-                "tags": m.get("tags", []),
-            })
+    for name in _tool_names():
+        m = load_tool_manifest(name)
+        tools.append({
+            "name": name,
+            "description": m.get("description", "No description"),
+            "version": m.get("version", "unknown"),
+            "category": m.get("category", "unknown"),
+            "tags": m.get("tags", []),
+        })
     return tools
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKJHABCDFG]')
@@ -786,7 +815,8 @@ def _is_loopback(host: str) -> bool:
 
 
 def _role_environment(role: str) -> dict:
-    allowed = {t["name"] for t in list_tools()}
+    # Authorization needs live executable names, not 55 parsed YAML documents.
+    allowed = set(_tool_names())
     if role_has_permission(role, "system:execute"):
         allowed.add("system")
     if role_has_permission(role, "system:control"):

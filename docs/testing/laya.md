@@ -6,7 +6,8 @@ Checked on 2026-10-01 in the macOS checkout using `pilot/venv/bin/python`.
 
 Laya is an optional routing benchmark in `bench/route_bench.py`. It is not used
 by live GUI or TUI conversations and is not an installation dependency.
-The GUI starts `pilot/chat_once.py`, which uses the same agent graph as the TUI.
+The GUI reuses `pilot/chat_once.py --worker` by default, which uses the same
+agent graph as the TUI. `GATHM_CHAT_WORKER=0` selects a fresh process per turn.
 That graph calls `_shortlist_tools()` and then the configured LLM in
 `pilot/main.py:call_model()`.
 
@@ -49,7 +50,8 @@ Include everyday conversation that needs no tool, multi-step requests, and
 conversation context in the evaluation; the current dataset selects a single
 tool per question.
 
-Live integration needs a persistent router or model service: starting a new
-Laya instance inside the GUI's per-turn `chat_once.py` process would repeatedly
-load weights. Preserve direct conversation, tool argument validation, approvals,
+Live integration should reuse a router in the existing assistant worker or a
+persistent model service. The worker can restart for owner or configuration
+changes; loading a new Laya instance for every question would repeatedly load
+weights. Preserve direct conversation, tool argument validation, approvals,
 and fallback to the configured LLM when routing is unavailable or uncertain.

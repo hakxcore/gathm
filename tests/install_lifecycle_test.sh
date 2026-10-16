@@ -244,6 +244,22 @@ windows_launchers() {
     assert test ! -e "$HOME/.local/bin/gathm"
     assert test ! -e "$HOME/.local/bin/gathm-agent"
 }
+private_temporary_failures() {
+    clear_fixture_home; fixture tempfiles
+    _llamacpp_release_asset() { printf 'https://invalid.test/archive.zip\ttest\n'; }
+    curl() { touch "$FIX/unwanted-download"; return 1; }
+    mktemp() { return 1; }
+    if _llamacpp_install_prebuilt linux; then exit 1; fi
+    assert test ! -e "$FIX/unwanted-download"
+    mkdir -p "$SCRIPT_DIR/external/sentencepiece/src"
+    local spm="$SCRIPT_DIR/external/sentencepiece/src/CMakeLists.txt"
+    printf 'add_library(sentencepiece-static STATIC source.cc)\n' > "$spm"
+    cp "$spm" "$FIX/cmake-before"
+    if _audiocpp_patch_termux_sentencepiece "$SCRIPT_DIR"; then exit 1; fi
+    assert cmp -s "$spm" "$FIX/cmake-before"
+    assert test ! -e "$spm.gathm.tmp"
+}
+run 'temporary allocation failures never use predictable fallback paths' private_temporary_failures
 run 'Windows launchers resolve the checkout without symlink privileges' windows_launchers
 run 'pipx setup preserves the package-managed launcher' pipx_shortcut
 run 'WSL uses its guest distro package manager' wsl_packages

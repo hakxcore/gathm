@@ -95,3 +95,45 @@ The latency numbers cover HTTP conversation on this Mac. They do not measure
 microphone-to-speaker latency, cold model loading, external tool services,
 Android/Termux, Linux, or Windows performance. Physical-device and other OS
 measurements remain necessary before claiming the same improvements there.
+
+## API metadata overhead — 2026-10-16
+
+A follow-up profile at `85b2efc` found that every protected API request parsed
+all 55 tool manifests to construct its permitted-tool names. That also delayed
+speech status and synthesis requests. Permission setup now discovers the live
+executable names directly. Catalog responses reuse parsed manifests, with file
+identity, size, modification time and change time checked on every lookup;
+edits and atomic replacements invalidate cached metadata immediately.
+
+On this Mac, using Python 3.14.7, 50 warm samples per function per version:
+
+| Operation | Before median | After median | Reduction |
+|---|---:|---:|---:|
+| Request permission setup (`_role_environment('admin')`) | 43.520 ms | 0.373 ms | 99.14% |
+| Tool catalog (`list_tools()`) | 42.996 ms | 1.157 ms | 97.31% |
+
+[Raw samples and measurement scope](api-overhead-2026-10-16.json) retain the
+before/after data. These numbers measure Python API preparation overhead;
+model generation, microphone capture, synthesis, networking, and cold imports
+are outside this comparison. No new end-to-end conversation or phone latency
+claim is inferred from them.
+
+To repeat, run the same snippet with each checkout's Pilot Python from its
+repository root:
+
+```python
+import statistics, time
+from api import server
+for name, operation in [('catalog', server.list_tools),
+                        ('permissions', lambda: server._role_environment('admin'))]:
+    operation()  # warm the cache
+    samples = []
+    for _ in range(50):
+        start = time.perf_counter_ns()
+        operation()
+        samples.append((time.perf_counter_ns() - start) / 1e6)
+    print(name, statistics.median(samples), 'ms')
+```
+
+Regression tests cover cache isolation, edits, replacements with preserved
+modification time, removal/recreation, tool discovery, and permission revocation.

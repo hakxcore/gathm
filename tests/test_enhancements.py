@@ -297,7 +297,6 @@ class TestEngineerModule(unittest.TestCase):
         engineer_path = PROJECT_ROOT / "engineer" / "main.py"
         spec = importlib.util.spec_from_file_location("engineer_main", engineer_path)
         self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
         # Don't exec - it requires autogen which may not be installed
         # Just check the file is valid Python
         self.assertIsNotNone(spec.loader)

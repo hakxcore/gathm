@@ -13,7 +13,6 @@ because from a checkout the file is right there on disk.
 from __future__ import annotations
 
 import os
-import stat
 import sys
 import tempfile
 

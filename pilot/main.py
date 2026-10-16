@@ -315,7 +315,7 @@ def print_tricolor_banner():
     backend_label = {"llamacpp": "LLAMA.CPP"}.get(LLM_BACKEND, LLM_BACKEND.upper())
     model_label = f"{OLLAMA_MODEL} [{backend_label}]"
     connectivity = current_connectivity()
-    # render_welcome handles os.system("clear") internally
+    # render_welcome clears the terminal through Rich.
     render_welcome(model_label, tool_count, plat, connectivity=connectivity)
     print_status_bar()
 

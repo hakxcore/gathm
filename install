@@ -1420,8 +1420,8 @@ _llamacpp_install_prebuilt() {
     info "Live progress follows. This is a download, not a hang."
     echo ""
 
-    local tmpdir; tmpdir=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/gathm-llamacpp-$$")
-    mkdir -p "$tmpdir" 2>/dev/null || true
+    local tmpdir
+    tmpdir=$(mktemp -d) || { warn "Cannot create a private download directory"; return 1; }
     local zip_path="$tmpdir/llamacpp.zip"
 
     if ! curl -fL --progress-bar -o "$zip_path" "$url"; then
@@ -3299,7 +3299,7 @@ _audiocpp_patch_termux_sentencepiece() {
     fi
 
     local tmp
-    tmp=$(mktemp 2>/dev/null) || tmp="$spm.gathm.tmp"
+    tmp=$(mktemp "${spm}.gathm.XXXXXX") || { warn "Cannot create a private patch file"; return 1; }
     # Insert immediately after the target is declared. Matching only up to
     # "STATIC" keeps this free of brace/dollar escaping for ${SPM_SRCS}.
     if awk -v ins="$line" '

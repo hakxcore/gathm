@@ -19,7 +19,7 @@ Description: Run chained recon workflow (subdomain -> dns/http probe -> optional
 Usage: pdchain [flags] [domain]
   [domain]         Root domain target
   -m <mode>        Workflow mode: passive | active | full (default: passive)
-  -o <dir>         Output directory (default: /tmp/gathm-pdchain-<domain>-<timestamp>)
+  -o <dir>         Output directory (default: private random directory under TMPDIR)
   -p <top_ports>   Top ports for naabu (default: $top_ports)
   -d <depth>       Crawl depth for katana (default: $crawl_depth)
   -s <severity>    Nuclei severities CSV (default: $nuclei_severity)
@@ -197,7 +197,10 @@ local_domain="$1"
 if [[ -z "$out_dir" ]]; then
   ts=$(date +%Y%m%d-%H%M%S)
   safe_domain=$(echo "$local_domain" | tr '/:' '__')
-  out_dir="/tmp/gathm-pdchain-${safe_domain}-${ts}"
+  out_dir=$(mktemp -d "${TMPDIR:-/tmp}/gathm-pdchain-${safe_domain}-${ts}.XXXXXX") || {
+    echo "Error: Cannot create a private output directory." >&2
+    exit 1
+  }
 fi
 mkdir -p "$out_dir"
 
